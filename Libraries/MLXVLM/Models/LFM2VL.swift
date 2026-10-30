@@ -1,291 +1,10 @@
-// Port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/lfm2_vl
+// Port of transformers' LFM2-VL (models/lfm2_vl, with the LFM2 text model from models/lfm2),
+// based on https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/lfm2_vl
 
-import CoreImage
 import Foundation
 import MLX
 import MLXLMCommon
 import MLXNN
-
-// MARK: - Vision
-
-private enum Vision {
-
-    fileprivate class Attention: Module {
-        let numHeads: Int
-        let scale: Float
-
-        @ModuleInfo(key: "q_proj") var qProj: Linear
-        @ModuleInfo(key: "k_proj") var kProj: Linear
-        @ModuleInfo(key: "v_proj") var vProj: Linear
-        @ModuleInfo(key: "out_proj") var outProj: Linear
-
-        init(dims: Int, numHeads: Int, bias: Bool = true) {
-            precondition(
-                dims % numHeads == 0,
-                "The input feature dimensions should be divisible by the number of heads")
-
-            self.numHeads = numHeads
-            let headDim = dims / numHeads
-            self.scale = pow(Float(headDim), -0.5)
-
-            self._qProj.wrappedValue = Linear(dims, dims, bias: bias)
-            self._kProj.wrappedValue = Linear(dims, dims, bias: bias)
-            self._vProj.wrappedValue = Linear(dims, dims, bias: bias)
-            self._outProj.wrappedValue = Linear(dims, dims, bias: bias)
-        }
-
-        func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil) -> MLXArray {
-            var queries = qProj(x)
-            var keys = kProj(x)
-            var values = vProj(x)
-
-            let (B, L, _) = (queries.dim(0), queries.dim(1), queries.dim(2))
-            let S = keys.dim(1)
-
-            queries = queries.reshaped(B, L, numHeads, -1).transposed(0, 2, 1, 3)
-            keys = keys.reshaped(B, S, numHeads, -1).transposed(0, 2, 1, 3)
-            values = values.reshaped(B, S, numHeads, -1).transposed(0, 2, 1, 3)
-
-            let output = MLXFast.scaledDotProductAttention(
-                queries: queries, keys: keys, values: values,
-                scale: scale,
-                mask: mask.map { .array($0) } ?? .none
-            )
-            .transposed(0, 2, 1, 3)
-            .reshaped(B, L, -1)
-
-            return outProj(output)
-        }
-    }
-
-    fileprivate class MLP: Module, UnaryLayer {
-        @ModuleInfo(key: "fc1") var fc1: Linear
-        @ModuleInfo(key: "fc2") var fc2: Linear
-
-        init(config: LFM2VLConfiguration.VisionConfiguration) {
-            self._fc1.wrappedValue = Linear(config.hiddenSize, config.intermediateSize, bias: true)
-            self._fc2.wrappedValue = Linear(config.intermediateSize, config.hiddenSize, bias: true)
-        }
-
-        func callAsFunction(_ x: MLXArray) -> MLXArray {
-            fc2(geluApproximate(fc1(x)))
-        }
-    }
-
-    fileprivate class EncoderLayer: Module {
-        let embedDim: Int
-        @ModuleInfo(key: "self_attn") var selfAttn: Attention
-        @ModuleInfo(key: "layer_norm1") var layerNorm1: LayerNorm
-        @ModuleInfo var mlp: MLP
-        @ModuleInfo(key: "layer_norm2") var layerNorm2: LayerNorm
-
-        init(config: LFM2VLConfiguration.VisionConfiguration) {
-            self.embedDim = config.hiddenSize
-
-            self._selfAttn.wrappedValue = Attention(
-                dims: config.hiddenSize, numHeads: config.numAttentionHeads, bias: true)
-            self._layerNorm1.wrappedValue = LayerNorm(
-                dimensions: embedDim, eps: config.layerNormEps)
-            self.mlp = MLP(config: config)
-            self._layerNorm2.wrappedValue = LayerNorm(
-                dimensions: embedDim, eps: config.layerNormEps)
-        }
-
-        func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil) -> MLXArray {
-            var r = selfAttn(layerNorm1(x), mask: mask)
-            var h = x + r
-            r = mlp(layerNorm2(h))
-            h = h + r
-            return h
-        }
-    }
-
-    fileprivate class Encoder: Module {
-        var layers: [EncoderLayer]
-
-        init(config: LFM2VLConfiguration.VisionConfiguration, visionFeatureLayer: Int = -1) {
-            // Determine how many layers to create
-            let numLayers: Int
-
-            // visionFeatureLayer == -1 means use all layers
-            // Other negative values are Python-style indices from the end (e.g., -2 = second to last)
-            if visionFeatureLayer == -1 {
-                numLayers = config.numHiddenLayers
-            } else {
-                // Convert negative indices to positive (e.g., -2 with 27 layers -> 25)
-                let actualLayer =
-                    visionFeatureLayer < 0
-                    ? config.numHiddenLayers + visionFeatureLayer
-                    : visionFeatureLayer
-
-                if actualLayer >= 0 && actualLayer < config.numHiddenLayers {
-                    numLayers = actualLayer + 1
-                } else {
-                    numLayers = config.numHiddenLayers
-                }
-            }
-            self.layers = (0 ..< numLayers).map { _ in EncoderLayer(config: config) }
-        }
-
-        func callAsFunction(_ x: MLXArray, outputHiddenStates: Bool = false, mask: MLXArray? = nil)
-            -> [MLXArray]?
-        {
-            var encoderStates: [MLXArray]? = outputHiddenStates ? [x] : nil
-
-            var h = x
-            for layer in layers {
-                h = layer(h, mask: mask)
-                if outputHiddenStates {
-                    encoderStates?.append(h)
-                }
-            }
-
-            return encoderStates
-        }
-    }
-
-    fileprivate class VisionEmbeddings: Module {
-        let config: LFM2VLConfiguration.VisionConfiguration
-        let embedDim: Int
-        let imageSize: Int
-        let patchSize: Int
-        let numPatches: Int
-        let positionEmbeddingSize: Int
-
-        @ModuleInfo(key: "patch_embedding") var patchEmbedding: Linear
-        @ModuleInfo(key: "position_embedding") var positionEmbedding: Embedding
-
-        init(config: LFM2VLConfiguration.VisionConfiguration) {
-            self.config = config
-            self.embedDim = config.hiddenSize
-            self.imageSize = config.imageSize
-            self.patchSize = config.patchSize
-            self.numPatches = config.numPatches
-            self.positionEmbeddingSize = Int(sqrt(Double(numPatches)))
-
-            self._patchEmbedding.wrappedValue = Linear(
-                config.numChannels * patchSize * patchSize,
-                embedDim
-            )
-            self._positionEmbedding.wrappedValue = Embedding(
-                embeddingCount: numPatches, dimensions: embedDim)
-        }
-
-        /// Resize positional embeddings using bicubic interpolation
-        static func resizePositionalEmbeddings(
-            positionalEmbeddings: MLXArray,
-            spatialShapes: MLXArray,
-            maxLength: Int
-        ) -> MLXArray {
-            let batchSize = spatialShapes.dim(0)
-            let srcH = positionalEmbeddings.dim(0)
-            let srcW = positionalEmbeddings.dim(1)
-            let embedDim = positionalEmbeddings.dim(-1)
-            let sourceDtype = positionalEmbeddings.dtype
-
-            let resultedPositionalEmbeddings = MLXArray.zeros(
-                [batchSize, maxLength, embedDim], dtype: sourceDtype)
-
-            // Reshape from [H, W, embedDim] to [1, embedDim, H, W] once before loop
-            let reshapedEmbeddings =
-                positionalEmbeddings
-                .transposed(2, 0, 1)
-                .reshaped(1, embedDim, srcH, srcW)
-
-            for i in 0 ..< batchSize {
-                let shape = spatialShapes[i]
-                let targetH = shape[0].item(Int.self)
-                let targetW = shape[1].item(Int.self)
-
-                // Bicubic interpolation
-                let interpolated = bicubicInterpolate(
-                    reshapedEmbeddings,
-                    size: (targetH, targetW)
-                )
-
-                // Reshape to [targetH * targetW, embedDim]
-                let resizedEmbeddings =
-                    interpolated
-                    .reshaped(embedDim, targetH * targetW)
-                    .transposed(1, 0)
-
-                let numPositions = targetH * targetW
-                resultedPositionalEmbeddings[i, 0 ..< numPositions] = resizedEmbeddings
-                // Fill remaining positions with the first embedding
-                if numPositions < maxLength {
-                    for j in numPositions ..< maxLength {
-                        resultedPositionalEmbeddings[i, j] = resizedEmbeddings[0]
-                    }
-                }
-            }
-
-            return resultedPositionalEmbeddings
-        }
-
-        func callAsFunction(_ pixelValues: MLXArray, spatialShapes: MLXArray) -> MLXArray {
-            let targetDtype = patchEmbedding.weight.dtype
-            let patchEmbeds = patchEmbedding(pixelValues.asType(targetDtype))
-
-            let positionalEmbeddings = positionEmbedding.weight.reshaped(
-                positionEmbeddingSize, positionEmbeddingSize, -1
-            )
-
-            let resizedPositionalEmbeddings = VisionEmbeddings.resizePositionalEmbeddings(
-                positionalEmbeddings: positionalEmbeddings,
-                spatialShapes: spatialShapes,
-                maxLength: pixelValues.dim(1)
-            )
-
-            let embeddings = patchEmbeds + resizedPositionalEmbeddings
-            return embeddings
-        }
-    }
-
-    fileprivate class VisionModel: Module {
-        let modelType: String
-
-        @ModuleInfo var embeddings: VisionEmbeddings
-        @ModuleInfo var encoder: Encoder
-        @ModuleInfo(key: "post_layernorm") var postLayernorm: LayerNorm
-
-        init(config: LFM2VLConfiguration.VisionConfiguration, visionFeatureLayer: Int = -1) {
-            self.modelType = config.modelType
-
-            self.embeddings = VisionEmbeddings(config: config)
-            self.encoder = Encoder(config: config, visionFeatureLayer: visionFeatureLayer)
-            self._postLayernorm.wrappedValue = LayerNorm(
-                dimensions: config.hiddenSize, eps: config.layerNormEps)
-        }
-
-        func callAsFunction(
-            _ x: MLXArray,
-            outputHiddenStates: Bool = false,
-            spatialShapes: MLXArray
-        ) -> (encoderOutputs: [MLXArray]?, embeddings: MLXArray, lastHiddenState: MLXArray) {
-            var embeds = embeddings(x, spatialShapes: spatialShapes)
-            embeds = embeds.asType(embeddings.patchEmbedding.weight.dtype)
-
-            let encoderOutputs = encoder(embeds, outputHiddenStates: outputHiddenStates, mask: nil)
-            let lastHiddenState = postLayernorm(encoderOutputs?.last ?? embeds)
-
-            return (encoderOutputs, embeds, lastHiddenState)
-        }
-
-        func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-            var sanitizedWeights = [String: MLXArray]()
-
-            for (k, v) in weights {
-                if k.contains("position_ids") {
-                    continue
-                } else {
-                    sanitizedWeights[k] = v
-                }
-            }
-
-            return sanitizedWeights
-        }
-    }
-}
 
 // MARK: - Language Model Components (LFM2)
 
@@ -598,15 +317,16 @@ private class Lfm2VlMultiModalProjector: Module, UnaryLayer {
             x = layerNorm(x)
         }
         x = linear1(x)
-        x = gelu(x)
+        x = gelu(x.asType(.float32)).asType(x.dtype)
         x = linear2(x)
         return x
     }
 }
 
-// MARK: - PixelUnshuffleBlock
-
-private class PixelUnshuffleBlock: Module, UnaryLayer {
+/// Space-to-depth over a `[N, W, H, C]` feature map, as `Lfm2VlMultiModalProjector.pixel_unshuffle`
+/// does. Odd sizes are zero padded, which transformers does not do; the processor never makes
+/// them.
+final class PixelUnshuffleBlock: Module, UnaryLayer {
     let factor: Int
 
     init(factor: Int) {
@@ -617,18 +337,14 @@ private class PixelUnshuffleBlock: Module, UnaryLayer {
         var x = x
         var (n, w, h, c) = (x.dim(0), x.dim(1), x.dim(2), x.dim(3))
 
-        // Pad width if necessary
         if w % factor != 0 {
-            let padW = factor - (w % factor)
-            let padding = MLXArray.zeros([n, padW, h, c], dtype: x.dtype)
+            let padding = MLXArray.zeros([n, factor - (w % factor), h, c], dtype: x.dtype)
             x = concatenated([x, padding], axis: 1)
             (n, w, h, c) = (x.dim(0), x.dim(1), x.dim(2), x.dim(3))
         }
 
-        // Pad height if necessary
         if h % factor != 0 {
-            let padH = factor - (h % factor)
-            let padding = MLXArray.zeros([n, w, padH, c], dtype: x.dtype)
+            let padding = MLXArray.zeros([n, w, factor - (h % factor), c], dtype: x.dtype)
             x = concatenated([x, padding], axis: 2)
             (n, w, h, c) = (x.dim(0), x.dim(1), x.dim(2), x.dim(3))
         }
@@ -636,9 +352,7 @@ private class PixelUnshuffleBlock: Module, UnaryLayer {
         x = x.reshaped(n, w, h / factor, c * factor)
         x = x.transposed(0, 2, 1, 3)
         x = x.reshaped(n, h / factor, w / factor, c * factor * factor)
-        x = x.transposed(0, 2, 1, 3)
-
-        return x
+        return x.transposed(0, 2, 1, 3)
     }
 }
 
@@ -647,6 +361,24 @@ private class PixelUnshuffleBlock: Module, UnaryLayer {
 /// LFM2 VL VLM `UserInputProcessor`.
 ///
 /// This is meant to be used with ``LFM2VL`` and is typically created by ``VLMModelFactory``.
+/// Images follow transformers' `Lfm2VlProcessor`: smart resize, or tiles plus a thumbnail,
+/// torchvision's antialiased resize on the decoded 8-bit pixels, and the image start, tile and
+/// end marker tokens.
+///
+/// `UserInput.Processing.resize` first fits each image in that size, keeping its aspect ratio, as
+/// `MediaProcessing.apply` does for other models. `ChatSession` passes 512 × 512 by default. Pass
+/// `processing: .init()` to read images at full size.
+///
+/// File images get their EXIF orientation. sRGB and untagged PNG, GIF, WebP, BMP and TIFF files
+/// decode to the same pixels as transformers' `load_image`, except 16-bit gray PNGs and
+/// transparent GIFs. RGB images with another colour profile are converted to sRGB, and a
+/// `CIImage` is read in its colour space. JPEG decodes through Core Image, within 4 levels of
+/// `load_image`, and HEIC through ImageIO. CMYK can be off by more than 100 levels.
+///
+/// An image that cannot be decoded or does not fit the vision tower throws
+/// `VLMError.imageProcessingFailure`. A count of `<image>` that does not match the images throws
+/// `VLMError.processing`, except that extra `<image>` outside user messages are read as text. A
+/// video also throws.
 public struct LFM2VLProcessor: UserInputProcessor {
     private let config: LFM2VLProcessorConfiguration
     private let tokenizer: any Tokenizer
@@ -656,172 +388,123 @@ public struct LFM2VLProcessor: UserInputProcessor {
         self.tokenizer = tokenizer
     }
 
-    /// Preprocess a single image
-    func preprocess(image: CIImage, targetSize: CGSize) -> CIImage {
-        image
-            .toSRGB()
-            .resampled(to: targetSize, method: .bicubic)
-            .normalized(mean: config.imageMeanTuple, std: config.imageStdTuple)
-    }
-
-    /// Split an image into patches
-    func splitIntoPatchesAndPreprocess(
-        image: CIImage,
-        processing: UserInput.Processing?
-    ) throws -> (pixels: MLXArray, spatialShape: (Int, Int), pixelAttentionMask: MLXArray) {
-        // Apply user processing if any
-        let image = MediaProcessing.apply(image, processing: processing)
-
-        // Get image dimensions
-        let width = Int(image.extent.width)
-        let height = Int(image.extent.height)
-
-        // Calculate tile dimensions
-        let tileSize = config.tileSize
-        let patchSize = config.encoderPatchSize
-
-        // Calculate number of tiles
-        let numTilesH = max(1, min(config.maxTiles, Int(ceil(Double(height) / Double(tileSize)))))
-        let numTilesW = max(1, min(config.maxTiles, Int(ceil(Double(width) / Double(tileSize)))))
-
-        // Calculate actual resize dimensions
-        let resizedHeight = numTilesH * tileSize
-        let resizedWidth = numTilesW * tileSize
-
-        // Resize the image
-        let resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
-        let resizedImage = image.toSRGB().resampled(to: resizedSize, method: .bicubic)
-
-        // Calculate patches per tile
-        let patchesPerTileH = tileSize / patchSize
-        let patchesPerTileW = tileSize / patchSize
-
-        // Total number of patches
-        let totalPatchesH = numTilesH * patchesPerTileH
-        let totalPatchesW = numTilesW * patchesPerTileW
-
-        // Convert to MLXArray and extract patches
-        let normalizedImage = resizedImage.normalized(
-            mean: config.imageMeanTuple, std: config.imageStdTuple)
-        var imageArray = MediaProcessing.asMLXArray(normalizedImage)  // [1, C, H, W]
-
-        // Reshape to extract patches: [1, C, H, W] -> [1, numPatches, patchSize*patchSize*C]
-        imageArray = imageArray.transposed(0, 2, 3, 1)  // [1, H, W, C]
-
-        // Extract patches
-        var patches = [MLXArray]()
-        for ph in 0 ..< totalPatchesH {
-            for pw in 0 ..< totalPatchesW {
-                let startH = ph * patchSize
-                let startW = pw * patchSize
-                let patch = imageArray[
-                    0, startH ..< (startH + patchSize), startW ..< (startW + patchSize), 0...]
-                patches.append(patch.flattened())
-            }
+    public func prepare(input: UserInput) async throws -> LMInput {
+        // transformers' `Lfm2VlProcessor` has no video input. Without this check the video would
+        // be dropped, and the LFM2.5-VL template would print its part as JSON.
+        guard input.videos.isEmpty else {
+            throw VLMError.processing("LFM2-VL does not accept video")
         }
 
-        let pixelValues = stacked(patches, axis: 0).expandedDimensions(axis: 0)  // [1, numPatches, patchDim]
-
-        // Create attention mask (all ones for valid patches)
-        let numPatches = totalPatchesH * totalPatchesW
-        let pixelAttentionMask = MLXArray.ones([1, numPatches]).asType(.int32)
-
-        return (pixelValues, (totalPatchesH, totalPatchesW), pixelAttentionMask)
-    }
-
-    public func prepare(input: UserInput) async throws -> LMInput {
         let messages = Qwen2VLMessageGenerator().generate(
             from: input.removingSpecialTokenLabels(using: tokenizer))
+        let promptTokens = try promptTokens(messages: messages, input: input)
 
-        var promptTokens = try tokenizer.applyChatTemplate(
-            messages: messages,
-            tools: input.tools,
-            additionalContext: input.additionalContext
-        )
-
-        // Text-only input
         if input.images.isEmpty {
+            let imageTokenId = tokenizer.convertTokenToId("<image>")
+            let count = promptTokens.filter { $0 == imageTokenId }.count
+            guard count == 0 else {
+                throw VLMError.processing(
+                    "The prompt has \(count) image placeholders but no images")
+            }
             return LMInput(tokens: MLXArray(promptTokens))
         }
 
-        // Process images
-        var allPixelValues = [MLXArray]()
-        var allSpatialShapes = [(Int, Int)]()
-        var allPixelAttentionMasks = [MLXArray]()
-
-        for imageInput in input.images {
-            let image = try imageInput.asCIImage()
-            let (pixels, spatialShape, pixelAttentionMask) = try splitIntoPatchesAndPreprocess(
-                image: image, processing: input.processing)
-            allPixelValues.append(pixels)
-            allSpatialShapes.append(spatialShape)
-            allPixelAttentionMasks.append(pixelAttentionMask)
+        // Settings are checked per call, as transformers checks them in `_preprocess`.
+        let settings = config.settings
+        let processing = try LFM2VLImageProcessing(settings: settings, tokenizer: tokenizer)
+        let resize = input.processing.resize
+        let (patches, tokenRuns) = try processing.process(input.images) {
+            let image = try OrientedImage($0)
+            guard let resize else { return image }
+            return try Self.fitted(image, in: resize, filter: settings.resample)
         }
+        let ids = try processing.expand(promptTokens, tokenRuns: tokenRuns)
 
-        // Calculate how many image tokens we need per image
-        let downsampleFactor = config.downsampleFactor
-        var totalImageTokens = 0
-        for shape in allSpatialShapes {
-            let h = shape.0 / downsampleFactor
-            let w = shape.1 / downsampleFactor
-            totalImageTokens += h * w
+        let promptArray = MLXArray(ids).expandedDimensions(axis: 0)
+        return LMInput(
+            text: .init(tokens: promptArray, mask: ones(like: promptArray).asType(.int8)),
+            image: LMInput.ProcessedImage(
+                pixels: patches.pixels,
+                frames: patches.spatialShapes.map { THW(1, $0.0, $0.1) })
+        )
+    }
+
+    /// `image` scaled to fit in `size`, as `MediaProcessing.apply` scales it.
+    private static func fitted(
+        _ image: OrientedImage, in size: CGSize, filter: ResampleFilter
+    ) throws -> OrientedImage {
+        let upright = CGSize(width: image.width, height: image.height)
+        let scale = MediaProcessing.bestFitScale(upright, in: size)
+        guard scale.isFinite, scale > 0 else {
+            throw VLMError.processing("resize must be a positive size, not \(size)")
         }
+        let fit = MediaProcessing.bestFit(upright, in: size)
+        let (width, height) = (max(1, Int(fit.width)), max(1, Int(fit.height)))
+        guard width != image.width || height != image.height else { return image }
+        return OrientedImage(image.resized(width: width, height: height, filter: filter))
+    }
 
-        // Replace image placeholder tokens with the correct count.
-        //
-        // The id is per-model, not per-family: 396 is LFM2-VL's, while
-        // LFM2.5-VL-3B declares 124907. Hardcoding it meant the expansion below
-        // scanned for a token the template never emitted, left the single
-        // placeholder in place, and the model then aborted the process in
-        // `mergeInputIdsWithImageFeatures` with "tokens: 1, features 1536".
-        // The vocabulary is the authority; the old constant stays as the
-        // fallback for a tokenizer with no `<image>` entry.
-        let imageTokenId = tokenizer.convertTokenToId("<image>") ?? 396
-        var newPromptTokens = [Int]()
-        var imageIdx = 0
-        var i = 0
-        while i < promptTokens.count {
-            if promptTokens[i] == imageTokenId {
-                // Count consecutive image tokens
-                var count = 0
-                while i + count < promptTokens.count && promptTokens[i + count] == imageTokenId {
-                    count += 1
-                }
-                // Replace with correct number for this image
-                if imageIdx < allSpatialShapes.count {
-                    let shape = allSpatialShapes[imageIdx]
-                    let h = shape.0 / downsampleFactor
-                    let w = shape.1 / downsampleFactor
-                    let numTokens = h * w
-                    for _ in 0 ..< numTokens {
-                        newPromptTokens.append(imageTokenId)
-                    }
-                    imageIdx += 1
-                }
-                i += count
-            } else {
-                newPromptTokens.append(promptTokens[i])
-                i += 1
+    /// The chat template's token ids. When the prompt has more `<image>` than images, those
+    /// typed in system, assistant and tool messages or in tool specs are written as text
+    /// tokens, so a reply that holds `<image>` does not break the turns after it.
+    private func promptTokens(messages: [MLXLMCommon.Message], input: UserInput) throws -> [Int] {
+        func render(_ messages: [MLXLMCommon.Message], tools: [ToolSpec]?) throws -> [Int] {
+            try tokenizer.applyChatTemplate(
+                messages: messages, tools: tools, additionalContext: input.additionalContext)
+        }
+        let tokens = try render(messages, tools: input.tools)
+        let marker = "<|image_start|>"
+        guard let imageId = tokenizer.convertTokenToId("<image>"),
+            tokens.count(where: { $0 == imageId }) > input.images.count,
+            let markerId = tokenizer.convertTokenToId(marker)
+        else { return tokens }
+
+        // Render again with those `<image>` swapped for another single token. The ids that
+        // change are the typed ones. Match code units, as the tokenizer does.
+        var typed = false
+        func swappedText(_ text: String) -> String {
+            guard text.range(of: "<image>", options: .literal) != nil else { return text }
+            typed = true
+            return text.replacingOccurrences(of: "<image>", with: marker, options: .literal)
+        }
+        func swappedValue(_ value: any Sendable) -> any Sendable {
+            switch value {
+            case let text as String: return swappedText(text)
+            case let parts as [[String: String]]: return parts.map { $0.mapValues(swappedText) }
+            case let items as [any Sendable]: return items.map(swappedValue)
+            case let fields as [String: any Sendable]: return fields.mapValues(swappedValue)
+            default: return value
             }
         }
-        promptTokens = newPromptTokens
-
-        // Concatenate all image data
-        let pixelValuesConcatenated = concatenated(allPixelValues, axis: 0)
-
-        // Convert spatial shapes to THW format (t=1 for images)
-        let frames = allSpatialShapes.map { THW(1, $0.0, $0.1) }
-
-        let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-        let mask = ones(like: promptArray).asType(.int8)
-
-        return LMInput(
-            text: .init(tokens: promptArray, mask: mask),
-            image: LMInput.ProcessedImage(
-                pixels: pixelValuesConcatenated,
-                frames: frames
-            )
-        )
+        let swapped = messages.map { (message: MLXLMCommon.Message) -> MLXLMCommon.Message in
+            message["role"] as? String == "user" ? message : message.mapValues(swappedValue)
+        }
+        let swappedTools = input.tools?.map { (tool: ToolSpec) -> ToolSpec in
+            tool.mapValues(swappedValue)
+        }
+        // Left as placeholders when the second render fails, or it or the text tokens do not
+        // line up.
+        guard typed, let swappedTokens = try? render(swapped, tools: swappedTools) else {
+            return tokens
+        }
+        let text =
+            tokenizer.encode(text: "<", addSpecialTokens: false)
+            + tokenizer.encode(text: "image>", addSpecialTokens: false)
+        guard swappedTokens.count == tokens.count, !text.contains(imageId),
+            tokenizer.decode(tokenIds: text, skipSpecialTokens: false) == "<image>"
+        else { return tokens }
+        var ids: [Int] = []
+        ids.reserveCapacity(tokens.count)
+        for (id, swappedId) in zip(tokens, swappedTokens) {
+            if id == swappedId {
+                ids.append(id)
+            } else if id == imageId && swappedId == markerId {
+                ids += text
+            } else {
+                return tokens
+            }
+        }
+        return ids
     }
 }
 
@@ -832,7 +515,7 @@ public struct LFM2VLProcessor: UserInputProcessor {
 /// This is typically created by ``VLMModelFactory``.
 public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
 
-    @ModuleInfo(key: "vision_tower") private var visionModel: Vision.VisionModel
+    @ModuleInfo(key: "vision_tower") private var visionModel: Siglip2NaFlex.VisionModel
     @ModuleInfo(key: "multi_modal_projector") private var multiModalProjector:
         Lfm2VlMultiModalProjector
     @ModuleInfo(key: "language_model") private var languageModel: Language.LanguageModel
@@ -850,10 +533,9 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
     public init(_ config: LFM2VLConfiguration) {
         self.config = config
 
-        self._visionModel.wrappedValue = Vision.VisionModel(
-            config: config.visionConfiguration,
-            visionFeatureLayer: config.visionFeatureLayer
-        )
+        self._visionModel.wrappedValue = Siglip2NaFlex.VisionModel(
+            Siglip2NaFlex.Configuration(
+                config.visionConfiguration, visionFeatureLayer: config.visionFeatureLayer))
 
         if config.downsampleFactor > 1 {
             self._pixelUnshuffle.wrappedValue = PixelUnshuffleBlock(factor: config.downsampleFactor)
@@ -864,183 +546,38 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
             config.textConfiguration, tieWordEmbeddings: config.tieWordEmbeddings)
     }
 
-    private func getInputEmbeddings(
-        inputIds: MLXArray,
-        pixelValues: MLXArray?,
-        spatialShapes: MLXArray?,
-        pixelAttentionMask: MLXArray?
-    ) throws -> MLXArray {
-        // Ensure inputIds has batch dimension
-        var batchedInputIds = inputIds
-        if inputIds.ndim == 1 {
-            batchedInputIds = inputIds.expandedDimensions(axis: 0)
-        }
-
-        var inputsEmbeds = languageModel.model.embedTokens(batchedInputIds)
-
-        // Ensure embeddings have batch dimension
-        if inputsEmbeds.ndim == 2 {
-            inputsEmbeds = inputsEmbeds.expandedDimensions(axis: 0)
-        }
-
-        guard let pixelValues, let spatialShapes, let pixelAttentionMask else {
-            return inputsEmbeds
-        }
-
-        // Get the output hidden states from the vision model
-        let visionOutput = visionModel(
-            pixelValues, outputHiddenStates: true, spatialShapes: spatialShapes)
-        let hiddenStates = visionOutput.lastHiddenState
-
-        // Get feature lengths from attention mask
-        let imgFeatureLengths = sum(pixelAttentionMask, axis: 1)
-
-        var imageFeatures = [MLXArray]()
-
-        for imgIdx in 0 ..< hiddenStates.dim(0) {
-            var feature = hiddenStates[imgIdx]
-            let featureLength = imgFeatureLengths[imgIdx].item(Int.self)
-
-            // Slice to valid features
-            feature = feature[0 ..< featureLength].expandedDimensions(axis: 0)
-
-            // Get spatial dimensions
-            let featureOrgH = spatialShapes[imgIdx, 0].item(Int.self)
-            let featureOrgW = spatialShapes[imgIdx, 1].item(Int.self)
-
-            // Reshape to spatial dimensions
-            feature = feature.reshaped(1, featureOrgH, featureOrgW, -1)
-
-            // Apply pixel unshuffle if configured
-            if let pixelUnshuffle {
-                feature = pixelUnshuffle(feature)
-            }
-
-            // Project to language model dimension
-            var imgEmbedding = multiModalProjector(feature)
-
-            // Flatten back
-            imgEmbedding = imgEmbedding.reshaped(-1, imgEmbedding.dim(-1))
-            imageFeatures.append(imgEmbedding)
-        }
-
-        let concatenatedImageFeatures = concatenated(imageFeatures, axis: 0)
-
-        // Merge image features with text embeddings
-        return try mergeInputIdsWithImageFeatures(
-            imageFeatures: concatenatedImageFeatures,
-            inputsEmbeds: inputsEmbeds,
-            inputIds: inputIds,
-            imageTokenIndex: config.imageTokenIndex
-        )
-    }
-
-    private func mergeInputIdsWithImageFeatures(
-        imageFeatures: MLXArray,
-        inputsEmbeds: MLXArray,
-        inputIds: MLXArray,
-        imageTokenIndex: Int
-    ) throws -> MLXArray {
-        // Find image token positions
-        var imageIndices = [Int]()
-        for (i, v) in inputIds.flattened().asArray(Int.self).enumerated() {
-            if v == imageTokenIndex {
-                imageIndices.append(i)
-            }
-        }
-
-        let nImageFeatures = imageFeatures.dim(0)
-        if imageIndices.count != nImageFeatures {
-            throw VLMError.processing(
-                "Image features and image tokens do not match: tokens: \(imageIndices.count), features \(nImageFeatures)"
-            )
-        }
-
-        // Make sure shapes match before assignment
-        var result = inputsEmbeds
-        if result.ndim == 2 {
-            result = result.expandedDimensions(axis: 0)
-        }
-
-        // Assign image features to the image token positions
-        if imageFeatures.ndim == 2 {
-            let reshapedFeatures = imageFeatures.expandedDimensions(axis: 0)
-            result[0..., MLXArray(imageIndices), 0...] = reshapedFeatures
-        } else {
-            result[0..., MLXArray(imageIndices), 0...] = imageFeatures
-        }
-
-        return result
-    }
-
     public func prepare(
         _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, prefill: PrefillParameters
     ) throws
         -> PrepareResult
     {
-        let dtype = visionModel.embeddings.patchEmbedding.weight.dtype
-
-        // Get image data if available
-        let pixelValues = input.image?.pixels.asType(dtype)
-
-        var spatialShapes: MLXArray? = nil
-        var pixelAttentionMask: MLXArray? = nil
-
-        if pixelValues != nil, let frames = input.image?.frames, !frames.isEmpty {
-            // Extract spatial shapes from frames (THW format where t=1 for images)
-
-            // Convert frames to spatial shapes array [numImages, 2]
-            let shapeArrays = frames.map { MLXArray([$0.h, $0.w]) }
-            spatialShapes = stacked(shapeArrays, axis: 0)
-
-            // Create attention mask based on actual feature lengths per image
-            var maskArrays = [MLXArray]()
-            for frame in frames {
-                let numPatches = frame.h * frame.w
-                let imageMask = MLXArray.ones([numPatches]).asType(.int32)
-                maskArrays.append(imageMask)
-            }
-            // Stack masks - for now assuming single batch processing
-            if maskArrays.count == 1 {
-                pixelAttentionMask = maskArrays[0].expandedDimensions(axis: 0)
+        var features: MLXArray? = nil
+        if let pixels = input.image?.pixels {
+            let spatialShapes: [(Int, Int)]
+            if let frames = input.image?.frames, !frames.isEmpty {
+                spatialShapes = frames.map { ($0.h, $0.w) }
             } else {
-                // For multiple images, we need to pad to max length
-                let maxLen = maskArrays.map { $0.dim(0) }.max() ?? 0
-                let paddedMasks = maskArrays.map { mask -> MLXArray in
-                    if mask.dim(0) < maxLen {
-                        let padding = MLXArray.zeros([maxLen - mask.dim(0)]).asType(.int32)
-                        return concatenated([mask, padding], axis: 0)
-                    }
-                    return mask
-                }
-                pixelAttentionMask = stacked(paddedMasks, axis: 0)
+                // No frames: assume one square view per row.
+                let side = Int(Double(pixels.dim(1)).squareRoot())
+                spatialShapes = Array(repeating: (side, side), count: pixels.dim(0))
             }
-        } else if let pixels = pixelValues {
-            // Fallback: infer spatial shapes from pixel dimensions (assumes square)
-            let numPatches = pixels.dim(1)
-            let side = Int(sqrt(Double(numPatches)))
-            spatialShapes = MLXArray([side, side]).expandedDimensions(axis: 0)
-            pixelAttentionMask = MLXArray.ones([1, numPatches]).asType(.int32)
+            features = imageFeatures(pixels: pixels, spatialShapes: spatialShapes)
         }
 
-        let inputEmbeddings = try getInputEmbeddings(
-            inputIds: input.text.tokens,
-            pixelValues: pixelValues,
-            spatialShapes: spatialShapes,
-            pixelAttentionMask: pixelAttentionMask
-        )
+        let embeddings = try inputEmbeddings(
+            tokens: input.text.tokens, imageFeatures: features)
 
         let result = try withPreparedCache(cache, lengths: input.text.sequenceLengths) {
-            let totalPositions = inputEmbeddings.dim(1)
+            let totalPositions = embeddings.dim(1)
             let processed = try prefill.forEachChunk(total: totalPositions) { range in
                 _ = languageModel(
-                    nil, cache: cache, inputsEmbeds: inputEmbeddings[0..., range, 0...])
+                    nil, cache: cache, inputsEmbeds: embeddings[0..., range, 0...])
                 asyncEval(cache)
             }
             if processed > 0 { eval(cache) }
 
             let result = languageModel(
-                nil, cache: cache, inputsEmbeds: inputEmbeddings[0..., processed..., 0...])
+                nil, cache: cache, inputsEmbeds: embeddings[0..., processed..., 0...])
             prefill.progress?(totalPositions, totalPositions)
             return result
         }
@@ -1088,6 +625,12 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
         var sanitizedWeights = [String: MLXArray]()
         for (k, v) in weights {
             let newKey = transformKey(k)
+            if newKey.contains("position_ids")
+                || (!config.projectorUseLayernorm
+                    && newKey.hasPrefix("multi_modal_projector.layer_norm."))
+            {
+                continue
+            }
 
             // Handle conv weight transposition
             var value = v
@@ -1112,6 +655,69 @@ public class LFM2VL: Module, VLMModel, KVCacheDimensionProvider {
                 MambaCache()
             }
         }
+    }
+}
+
+// MARK: - Image features
+
+extension LFM2VL {
+    /// Vision features per view, already projected: `[Nimage, hidden]`. Port of `encode_images`.
+    /// `pixels` may be padded past each view's `h * w` patches; the padding is not read.
+    func imageFeatures(pixels: MLXArray, spatialShapes: [(Int, Int)]) -> MLXArray {
+        let states = visionModel.viewStates(pixels, spatialShapes: spatialShapes)
+        let features = zip(states, spatialShapes).map { (state, shape) -> MLXArray in
+            let (h, w) = shape
+            var feature = state.reshaped(1, h, w, -1)
+            if let pixelUnshuffle {
+                feature = pixelUnshuffle(feature)
+            }
+            let projected = multiModalProjector(feature)
+            return projected.reshaped(-1, projected.dim(-1))
+        }
+        return concatenated(features, axis: 0)
+    }
+
+    /// Token embeddings with image features scattered at `image_token_id`: `[B, L, hidden]`.
+    /// Features fill the image tokens in row-major order, as `masked_scatter` does.
+    /// Throws when the number of image tokens and feature rows differ.
+    func inputEmbeddings(tokens: MLXArray, imageFeatures: MLXArray?) throws -> MLXArray {
+        let ids = tokens.ndim == 1 ? tokens.expandedDimensions(axis: 0) : tokens
+        let embeddings = languageModel.model.embedTokens(ids)
+        guard let imageFeatures else { return embeddings }
+
+        let flat = ids.flattened().asArray(Int.self)
+        let positions = flat.indices.filter { flat[$0] == config.imageTokenIndex }
+        guard positions.count == imageFeatures.dim(0) else {
+            throw VLMError.processing(
+                "Image features and image tokens do not match: tokens: \(positions.count), features \(imageFeatures.dim(0))"
+            )
+        }
+        guard !positions.isEmpty else { return embeddings }
+
+        let rows = embeddings.reshaped(-1, embeddings.dim(-1))
+        rows[MLXArray(positions.map { Int32($0) })] = imageFeatures.asType(rows.dtype)
+        return rows.reshaped(embeddings.shape)
+    }
+}
+
+extension Siglip2NaFlex.Configuration {
+    /// The LFM2-VL tower, truncated after `visionFeatureLayer` unless it is -1.
+    init(_ vision: LFM2VLConfiguration.VisionConfiguration, visionFeatureLayer: Int) {
+        var layers = vision.numHiddenLayers
+        if visionFeatureLayer != -1 {
+            let index =
+                visionFeatureLayer < 0
+                ? vision.numHiddenLayers + visionFeatureLayer
+                : visionFeatureLayer
+            if index >= 0 && index < vision.numHiddenLayers {
+                layers = index + 1
+            }
+        }
+        self.init(
+            hiddenSize: vision.hiddenSize, intermediateSize: vision.intermediateSize,
+            numHiddenLayers: layers, numAttentionHeads: vision.numAttentionHeads,
+            numChannels: vision.numChannels, numPatches: vision.numPatches,
+            patchSize: vision.patchSize, layerNormEps: vision.layerNormEps)
     }
 }
 
@@ -1224,6 +830,7 @@ public struct LFM2VLConfiguration: Codable, Sendable {
         private let _numChannels: Int?
         public var numChannels: Int { _numChannels ?? 3 }
         private let _imageSize: Int?
+        /// `image_size` from config.json. The tower does not use it.
         public var imageSize: Int { _imageSize ?? 224 }
         private let _patchSize: Int?
         public var patchSize: Int { _patchSize ?? 16 }
@@ -1263,16 +870,22 @@ public struct LFM2VLConfiguration: Codable, Sendable {
     /// Which vision encoder layer to use for features. -1 means use all layers (default).
     public var visionFeatureLayer: Int { _visionFeatureLayer ?? -1 }
     private let _doImageSplitting: Bool?
+    /// `do_image_splitting` from config.json; the processor does not read it.
     public var doImageSplitting: Bool { _doImageSplitting ?? true }
     private let _maxImageTokens: Int?
+    /// `max_image_tokens` from config.json; the processor does not read it.
     public var maxImageTokens: Int { _maxImageTokens ?? 256 }
     private let _maxNumPatches: Int?
+    /// `max_num_patches` from config.json; the processor does not read it.
     public var maxNumPatches: Int { _maxNumPatches ?? 1024 }
     private let _minImageTokens: Int?
+    /// `min_image_tokens` from config.json; the processor does not read it.
     public var minImageTokens: Int { _minImageTokens ?? 64 }
     private let _minTiles: Int?
+    /// `min_tiles` from config.json; the processor does not read it.
     public var minTiles: Int { _minTiles ?? 2 }
     private let _useThumbnail: Bool?
+    /// `use_thumbnail` from config.json; the processor does not read it.
     public var useThumbnail: Bool { _useThumbnail ?? false }
     private let _tieWordEmbeddings: Bool?
     private let _tieEmbedding: Bool?
@@ -1303,42 +916,54 @@ public struct LFM2VLConfiguration: Codable, Sendable {
     }
 }
 
-/// Configuration for ``LFM2VLProcessor``
+/// Configuration for ``LFM2VLProcessor``.
+///
+/// Decodes the image processor settings, flat or nested under `image_processor`.
+/// ``VLMModelFactory`` reads them as mlx-vlm does: `processor_config.json` overrides
+/// `preprocessor_config.json`, a missing `resample` is bicubic, and the tiling settings
+/// (`do_image_splitting`, `min_tiles`, `max_tiles`, `use_thumbnail`) keep their defaults.
 public struct LFM2VLProcessorConfiguration: Codable, Sendable {
-    // Fields at top level (matching typical preprocessor_config.json structure)
-    private let _imageMean: [CGFloat]?
-    private let _imageStd: [CGFloat]?
-    private let _tileSize: Int?
-    private let _encoderPatchSize: Int?
-    private let _maxTiles: Int?
-    private let _downsampleFactor: Int?
+    let settings: LFM2VLImageSettings
 
-    // Default values matching LFM2 VL models
-    public var imageMean: [CGFloat] {
-        _imageMean ?? [0.5, 0.5, 0.5]
+    init(settings: LFM2VLImageSettings) {
+        self.settings = settings
     }
-    public var imageStd: [CGFloat] {
-        _imageStd ?? [0.5, 0.5, 0.5]
-    }
-    public var tileSize: Int { _tileSize ?? 512 }
-    public var encoderPatchSize: Int { _encoderPatchSize ?? 16 }
-    public var maxTiles: Int { _maxTiles ?? 10 }
-    public var downsampleFactor: Int { _downsampleFactor ?? 2 }
 
+    /// `image_mean`, one value per channel. Kept for compatibility.
+    public var imageMean: [CGFloat] { Self.channels(settings.imageMean) }
+    /// `image_std`, one value per channel. Kept for compatibility.
+    public var imageStd: [CGFloat] { Self.channels(settings.imageStd) }
+    /// `tile_size`. Kept for compatibility.
+    public var tileSize: Int { settings.tileSize }
+    /// `encoder_patch_size`. Kept for compatibility.
+    public var encoderPatchSize: Int { settings.encoderPatchSize }
+    /// `max_tiles`. Kept for compatibility.
+    public var maxTiles: Int { settings.maxTiles }
+    /// `downsample_factor`. Kept for compatibility.
+    public var downsampleFactor: Int { settings.downsampleFactor }
+
+    /// ``imageMean`` as a tuple. Kept for compatibility.
     public var imageMeanTuple: (CGFloat, CGFloat, CGFloat) {
         (imageMean[0], imageMean[1], imageMean[2])
     }
+    /// ``imageStd`` as a tuple. Kept for compatibility.
     public var imageStdTuple: (CGFloat, CGFloat, CGFloat) {
         (imageStd[0], imageStd[1], imageStd[2])
     }
 
-    enum CodingKeys: String, CodingKey {
-        case _imageMean = "image_mean"
-        case _imageStd = "image_std"
-        case _tileSize = "tile_size"
-        case _encoderPatchSize = "encoder_patch_size"
-        case _maxTiles = "max_tiles"
-        case _downsampleFactor = "downsample_factor"
+    /// One value per RGB channel; a single value applies to all three.
+    private static func channels(_ values: [Double]) -> [CGFloat] {
+        let values = values.map { CGFloat($0) }
+        return values.count == 1 ? Array(repeating: values[0], count: 3) : values
+    }
+
+    public init(from decoder: any Decoder) throws {
+        settings = try LFM2VLImageSettings(from: decoder)
+    }
+
+    /// Writes the settings flat, in the form ``init(from:)`` reads back.
+    public func encode(to encoder: any Encoder) throws {
+        try settings.encode(to: encoder)
     }
 }
 
