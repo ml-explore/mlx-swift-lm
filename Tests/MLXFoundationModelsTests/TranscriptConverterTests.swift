@@ -18,8 +18,113 @@ private struct StructuredWeatherToolResult {
     var condition: String
 }
 
+@available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+@Generable
+private struct SchemaPromptItem {
+    @Guide(description: "The label shown to shoppers on the price tag")
+    var tagLabel: String
+}
+
 @Suite
 struct TranscriptConverterTests {
+
+    @Test
+    func testInliningSchemaWithoutSchemaLeavesMessagesUnchanged() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let input: [Chat.Message] = [.system("Be brief."), .user("Hi")]
+        let output = TranscriptConverter.messages(input, inliningSchemaJSON: nil)
+
+        #expect(output.map(\.role) == input.map(\.role))
+        #expect(output.map(\.content) == input.map(\.content))
+    }
+
+    @Test
+    func testInliningSchemaAppendsToLeadingSystemMessage() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let input: [Chat.Message] = [.system("Be brief."), .user("Hi")]
+        let output = TranscriptConverter.messages(
+            input, inliningSchemaJSON: "{\"type\":\"object\"}")
+
+        #expect(output.count == 2)
+        #expect(output.filter { $0.role == .system }.count == 1)
+        #expect(output[0].content.hasPrefix("Be brief.\n\n"))
+        #expect(output[0].content.contains("{\"type\":\"object\"}"))
+        #expect(output[1].role == .user)
+        #expect(output[1].content == "Hi")
+    }
+
+    @Test
+    func testInliningSchemaInsertsSystemMessageWhenNoneExists() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let input: [Chat.Message] = [.user("Hi")]
+        let output = TranscriptConverter.messages(
+            input, inliningSchemaJSON: "{\"type\":\"object\"}")
+
+        #expect(output.count == 2)
+        #expect(output[0].role == .system)
+        #expect(output[0].content.contains("{\"type\":\"object\"}"))
+        #expect(output[1].role == .user)
+        #expect(output[1].content == "Hi")
+    }
+
+    @Test
+    func testInlinedSchemaCarriesGuideDescriptions() throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let json = try SchemaConverter.encodeToJSON(SchemaPromptItem.generationSchema)
+        let output = TranscriptConverter.messages([.user("Hi")], inliningSchemaJSON: json)
+
+        #expect(output[0].role == .system)
+        #expect(output[0].content.contains("The label shown to shoppers on the price tag"))
+    }
+
+    @Test(arguments: [(nil as Bool?, true), (true as Bool?, true), (false as Bool?, false)])
+    func testSchemaJSONForPromptHonorsIncludeFlag(flag: Bool?, included: Bool) {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let result = TranscriptConverter.schemaJSONForPrompt("{}", includeSchemaInPrompt: flag)
+        #expect((result != nil) == included)
+        #expect(TranscriptConverter.schemaJSONForPrompt(nil, includeSchemaInPrompt: flag) == nil)
+    }
+
+    @Test
+    func testPromptMessagesAddSchemaOnlyForGuidedGeneration() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let collected: [Chat.Message] = [.system("Be brief."), .user("Hi")]
+        let prompts = TranscriptConverter.promptMessages(
+            collected, schemaJSON: "{\"type\":\"object\"}", includeSchemaInPrompt: nil)
+
+        #expect(prompts.withoutSchema.map(\.content) == collected.map(\.content))
+        #expect(prompts.withSchema[0].content.contains("{\"type\":\"object\"}"))
+    }
+
+    @Test
+    func testPromptMessagesWithSchemaOptOutMatchCollected() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let collected: [Chat.Message] = [.user("Hi")]
+        let prompts = TranscriptConverter.promptMessages(
+            collected, schemaJSON: "{}", includeSchemaInPrompt: false)
+
+        #expect(prompts.withSchema.map(\.content) == collected.map(\.content))
+        #expect(prompts.withoutSchema.map(\.content) == collected.map(\.content))
+    }
+
+    @Test
+    func testPromptMessagesWithoutSchemaMatchCollected() {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let collected: [Chat.Message] = [.user("Hi")]
+        let prompts = TranscriptConverter.promptMessages(
+            collected, schemaJSON: nil, includeSchemaInPrompt: nil)
+
+        #expect(prompts.withSchema.map(\.content) == collected.map(\.content))
+        #expect(prompts.withoutSchema.map(\.content) == collected.map(\.content))
+    }
 
     @Test
     func testConvertInstructionsToSystemMessage() throws {
