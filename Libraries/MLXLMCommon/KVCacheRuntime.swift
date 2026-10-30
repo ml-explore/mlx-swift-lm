@@ -50,12 +50,16 @@ package func applyKVCacheConfigurationValidated(
 
 /// Minimal decode-loop application. Returns true once no simple layer can
 /// become newly eligible on a later token.
+///
+/// `compressionStart` overrides the strategy's own start.
 @discardableResult
 package func applyKVCacheConfigurationFast(
     cache: inout [KVCache],
-    configuration: KVCacheConfiguration
+    configuration: KVCacheConfiguration,
+    compressionStart: Int? = nil
 ) -> Bool {
-    switch configuration.strategy.storage {
+    let compressionStart = compressionStart ?? configuration.strategy.compressionStart
+    return switch configuration.strategy.storage {
     case .fullPrecision:
         true
     case .affine(let affine):
@@ -63,13 +67,13 @@ package func applyKVCacheConfigurationFast(
             cache: &cache,
             bits: affine.bits,
             groupSize: affine.groupSize,
-            compressionStart: affine.compressionStart)
+            compressionStart: compressionStart)
     case .turboQuant(let turbo):
         maybeTurboQuantizeKVCache(
             cache: &cache,
             keyBits: turbo.keyPrecision.bitWidth,
             valueBits: turbo.valuePrecision.bitWidth,
-            quantizedKVStart: turbo.compressionStart)
+            quantizedKVStart: compressionStart)
     case .varianceNormalized(let varn):
         maybeVarianceNormalizeKVCache(
             cache: &cache,
@@ -77,7 +81,7 @@ package func applyKVCacheConfigurationFast(
             valueBits: varn.valueBits,
             tileSize: varn.tileSize,
             sinkhornIterations: varn.sinkhornIterations,
-            compressionStart: varn.compressionStart)
+            compressionStart: compressionStart)
     }
 }
 

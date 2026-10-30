@@ -144,6 +144,18 @@ public final class ModelContainer: ModelMemoryReporting {
         }
     }
 
+    /// Estimate what generation with these parameters will need, before it runs.
+    ///
+    /// Use it, for example, to choose a context length that fits a memory budget.
+    /// For what a cache holds now, use ``KVCacheStatus/memoryBytes``.
+    public func estimator(parameters: GenerateParameters? = nil) async throws
+        -> GenerationEstimator
+    {
+        try await perform { context in
+            try context.model.estimator(parameters: parameters)
+        }
+    }
+
     /// The resolved local model directory for the loaded container.
     public var modelDirectory: URL {
         get async throws {

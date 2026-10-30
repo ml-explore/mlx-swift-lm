@@ -402,6 +402,14 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
     /// Models may override with a zero-allocation declarative path, but must stay
     /// consistent with ``newCache(parameters:)``.
     func cacheStatus(parameters: GenerateParameters?) throws -> KVCacheStatus
+
+    /// Estimate what generation with these parameters will need, before it runs.
+    ///
+    /// The default implementation traces one forward pass without evaluating it and
+    /// reads the shapes of the caches from ``newCache(parameters:)``. Compressed
+    /// layers are measured on small synthetic keys and values. Models with custom
+    /// caches may override it.
+    func estimator(parameters: GenerateParameters?) throws -> GenerationEstimator
 }
 
 extension LanguageModel {
@@ -447,6 +455,21 @@ extension LanguageModel {
             cache: try newCache(parameters: parameters),
             plan: plan,
             phase: .planned)
+    }
+
+    public func estimator(parameters: GenerateParameters?) throws -> GenerationEstimator {
+        let configuration = try parameters?.resolvedKVCacheConfiguration()
+        let cache = try newCache(parameters: parameters)
+        // Two tokens take the prefill path, so compiled decode traces stay untouched.
+        let probe = MLXArray([Int32](repeating: 0, count: 2)).reshaped(1, 2)
+        _ = callAsFunction(LMInput.Text(tokens: probe), cache: cache, state: nil)
+        if let configuration {
+            try validateKVCacheCompatibility(cache, configuration: configuration)
+        }
+        let estimate = try GenerationEstimator.Cache(probed: cache, configuration: configuration) {
+            try newCache(parameters: parameters)
+        }
+        return GenerationEstimator(cache: estimate)
     }
 }
 
