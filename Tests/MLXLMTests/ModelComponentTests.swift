@@ -11,10 +11,23 @@ private final class Connector: Module {
     @ModuleInfo var gate: Linear
     @ModuleInfo var projection: Linear?
 
-    override init() {
+    init(projection: Bool = true) {
         _gate.wrappedValue = Linear(64, 64, bias: false)
-        _projection.wrappedValue = Linear(64, 64, bias: false)
+        _projection.wrappedValue = projection ? Linear(64, 64, bias: false) : nil
     }
+}
+
+/// A vision tower, and a vision projection nested in a module that the text model shares.
+private enum CaptionerCheckpoint {
+    static let components: [ModelComponent: [CheckpointComponent]] = [
+        .vision: [
+            CheckpointComponent(
+                name: "tower", namespaces: ["model.vision_tower"], destination: "vision_tower"),
+            CheckpointComponent(
+                name: "projection", namespaces: ["model.connector.projection"],
+                destination: "connector.projection"),
+        ]
+    ]
 }
 
 /// The vision modules of ``Captioner``, at the paths they have in the model.
@@ -55,17 +68,7 @@ private final class Captioner: Module, BaseLanguageModel, ModelComponentsProvidi
         _connector.wrappedValue = Connector()
     }
 
-    var modelComponents: [ModelComponent: [CheckpointComponent]] {
-        [
-            .vision: [
-                CheckpointComponent(
-                    name: "tower", namespaces: ["model.vision_tower"], destination: "vision_tower"),
-                CheckpointComponent(
-                    name: "projection", namespaces: ["model.connector.projection"],
-                    destination: "connector.projection"),
-            ]
-        ]
-    }
+    var modelComponents: [ModelComponent: [CheckpointComponent]] { CaptionerCheckpoint.components }
 
     /// Names of the tensors the loader passed to ``prepareCheckpoint(_:)``.
     var loadedNames = Set<String>()
@@ -91,14 +94,34 @@ private final class Captioner: Module, BaseLanguageModel, ModelComponentsProvidi
     }
 }
 
-/// The same layout, without support for excluding components.
-private final class FixedCaptioner: Module, BaseLanguageModel {
+/// The same model with its vision built in.
+private final class FixedCaptioner: Module, BaseLanguageModel, ModelComponentsProviding {
     @ModuleInfo(key: "language_model") var language = Linear(64, 64, bias: false)
     @ModuleInfo(key: "vision_tower") var tower: Linear? = Linear(64, 64, bias: false)
     @ModuleInfo var connector = Connector()
 
+    var modelComponents: [ModelComponent: [CheckpointComponent]] { CaptionerCheckpoint.components }
+
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         dropModelScope(weights)
+    }
+}
+
+/// The text model alone, which loads the same checkpoint.
+private final class TextCaptioner: Module, BaseLanguageModel, ModelComponentsProviding {
+    @ModuleInfo(key: "language_model") var language = Linear(64, 64, bias: false)
+    @ModuleInfo var connector = Connector(projection: false)
+
+    var modelComponents: [ModelComponent: [CheckpointComponent]] { CaptionerCheckpoint.components }
+
+    /// Names of the tensors the loader passed to ``prepareCheckpoint(_:)``.
+    var loadedNames = Set<String>()
+
+    func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        loadedNames = Set(checkpoint.weights.keys)
+        var checkpoint = checkpoint
+        checkpoint.weights = dropModelScope(checkpoint.weights)
+        return checkpoint
     }
 }
 
@@ -108,9 +131,12 @@ private func dropModelScope(_ weights: [String: MLXArray]) -> [String: MLXArray]
         uniqueKeysWithValues: weights.map { (String($0.dropFirst("model.".count)), $1) })
 }
 
-/// Declares a component whose module is not optional.
+/// Declares an on-demand component whose module is not optional.
 private final class MisdeclaredCaptioner: Module, BaseLanguageModel, ModelComponentsProviding {
     @ModuleInfo(key: "language_model") var language = Linear(64, 64, bias: false)
+
+    let vision = OnDemandComponent<Module>(.vision) { Module() }
+    var onDemandComponents: [AnyOnDemandComponent] { [vision] }
 
     var modelComponents: [ModelComponent: [CheckpointComponent]] {
         [.vision: [.init(name: "language", namespaces: [], destination: "language_model")]]
@@ -322,6 +348,19 @@ final class ModelComponentTests: XCTestCase {
         XCTAssertTrue(model.connector.projection is QuantizedLinear)
         try assertParameters(
             of: model, match: checkpoint.text.merging(checkpoint.visual) { a, _ in a })
+    }
+
+    func testComponentsAModelDoesNotHaveAreNotRead() throws {
+        let checkpoint = try writeCheckpoint()
+        defer { try? FileManager.default.removeItem(at: checkpoint.directory) }
+
+        let model = TextCaptioner()
+        try loadWeights(
+            modelDirectory: checkpoint.directory, model: model, quantization: quantization,
+            componentLoading: .immediate)
+
+        XCTAssertEqual(model.loadedNames, Set(raw(checkpoint.text).keys))
+        try assertParameters(of: model, match: checkpoint.text)
     }
 
     func testComponentsAModelCannotExcludeStillLoad() throws {

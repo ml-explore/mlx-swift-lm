@@ -133,8 +133,9 @@ public struct ModelConfiguration: Sendable {
     ///
     /// Their weights are never read, and inputs that need them fail. You do not need this to
     /// save memory: on-demand components, such as the vision encoder of some VLMs, already load
-    /// the first time an input needs them. Models that cannot load
-    /// without a component load it anyway; see ``ModelComponentsProviding``.
+    /// the first time an input needs them. This applies only to on-demand components. A model
+    /// whose component is built in loads it anyway and logs a warning; see
+    /// ``ModelComponentsProviding``.
     public var excludedComponents: Set<ModelComponent> = []
 
     /// Overrides the ``MessageGenerator`` the model would otherwise supply.

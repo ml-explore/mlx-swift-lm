@@ -1895,6 +1895,10 @@ public class Qwen35: Module, VLMModel {
         return result
     }
 
+    public var excludedCheckpointNamespaces: [String] {
+        Qwen35CheckpointPolicy.excludedTargetNamespaces
+    }
+
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
         var checkpoint = try Qwen35CheckpointPolicy.prepareTarget(
             checkpoint, layout: .vision,
@@ -1969,14 +1973,7 @@ public class Qwen35: Module, VLMModel {
 
 extension Qwen35: ModelComponentsProviding {
     public var modelComponents: [ModelComponent: [CheckpointComponent]] {
-        [
-            .vision: [
-                CheckpointComponent(
-                    name: "vision_tower",
-                    namespaces: ["vision_tower", "model.visual", "visual"],
-                    destination: "vision_tower")
-            ]
-        ]
+        Qwen35CheckpointPolicy.components
     }
 
     public var onDemandComponents: [AnyOnDemandComponent] { [onDemandVision] }

@@ -48,11 +48,15 @@ package func prepareInferenceState(
 ///
 /// All custom checkpoint loaders should finalize through this function so
 /// inference-only optimizations are applied consistently.
+///
+/// It also clears the MLX buffer cache. Tensors the load read and dropped, or that
+/// preparation replaced, would otherwise stay there until generation clears it.
 @discardableResult
 package func materializeModelForInference(
     _ model: BaseLanguageModel
 ) -> InferenceStatePreparationReport {
     let report = prepareInferenceState(in: model)
     eval(model)
+    Memory.clearCache()
     return report
 }

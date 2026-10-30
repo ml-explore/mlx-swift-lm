@@ -8,7 +8,7 @@ import MLXNN
 ///
 /// A model declares its components through ``ModelComponentsProviding``. A component that the
 /// model lists in ``ModelComponentsProviding/onDemandComponents`` loads the first time an input
-/// needs it. List a component in ``ModelConfiguration/excludedComponents`` to never load it.
+/// needs it. List it in ``ModelConfiguration/excludedComponents`` to never load it.
 public struct ModelComponent: Hashable, Sendable, CustomStringConvertible {
     public let name: String
 
@@ -25,6 +25,8 @@ public struct ModelComponent: Hashable, Sendable, CustomStringConvertible {
     public static let audio = ModelComponent("audio")
 }
 
+private let logger = Logger(subsystem: "mlx-swift-lm", category: "model-component")
+
 /// When a load reads the components that a model can load on first use.
 public enum ComponentLoading: Sendable {
     /// Load each of ``ModelComponentsProviding/onDemandComponents`` the first time an input needs
@@ -38,16 +40,36 @@ public enum ComponentLoading: Sendable {
 
 /// A model with components that can load separately or not at all.
 ///
-/// Before the loader reads the checkpoint, it removes the modules of each component that does not
-/// load now, and it does not read their tensors. The module tree does not change after the load.
-/// An on-demand component loads later through the same
-/// ``BaseLanguageModel/prepareCheckpoint(_:)``, quantization and validation as the model.
+/// The loader reads each declared part in one of three ways:
+///
+/// - **On demand.** The model lists the component in ``onDemandComponents``. The loader removes
+///   its modules and does not read its tensors. It loads the first time an input needs it.
+/// - **Built in.** The model has the part's module. It loads with the model.
+/// - **Absent.** The model has neither, such as a text model that loads a VLM checkpoint. The
+///   loader does not read its tensors.
+///
+/// The module tree does not change after the load. An on-demand component loads later through
+/// the same ``BaseLanguageModel/prepareCheckpoint(_:)``, quantization and validation as the model.
 public protocol ModelComponentsProviding: BaseLanguageModel {
     /// The checkpoint components that make up each model component.
     ///
-    /// Each ``CheckpointComponent/destination`` is the path of an optional module. Its
-    /// ``CheckpointComponent/namespaces`` list every serialized prefix of the module's tensors,
-    /// as they appear before ``BaseLanguageModel/prepareCheckpoint(_:)``.
+    /// Each ``CheckpointComponent/destination`` is the path of the part's module, which must be
+    /// optional when the component loads on demand. Its ``CheckpointComponent/namespaces`` list
+    /// every serialized prefix of the module's tensors, as they appear before
+    /// ``BaseLanguageModel/prepareCheckpoint(_:)``.
+    ///
+    /// Models that load the same checkpoints return the same value, so a family names its
+    /// modules once:
+    ///
+    /// ```swift
+    /// enum CaptionerCheckpoint {
+    ///     static let components: [ModelComponent: [CheckpointComponent]] = [
+    ///         .vision: .modules("vision_tower", "embed_vision")
+    ///     ]
+    /// }
+    ///
+    /// var modelComponents: [ModelComponent: [CheckpointComponent]] { CaptionerCheckpoint.components }
+    /// ```
     var modelComponents: [ModelComponent: [CheckpointComponent]] { get }
 
     /// Components that load the first time an input needs them. The default is empty.
@@ -56,6 +78,16 @@ public protocol ModelComponentsProviding: BaseLanguageModel {
 
 extension ModelComponentsProviding {
     public var onDemandComponents: [AnyOnDemandComponent] { [] }
+}
+
+extension [CheckpointComponent] {
+    /// Top-level modules that checkpoints store under their own name, with or without the
+    /// `model.` scope.
+    public static func modules(_ names: String...) -> Self {
+        names.map {
+            CheckpointComponent(name: $0, namespaces: [$0, "model.\($0)"], destination: $0)
+        }
+    }
 }
 
 /// A model component that loads the first time it is used. See ``OnDemandComponent``.
@@ -230,7 +262,16 @@ func prepareComponents(
     var unread = [String]()
     for (component, parts) in model.modelComponents {
         let holder = onDemand[component]
-        let isExcluded = excluded.contains(component)
+        let isBuiltIn = holder == nil && parts.contains { attached.contains($0.destination) }
+        let isExcluded = holder != nil && excluded.contains(component)
+        if isBuiltIn && excluded.contains(component) {
+            logger.warning(
+                """
+                \(type(of: model)) loads its built-in \(component) component: \
+                excludedComponents only skips on-demand components.
+                """
+            )
+        }
         let deferred = holder != nil && loading == .onFirstUse && !isExcluded
         holder?.setSource(
             deferred
@@ -243,16 +284,19 @@ func prepareComponents(
                     })
                 : nil)
 
-        if isExcluded || deferred {
-            for part in parts where attached.contains(part.destination) {
-                try model.setModule(nil, at: part.destination)
-            }
-            unread += parts.flatMap(\.namespaces)
-        } else if let holder {
-            // An earlier on-demand load removed these modules; rebuild them.
-            let built = Dictionary(uniqueKeysWithValues: holder.make().namedModules())
-            for part in parts where !attached.contains(part.destination) {
-                try model.setModule(built[part.destination], at: part.destination)
+        // An earlier on-demand load removed these modules.
+        lazy var rebuilt = Dictionary(uniqueKeysWithValues: holder?.make().namedModules() ?? [])
+        for part in parts {
+            let isAttached = attached.contains(part.destination)
+            if isExcluded || deferred {
+                if isAttached { try model.setModule(nil, at: part.destination) }
+                unread += part.namespaces
+            } else if !isAttached {
+                if let module = rebuilt[part.destination] {
+                    try model.setModule(module, at: part.destination)
+                } else {
+                    unread += part.namespaces
+                }
             }
         }
     }
