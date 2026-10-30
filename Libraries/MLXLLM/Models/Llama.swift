@@ -150,7 +150,8 @@ public class LlamaModelInner: Module {
 }
 
 /// Model for Llama and Mistral model types.
-public class LlamaModel: Module, LLMModel, KVCacheDimensionProvider {
+public class LlamaModel: Module, LLMModel, KVCacheDimensionProvider, InputOnlyEmbeddingsProviding {
+    public var inputOnlyEmbeddings: [Embedding] { lmHead == nil ? [] : [model.embedTokens] }
 
     public let vocabularySize: Int
     public let kvHeads: [Int]

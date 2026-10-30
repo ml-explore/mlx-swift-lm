@@ -1179,12 +1179,17 @@ final class Gemma4TextBackbone: Module {
 
 /// Module-internal — also consumed by `Gemma4Assistant.swift` (the MTP drafter
 /// reaches `embed_tokens` / `embed_scale` / `config.layer_types` through this).
-final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider {
+final class Gemma4TextLanguageModel: Module, KVCacheDimensionProvider, InputOnlyEmbeddingsProviding
+{
     let config: Gemma4TextConfiguration
     let finalLogitSoftcapping: Float?
 
     @ModuleInfo(key: "model") var model: Gemma4TextBackbone
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
+
+    var inputOnlyEmbeddings: [Embedding] {
+        [model.embedTokensPerLayer].compactMap { $0 } + (lmHead == nil ? [] : [model.embedTokens])
+    }
 
     var kvHeads: [Int] {
         (0 ..< config.hiddenLayers).map { idx in
@@ -1355,7 +1360,9 @@ package typealias Gemma4MultimodalEmbedder = MLXLMCommon.Gemma4MultimodalEmbedde
 
 // MARK: - Model
 
-public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider, SuppressedTokensProviding {
+public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider, SuppressedTokensProviding,
+    InputOnlyEmbeddingsProviding
+{
     @ModuleInfo(key: "vision_tower") private var visionTower: Gemma4VisionModel
     /// Module-internal — also reached by `Gemma4Assistant.swift` (drafter `bind()`
     /// walks here to cache the target's input embeddings, embed scale, and
@@ -1368,6 +1375,7 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider, Suppresse
     public var vocabularySize: Int { config.vocabularySize }
     public var kvHeads: [Int] { languageModel.kvHeads }
     public var loraLayers: [Module] { languageModel.model.layers }
+    public var inputOnlyEmbeddings: [Embedding] { languageModel.inputOnlyEmbeddings }
 
     /// Final-norm hidden states of the text decoder for `input`, `(B, L, hiddenSize)`: the
     /// tensor the LM head consumes, built as `prepare` builds it, without the head or a cache.
@@ -1831,7 +1839,7 @@ private final class Gemma4UnifiedVisionEmbedder: Module {
 }
 
 public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider,
-    SuppressedTokensProviding
+    SuppressedTokensProviding, InputOnlyEmbeddingsProviding
 {
     @ModuleInfo(key: "language_model") private var languageModel: Gemma4TextLanguageModel
     @ModuleInfo(key: "vision_embedder") private var visionEmbedder: Gemma4UnifiedVisionEmbedder?
@@ -1843,6 +1851,7 @@ public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider,
     public var vocabularySize: Int { config.vocabularySize }
     public var kvHeads: [Int] { languageModel.kvHeads }
     public var loraLayers: [Module] { languageModel.model.layers }
+    public var inputOnlyEmbeddings: [Embedding] { languageModel.inputOnlyEmbeddings }
 
     /// Final-norm hidden states of the text decoder for `input`, `(B, L, hiddenSize)`: the
     /// tensor the LM head consumes, built as `prepare` builds it, without the head or a cache.

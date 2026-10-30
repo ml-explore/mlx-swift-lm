@@ -112,13 +112,15 @@ public final class MTPDrafterModelFactory: GenericModelFactory {
             modelDirectory: modelDirectory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization,
             weightFileSelection: configuration.weightFileSelection,
-            excludedComponents: configuration.excludedComponents
+            excludedComponents: configuration.excludedComponents,
+            embeddingStorage: configuration.embeddingStorage
         )
 
         let modelConfig = ModelConfiguration(
             directory: modelDirectory,
             tokenizerSource: nil,
-            defaultPrompt: ""
+            defaultPrompt: "",
+            embeddingStorage: configuration.embeddingStorage
         )
         return MTPDrafterContext(configuration: modelConfig, model: model)
     }
