@@ -185,6 +185,21 @@ public struct ReasoningConfig: Sendable, Equatable {
         self.channel = channel
     }
 
+    /// A copy of this protocol that declares `transition` as validated for a
+    /// hard reasoning budget.
+    ///
+    /// Families share wire syntax far more often than they share training, so
+    /// a validated transition is expressed as a delta on the protocol instead
+    /// of a second copy of it: the delimiters keep one definition, and the
+    /// only thing a family adapter restates is what it measured.
+    public func declaringBudgetTransition(
+        _ transition: ReasoningBudgetTransition
+    ) -> ReasoningConfig {
+        var copy = self
+        copy.budgetTransition = transition
+        return copy
+    }
+
     // MARK: - Presets
 
     /// Generic `<think>`/`</think>` protocol toggled by the `enable_thinking`
