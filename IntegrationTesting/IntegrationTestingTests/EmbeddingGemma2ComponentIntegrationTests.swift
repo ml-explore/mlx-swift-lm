@@ -22,8 +22,8 @@ struct EmbeddingGemma2ComponentIntegrationTests {
             from: #hubDownloader(), useLatest: false, progressHandler: { _ in })
         let before = Memory.activeMemory
         let start = Date()
-        let lazy = try await EmbeddingGemma2Embedding(
-            modelDirectory: resolved.modelDirectory, tokenizerLoader: #huggingFaceTokenizerLoader())
+        let lazy = try await MultimodalEmbeddingFactory.shared.loadContainer(
+            from: resolved.modelDirectory, using: #huggingFaceTokenizerLoader())
         let lazyBytes = Memory.activeMemory - before
         let lazySeconds = Date().timeIntervalSince(start)
         let beforeImmediate = Memory.activeMemory
@@ -42,7 +42,7 @@ struct EmbeddingGemma2ComponentIntegrationTests {
             print("EmbeddingGemma 2: immediate \(kind)")
             let expected = try await immediate.embed(Self.input(kind), task: .document)
             print("EmbeddingGemma 2: on-demand \(kind)")
-            let actual = try await lazy.embed(Self.input(kind), task: .document)
+            let actual = try await lazy.embed([Self.input(kind)], task: .document)[0]
             #expect(actual.count == 768 && actual.allSatisfy { $0.isFinite })
             #expect(zip(actual, expected).allSatisfy { abs($0 - $1) < 1e-5 }, "\(kind)")
         }

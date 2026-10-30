@@ -1,7 +1,9 @@
 // Copyright © 2026 Apple Inc.
 
+import CoreImage
 import CoreMedia
 import Foundation
+import ImageIO
 import MLX
 import MLXEmbedders
 import MLXLMCommon
@@ -503,6 +505,72 @@ struct EmbeddingGemma2Tests {
         }
     }
 
+    @Test(
+        arguments: [
+            (37, 53, 11, 17), (37, 53, 37, 17), (37, 53, 11, 53),
+            (7, 11, 19, 23), (1, 53, 1, 17), (37, 1, 11, 1),
+        ], [false, true])
+    func compactResizeMatchesDenseFloatReference(size: (Int, Int, Int, Int), cpu: Bool) throws {
+        let (sourceHeight, sourceWidth, height, width) = size
+        let byteCount = 3 * sourceHeight * sourceWidth
+        let bytes: [UInt8] = (0 ..< byteCount).map { (index: Int) -> UInt8 in
+            let value = index * 37 + index / 13
+            return UInt8(value % 256)
+        }
+        let pixels = MLXArray(bytes, [1, 3, sourceHeight, sourceWidth]).asType(.float32) / 255
+        let compact = pixels.asType(.float16)
+        let rows = EmbeddingGemma2ImageProcessor.bicubicWeights(input: sourceHeight, output: height)
+        let columns = EmbeddingGemma2ImageProcessor.bicubicWeights(
+            input: sourceWidth, output: width)
+        let dense = matmul(matmul(rows, pixels), columns.transposed())
+        let expected = round(clip(dense * 255, min: 0, max: 255)) / 255
+        let actual = Device.withDefaultDevice(cpu ? .cpu : .gpu) {
+            EmbeddingGemma2ImageProcessor.resized(compact, height: height, width: width)
+        }
+        try MLX.checkedEval(actual, expected)
+        #expect(actual.shape == [1, 3, height, width])
+        #expect(abs(actual - expected).max().item(Float.self) <= 1.0 / 255 + 1e-7)
+    }
+
+    @Test(arguments: ["public.png", "public.jpeg"])
+    func compactImageRenderPreservesFloatPipelinePixels(type: String) throws {
+        let width = 53
+        let height = 37
+        let byteCount = width * height * 4
+        let pixelBytes: [UInt8] = (0 ..< byteCount).map { (index: Int) -> UInt8 in
+            let value = index * 37 + index / 13
+            return UInt8(value % 256)
+        }
+        let bytes = Data(pixelBytes)
+        let bitmap = CIImage(
+            bitmapData: bytes, bytesPerRow: width * 4,
+            size: CGSize(width: width, height: height), format: .RGBA8,
+            colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+        let cgImage = try #require(CIContext().createCGImage(bitmap, from: bitmap.extent))
+        let encoded = NSMutableData()
+        let destination = try #require(
+            CGImageDestinationCreateWithData(encoded, type as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, cgImage, nil)
+        #expect(CGImageDestinationFinalize(destination))
+        let image = try EmbeddingGemma2ImageProcessor.prepared(
+            #require(CIImage(data: encoded as Data)))
+        let original = MediaProcessing.asMLXArray(image)
+        for (targetHeight, targetWidth) in [(height, width), (11, 17)] {
+            let rows = EmbeddingGemma2ImageProcessor.bicubicWeights(
+                input: height, output: targetHeight)
+            let columns = EmbeddingGemma2ImageProcessor.bicubicWeights(
+                input: width, output: targetWidth)
+            let dense = matmul(matmul(rows, original), columns.transposed())
+            let expected =
+                targetHeight == height && targetWidth == width
+                ? original : round(clip(dense * 255, min: 0, max: 255)) / 255
+            let actual = EmbeddingGemma2ImageProcessor.pixels(
+                image, height: targetHeight, width: targetWidth)
+            try MLX.checkedEval(actual, expected)
+            #expect(abs(actual - expected).max().item(Float.self) <= 1.0 / 255 + 1e-7)
+        }
+    }
+
     /// Expected rows come from the Transformers float32 implementation with the same
     /// deterministic weights, followed by masked mean pooling and L2 normalization.
     @Test
@@ -747,6 +815,194 @@ struct EmbeddingGemma2Tests {
             EmbeddingGemma2Embedding.prompt(
                 text: "title: Swift | text: hello", title: nil, task: .document)
                 == "title: Swift | text: hello")
+    }
+
+    @Test(arguments: UInt32(1) ... UInt32(8))
+    func imagesTurnUprightByTheirExifOrientationOnce(orientation: UInt32) throws {
+        let background = CIImage(color: .red).cropped(
+            to: CGRect(x: 0, y: 0, width: 40, height: 20))
+        let image = CIImage(color: .blue).cropped(
+            to: CGRect(x: 0, y: 0, width: 10, height: 10)
+        ).composited(over: background)
+        let cgImage = try #require(CIContext().createCGImage(image, from: image.extent))
+        let data = NSMutableData()
+        let destination = try #require(
+            CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil))
+        CGImageDestinationAddImage(
+            destination, cgImage, [kCGImagePropertyOrientation: orientation] as CFDictionary)
+        #expect(CGImageDestinationFinalize(destination))
+        let tagged = try #require(CIImage(data: data as Data))
+        let decodedUpright = try #require(
+            CIImage(data: data as Data, options: [.applyOrientationProperty: true]))
+        let upright =
+            orientation >= 5
+            ? CGSize(width: 20, height: 40) : CGSize(width: 40, height: 20)
+        let prepared = try EmbeddingGemma2ImageProcessor.prepared(tagged)
+        let decoded = try EmbeddingGemma2ImageProcessor.prepared(decodedUpright)
+        #expect(prepared.extent.size == upright)
+        #expect(decoded.extent.size == upright)
+        let actual = EmbeddingGemma2ImageProcessor.pixels(
+            prepared, height: Int(upright.height), width: Int(upright.width))
+        let expected = EmbeddingGemma2ImageProcessor.pixels(
+            decoded, height: Int(upright.height), width: Int(upright.width))
+        #expect(actual.asArray(Float.self) == expected.asArray(Float.self))
+        #expect(try EmbeddingGemma2ImageProcessor.prepared(image).extent.size == image.extent.size)
+    }
+
+    @Test
+    func textBatchesKeepEveryInputOnceWithinTheTokenLimit() {
+        let lengths = [5, 300, 7, 9, 300, 1, 4_000, 8_192, 64]
+        let batches = EmbeddingGemma2Sequence.batches(lengths: lengths, limit: 1_024)
+        #expect(batches.flatMap { $0 }.sorted() == Array(lengths.indices))
+        #expect(batches.flatMap { $0 }.map { lengths[$0] } == lengths.sorted())
+        for batch in batches where batch.count > 1 {
+            #expect(batch.count * (batch.map { lengths[$0] }.max() ?? 0) <= 1_024)
+        }
+        #expect(
+            batches.map { $0.map { lengths[$0] } }
+                == [[1, 5, 7, 9, 64], [300, 300], [4_000], [8_192]])
+        #expect(EmbeddingGemma2Sequence.batches(lengths: [], limit: 1_024).isEmpty)
+    }
+
+    /// Lengths straddle the sliding window, so padding meets both the windowed and the
+    /// global attention masks.
+    @Test
+    func batchedTextMatchesEachInputAlone() async throws {
+        let directory = try Self.checkpointDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let actor = try await EmbeddingGemma2Embedding(
+            modelDirectory: directory, tokenizerLoader: TestTokenizerLoader())
+        let items: [(text: String, title: String?)] = [
+            (String(repeating: "aurora ", count: 9), nil), ("Swift", nil), ("Swift", "Notes.md"),
+            ("northern lights", nil), ("task: none | query: verbatim", nil),
+        ]
+        let batched = try await actor.embed(
+            items.map { .init(text: $0.text, title: $0.title) }, task: .document)
+        #expect(batched.count == items.count)
+        for (item, vector) in zip(items, batched) {
+            let alone = try await actor.embed(
+                .init(text: item.text, title: item.title), task: .document)
+            #expect(Self.cosine(vector, alone) > 0.99999)
+        }
+        #expect(try await actor.embed([], task: .document).isEmpty)
+    }
+
+    @Test(arguments: ["embedding_gemma2", "embedding_gemma2_text"])
+    func factoryLoadsEitherLayoutAsTheSharedContract(modelType: String) async throws {
+        let directory = try Self.checkpointDirectory(modelType: modelType)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(await MultimodalEmbeddingTypeRegistry.shared.contains(modelType))
+        let embedding = try await MultimodalEmbeddingFactory.shared.loadContainer(
+            from: directory, using: TestTokenizerLoader())
+        #expect(embedding is EmbeddingGemma2Embedding)
+        #expect(await embedding.supportedModalities == [.text])
+        let shared = try await embedding.embed([.init(text: "Swift")], task: .codeRetrieval)
+        let direct = try await EmbeddingGemma2Embedding(
+            modelDirectory: directory, tokenizerLoader: TestTokenizerLoader()
+        ).embed(.init(text: "Swift"), task: .codeRetrieval)
+        #expect(Self.cosine(shared[0], direct) > 0.999999)
+        let local = try await MultimodalEmbeddingFactory.load(
+            modelDirectory: directory, tokenizerLoader: TestTokenizerLoader())
+        #expect(try await local.embed([.init(text: "Swift")], task: .codeRetrieval) == shared)
+    }
+
+    @Test
+    func factoryRejectsOtherModelTypesBeforeLoadingWeights() async throws {
+        let directory = try Self.processorDirectory("{}")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data(#"{"model_type":"bert"}"#.utf8).write(
+            to: directory.appendingPathComponent("config.json"))
+        await #expect(throws: ModelFactoryError.self) {
+            try await MultimodalEmbeddingFactory.load(
+                modelDirectory: directory, tokenizerLoader: TestTokenizerLoader())
+        }
+    }
+
+    private struct RegisteredEmbedding: MultimodalEmbedding {
+        let supportedModalities: Set<EmbeddingModality> = [.text]
+        let vector: [Float]
+
+        func embed(_ inputs: sending [EmbeddingInput], task: EmbeddingTask) async throws
+            -> [[Float]]
+        {
+            inputs.map { _ in vector }
+        }
+    }
+
+    @Test
+    func factoryAcceptsApplicationDefinedRegistries() async throws {
+        let directory = try Self.processorDirectory("{}")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let data = Data(#"{"model_type":"application_embedding","vector":[0,1]}"#.utf8)
+        try data.write(to: directory.appendingPathComponent("config.json"))
+        let types = ModelTypeRegistry<MultimodalEmbeddingLoader>()
+        await types.registerModelType("application_embedding") { data in
+            struct Configuration: Decodable { let vector: [Float] }
+            let config = try JSONDecoder().decode(Configuration.self, from: data)
+            return { _, _ in RegisteredEmbedding(vector: config.vector) }
+        }
+        let model = ModelConfiguration(id: "application/embedding")
+        let factory = MultimodalEmbeddingFactory(
+            typeRegistry: types, modelRegistry: AbstractModelRegistry(modelConfigurations: [model]))
+        #expect(factory.contains(id: model.name))
+        #expect(factory.configuration(id: model.name).name == model.name)
+        let embedding = try await factory.load(from: directory, using: TestTokenizerLoader())
+        #expect(try await embedding.embed([.init(text: "Swift")], task: .document) == [[0, 1]])
+        #expect(await embedding.supportedModalities == [.text])
+    }
+
+    private struct CheckpointDownloader: Downloader {
+        let directory: URL
+
+        func download(
+            id: String, revision: String?, matching patterns: [String], useLatest: Bool,
+            progressHandler: @Sendable @escaping (Progress) -> Void
+        ) async throws -> URL {
+            #expect(id == "application/embedding" && revision == "test-revision")
+            #expect(useLatest)
+            #expect(patterns.contains("*.safetensors"))
+            return directory
+        }
+    }
+
+    private struct DirectoryCheckingTokenizerLoader: TokenizerLoader {
+        let expectedDirectory: URL
+
+        func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
+            #expect(directory == expectedDirectory)
+            return TestTokenizer()
+        }
+    }
+
+    @Test
+    func factoryPreservesResolvedLoadingOptions() async throws {
+        let directory = try Self.checkpointDirectory(Self.tinyVisionConfig)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let weightsURL = directory.appendingPathComponent("model.safetensors")
+        var weights = try loadArrays(url: weightsURL)
+        let key = try #require(weights.keys.sorted().first { $0.hasPrefix("language_model.") })
+        let value = try #require(weights[key])
+        weights[key] = nil
+        eval(Array(weights.values), value)
+        try save(arrays: weights, url: weightsURL)
+        try save(arrays: [key: value], url: directory.appendingPathComponent("extra.safetensors"))
+        let tokenizerDirectory = directory.appendingPathComponent("separate-tokenizer")
+        var config = ModelConfiguration(
+            id: "application/embedding", revision: "test-revision",
+            tokenizerSource: .directory(tokenizerDirectory))
+        config.weightFileSelection = .allFilesPresent
+        config.excludedComponents = [.vision]
+        let embedding = try await MultimodalEmbeddingFactory.shared.loadContainer(
+            from: CheckpointDownloader(directory: directory),
+            using: DirectoryCheckingTokenizerLoader(expectedDirectory: tokenizerDirectory),
+            configuration: config, useLatest: true)
+        #expect(await embedding.supportedModalities == [.text])
+        let vectors = try await embedding.embed([.init(text: "Swift")], task: .none)
+        #expect(vectors.count == 1 && vectors[0].count == 12)
+        #expect(vectors[0].allSatisfy { $0.isFinite })
+        await #expect(throws: EmbeddingGemma2Embedding.Error.unsupportedMedia) {
+            try await embedding.embed([.init(images: [.url(directory)])], task: .none)
+        }
     }
 
     private static func cosine(_ left: [Float], _ right: [Float]) -> Double {
