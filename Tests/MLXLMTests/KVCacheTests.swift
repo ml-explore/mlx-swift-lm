@@ -2022,6 +2022,30 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
             ])
     }
 
+    @Test func testVarianceNormalizedKVCachePrefillAttentionMatchesMaterializedAttention() {
+        let nativeCache = VarianceNormalizedKVCache(
+            tileSize: 32, keyBits: 4, valueBits: 2, sinkhornIterations: 2)
+        let materializedCache = VarianceNormalizedKVCache(
+            tileSize: 32, keyBits: 4, valueBits: 2, sinkhornIterations: 2)
+        // 64 causal queries take the fused route over a slab, pending tiles and a raw tail.
+        let queries = deterministicTensor(shape: [1, 4, 64, 64], salt: 7)
+        let keys = deterministicTensor(shape: [1, 2, 1_090, 64], salt: 8)
+        let values = deterministicTensor(shape: [1, 2, 1_090, 64], salt: 9)
+        let scale = 1 / sqrt(Float(64))
+
+        let native = attentionWithCacheUpdate(
+            queries: queries, keys: keys, values: values, cache: nativeCache,
+            scale: scale, mask: .causal)
+        let (cachedKeys, cachedValues) = materializedCache.update(keys: keys, values: values)
+        let materialized = attentionWithCacheUpdate(
+            queries: queries, keys: cachedKeys, values: cachedValues, cache: nil,
+            scale: scale, mask: .causal)
+        eval(native, materialized)
+
+        #expect(native.shape == [1, 4, 64, 64])
+        #expect(relativeRMSError(native, materialized) < 1e-3)
+    }
+
     @Test func testApplyAttentionMaskSuppressesBoolMaskedLogits() {
         let scores = MLXArray([Float(-10), Float(-20), Float(-30)]).reshaped(1, 1, 1, 3)
         let mask = MLXArray([true, false, false]).reshaped(1, 1, 1, 3)

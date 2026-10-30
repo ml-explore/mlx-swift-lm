@@ -384,7 +384,7 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
     /// Implementations must honor ``GenerateParameters/maxKVSize`` for any
     /// attention layer that can be token-windowed. Hybrid attention / state-space
     /// models apply the limit to attention caches only (see
-    /// ``makeAttentionKVCache(parameters:)``).
+    /// ``makeAttentionKVCache(parameters:headDim:)``).
     ///
     /// - Throws: ``KVCacheConfigurationError`` when the request or a model-defined
     ///   cache size is invalid.
@@ -454,6 +454,25 @@ extension LanguageModel {
 /// provide an automatic implementation of ``LanguageModel/newCache(parameters:)``
 public protocol KVCacheDimensionProvider {
     var kvHeads: [Int] { get }
+
+    /// Key and value head dimension shared by every attention layer, or `nil` when the
+    /// model does not declare it.
+    ///
+    /// A declared dimension lets a cache strategy that compresses from token 0 start
+    /// compressed, so the first prefill never holds the full-precision cache.
+    ///
+    /// Declaring it is a promise about every layer these caches serve: each attends
+    /// through a compressed-cache-aware route such as
+    /// ``attentionWithCacheUpdate(queries:keys:values:cache:scale:mask:)``
+    /// from its first forward call, including prefill. Compressed caches reject plain
+    /// `KVCache.update` with a fatal error. Dynamic conversion already installs these
+    /// caches after the first prefill, so a model that cannot consume them must leave
+    /// this `nil` and must not enable compression at all.
+    var kvHeadDim: Int? { get }
+}
+
+extension KVCacheDimensionProvider {
+    public var kvHeadDim: Int? { nil }
 }
 
 extension LanguageModel where Self: KVCacheDimensionProvider {
@@ -462,7 +481,7 @@ extension LanguageModel where Self: KVCacheDimensionProvider {
         // The number of heads per layer (kvHeads[i]) is not used for cache creation
         let numLayers = kvHeads.count
         return try (0 ..< numLayers).map { _ in
-            try makeAttentionKVCache(parameters: parameters)
+            try makeAttentionKVCache(parameters: parameters, headDim: kvHeadDim)
         }
     }
 

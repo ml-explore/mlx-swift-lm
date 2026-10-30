@@ -81,6 +81,36 @@ package func applyKVCacheConfigurationFast(
     }
 }
 
+extension KVCacheConfiguration.Strategy {
+    /// An empty compressed cache for one attention layer, or `nil` when the layer should
+    /// start at full precision and convert dynamically.
+    ///
+    /// Only strategies that compress from token 0 and whose support is a function of the
+    /// head dimension qualify. TurboQuant stays dynamic: its boundary-layer protection
+    /// depends on the layer's position in the model, which a single layer cannot know.
+    package func makeEmptyCache(headDim: Int) -> KVCache? {
+        guard compressionStart == 0 else { return nil }
+        switch storage {
+        case .affine(let affine):
+            guard
+                let groupSize = resolvedKVQuantizationGroupSize(
+                    requested: affine.groupSize, keyHeadDim: headDim, valueHeadDim: headDim)
+            else { return nil }
+            return QuantizedKVCache(groupSize: groupSize, bits: affine.bits)
+        case .varianceNormalized(let varn):
+            guard
+                supportsVarianceNormalizedKVCache(
+                    keyHeadDim: headDim, valueHeadDim: headDim, tileSize: varn.tileSize)
+            else { return nil }
+            return VarianceNormalizedKVCache(
+                tileSize: varn.tileSize, keyBits: varn.keyBits, valueBits: varn.valueBits,
+                sinkhornIterations: varn.sinkhornIterations)
+        case .fullPrecision, .turboQuant:
+            return nil
+        }
+    }
+}
+
 /// Validate the requested compatibility policy against a concrete model cache.
 ///
 /// Full-precision and non-attention state entries do not participate. Affine

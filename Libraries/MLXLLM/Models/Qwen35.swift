@@ -1110,6 +1110,7 @@ public class Qwen35TextModelInner: Module {
 public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
+    public var kvHeadDim: Int? { configuration.headDim }
 
     public let model: Qwen35TextModelInner
     /// The text model's geometry.
@@ -1200,7 +1201,7 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
             }
             // Full-attention layers honor maxKVSize; GDN / linear layers keep
             // a fixed recurrent state that cannot be token-windowed.
-            return try makeAttentionKVCache(parameters: parameters)
+            return try makeAttentionKVCache(parameters: parameters, headDim: kvHeadDim)
         }
     }
 
