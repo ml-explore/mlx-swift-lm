@@ -283,7 +283,7 @@ public actor IntegrationTestModels {
                 try await LLMModelFactory.shared.loadContainer(
                     from: downloader, using: tokenizerLoader,
                     configuration: configuration,
-                    progressHandler: logProgress(key)
+                    progress: .download(logProgress(key))
                 )
             }
             print("Loaded LLM: \(key)")
@@ -318,7 +318,7 @@ public actor IntegrationTestModels {
             let container = try await VLMModelFactory.shared.loadContainer(
                 from: downloader, using: tokenizerLoader,
                 configuration: configuration,
-                progressHandler: logProgress(key)
+                progress: .download(logProgress(key))
             )
             print("Loaded VLM: \(key)")
             return container
@@ -339,7 +339,7 @@ public actor IntegrationTestModels {
             let container = try await EmbedderModelFactory.shared.loadContainer(
                 from: downloader, using: tokenizerLoader,
                 configuration: EmbedderRegistry.nomic_text_v1_5,
-                progressHandler: logProgress(id)
+                progress: .download(logProgress(id))
             )
             print("Loaded embedding model: \(id)")
             return container
@@ -650,7 +650,7 @@ public enum EmbedderTests {
         let modelContainer = try await EmbedderModelFactory.shared.loadContainer(
             from: downloader, using: tokenizerLoader,
             configuration: ModelConfiguration(id: modelId),
-            progressHandler: logProgress(modelId)
+            progress: .download(logProgress(modelId))
         )
         print("Loaded Gemma 3 embedding model: \(modelId)")
 

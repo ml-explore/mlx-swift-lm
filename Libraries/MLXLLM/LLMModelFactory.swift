@@ -44,7 +44,7 @@ private func createQwen3CompatibleModel(configuration data: Data) throws -> any 
 
 /// Registry of model type, e.g 'llama', to functions that can instantiate the model from configuration.
 ///
-/// Typically called via ``LLMModelFactory/loadContainer(from:using:configuration:useLatest:progressHandler:)``.
+/// Typically called via ``LLMModelFactory/loadContainer(from:using:configuration:useLatest:progress:)``.
 public enum LLMTypeRegistry {
 
     /// Shared instance with default model types.
