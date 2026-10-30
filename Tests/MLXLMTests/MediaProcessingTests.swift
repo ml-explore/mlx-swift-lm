@@ -12,18 +12,16 @@ import XCTest
 public class MediaProcesingTests: XCTestCase {
 
     func testResize() {
-        Device.withDefaultDevice(.cpu) {
-            // resampleBicubic should produce an image with the desired dimensions
-            let inputFilter = CIFilter(name: "CIConstantColorGenerator")!
-            inputFilter.setValue(CIColor.red, forKey: "inputColor")
-            let input = inputFilter.outputImage!.cropped(
-                to: CGRect(x: 0, y: 0, width: 1536, height: 1106))
+        // resampleBicubic should produce an image with the desired dimensions
+        let inputFilter = CIFilter(name: "CIConstantColorGenerator")!
+        inputFilter.setValue(CIColor.red, forKey: "inputColor")
+        let input = inputFilter.outputImage!.cropped(
+            to: CGRect(x: 0, y: 0, width: 1536, height: 1106))
 
-            let target = CGSize(width: 1540, height: 1120)
-            let output = MediaProcessing.resampleBicubic(input, to: target)
+        let target = CGSize(width: 1540, height: 1120)
+        let output = MediaProcessing.resampleBicubic(input, to: target)
 
-            XCTAssertEqual(output.extent.size, target)
-        }
+        XCTAssertEqual(output.extent.size, target)
     }
 
     func testVideoFileAsSimpleProcessedSequence() async throws {
@@ -34,11 +32,9 @@ public class MediaProcesingTests: XCTestCase {
 
         let video = UserInput.Video.url(fileURL)
 
-        try await Device.withDefaultDevice(.cpu) {
-            // We know video is exactly 5 seconds long, expect 5 samples
-            let frames = try await MediaProcessing.asProcessedSequence(video, samplesPerSecond: 1)
-            XCTAssert(frames.frames.count == 5)
-        }
+        // We know video is exactly 5 seconds long, expect 5 samples
+        let frames = try await MediaProcessing.asProcessedSequence(video, samplesPerSecond: 1)
+        XCTAssert(frames.frames.count == 5)
     }
 
     func testVideoFileValidationThisShouldFail() async throws {
@@ -50,12 +46,10 @@ public class MediaProcesingTests: XCTestCase {
 
         let video = UserInput.Video.url(fileURL)
 
-        await Device.withDefaultDevice(.cpu) {
-            do {
-                let _ = try await MediaProcessing.asProcessedSequence(video, samplesPerSecond: 1)
-            } catch {
-                XCTAssertEqual(error as? VLMError, VLMError.noVideoTrackFound)
-            }
+        do {
+            let _ = try await MediaProcessing.asProcessedSequence(video, samplesPerSecond: 1)
+        } catch {
+            XCTAssertEqual(error as? VLMError, VLMError.noVideoTrackFound)
         }
     }
 
@@ -75,19 +69,17 @@ public class MediaProcesingTests: XCTestCase {
 
         let video = UserInput.Video.url(fileURL)
 
-        try await Device.withDefaultDevice(.cpu) {
-            // We know video is exactly 5 seconds long, expect 10 samples
-            let frames = try await MediaProcessing.asProcessedSequence(video, samplesPerSecond: 2) {
-                frame in
-                let image = preprocess(
-                    image: try frame.image.asCIImage(), resizedSize: .init(width: 224, height: 224))
+        // We know video is exactly 5 seconds long, expect 10 samples
+        let frames = try await MediaProcessing.asProcessedSequence(video, samplesPerSecond: 2) {
+            frame in
+            let image = preprocess(
+                image: try frame.image.asCIImage(), resizedSize: .init(width: 224, height: 224))
 
-                return VideoFrame.init(image: .ciImage(image), timeStamp: frame.timeStamp)
-            }
-
-            XCTAssert(frames.frames.count == 10)
-            XCTAssert(frames.frames[0].shape == [1, 3, 224, 224])
+            return VideoFrame.init(image: .ciImage(image), timeStamp: frame.timeStamp)
         }
+
+        XCTAssert(frames.frames.count == 10)
+        XCTAssert(frames.frames[0].shape == [1, 3, 224, 224])
     }
 
     func testVideoFramesAsProcessedSequence() async throws {
@@ -123,19 +115,17 @@ public class MediaProcesingTests: XCTestCase {
 
         let video = UserInput.Video.frames(rawFrames)
 
-        try await Device.withDefaultDevice(.cpu) {
-            // We know video is exactly 5 seconds long, expect 10 samples
-            let frames = try await MediaProcessing.asProcessedSequence(video, samplesPerSecond: 2) {
-                frame in
-                let image = preprocess(
-                    image: try frame.image.asCIImage(), resizedSize: .init(width: 224, height: 224))
+        // We know video is exactly 5 seconds long, expect 10 samples
+        let frames = try await MediaProcessing.asProcessedSequence(video, samplesPerSecond: 2) {
+            frame in
+            let image = preprocess(
+                image: try frame.image.asCIImage(), resizedSize: .init(width: 224, height: 224))
 
-                return VideoFrame.init(image: .ciImage(image), timeStamp: frame.timeStamp)
-            }
-
-            XCTAssert(frames.frames.count == 10)
-            XCTAssert(frames.frames[0].shape == [1, 3, 224, 224])
+            return VideoFrame.init(image: .ciImage(image), timeStamp: frame.timeStamp)
         }
+
+        XCTAssert(frames.frames.count == 10)
+        XCTAssert(frames.frames[0].shape == [1, 3, 224, 224])
     }
 
     // MARK: - VideoProcessing Option Tests
@@ -149,15 +139,13 @@ public class MediaProcesingTests: XCTestCase {
         let video = UserInput.Video.url(fileURL)
         let videoProcessing = UserInput.VideoProcessing(targetFrames: 3)
 
-        try await Device.withDefaultDevice(.cpu) {
-            let frames = try await MediaProcessing.asProcessedSequence(
-                video,
-                processing: videoProcessing
-            )
+        let frames = try await MediaProcessing.asProcessedSequence(
+            video,
+            processing: videoProcessing
+        )
 
-            XCTAssertEqual(frames.frames.count, 3)
-            XCTAssertEqual(frames.timestamps.count, 3)
-        }
+        XCTAssertEqual(frames.frames.count, 3)
+        XCTAssertEqual(frames.timestamps.count, 3)
     }
 
     func testVideoFileAsProcessedSequenceWithTargetFPS() async throws {
@@ -169,16 +157,14 @@ public class MediaProcesingTests: XCTestCase {
         let video = UserInput.Video.url(fileURL)
         let videoProcessing = UserInput.VideoProcessing(targetFramesPerSecond: 3.0)
 
-        try await Device.withDefaultDevice(.cpu) {
-            // 5 seconds @ 3 fps = 15 frames
-            let frames = try await MediaProcessing.asProcessedSequence(
-                video,
-                processing: videoProcessing
-            )
+        // 5 seconds @ 3 fps = 15 frames
+        let frames = try await MediaProcessing.asProcessedSequence(
+            video,
+            processing: videoProcessing
+        )
 
-            XCTAssertEqual(frames.frames.count, 15)
-            XCTAssertEqual(frames.timestamps.count, 15)
-        }
+        XCTAssertEqual(frames.frames.count, 15)
+        XCTAssertEqual(frames.timestamps.count, 15)
     }
 
     func testVideoFramesAsProcessedSequenceWithTargetFrames() async throws {
@@ -196,15 +182,13 @@ public class MediaProcesingTests: XCTestCase {
         }
 
         let video = UserInput.Video.frames(rawFrames)
-        try await Device.withDefaultDevice(.cpu) {
-            let frames = try await MediaProcessing.asProcessedSequence(
-                video,
-                processing: .init(targetFrames: 6)
-            )
+        let frames = try await MediaProcessing.asProcessedSequence(
+            video,
+            processing: .init(targetFrames: 6)
+        )
 
-            XCTAssertEqual(frames.frames.count, 6)
-            XCTAssertEqual(frames.timestamps.count, 6)
-        }
+        XCTAssertEqual(frames.frames.count, 6)
+        XCTAssertEqual(frames.timestamps.count, 6)
     }
 
     func testVideoFramesAsProcessedSequenceWithTargetFramesPerSecond() async throws {
@@ -222,16 +206,14 @@ public class MediaProcesingTests: XCTestCase {
         }
 
         let video = UserInput.Video.frames(rawFrames)
-        try await Device.withDefaultDevice(.cpu) {
-            // 5s duration * 4.0 fps = 20 frames
-            let frames = try await MediaProcessing.asProcessedSequence(
-                video,
-                processing: .init(targetFramesPerSecond: 4.0)
-            )
+        // 5s duration * 4.0 fps = 20 frames
+        let frames = try await MediaProcessing.asProcessedSequence(
+            video,
+            processing: .init(targetFramesPerSecond: 4.0)
+        )
 
-            XCTAssertEqual(frames.frames.count, 20)
-            XCTAssertEqual(frames.timestamps.count, 20)
-        }
+        XCTAssertEqual(frames.frames.count, 20)
+        XCTAssertEqual(frames.timestamps.count, 20)
     }
 
     func testVideoProcessingWithUserInputProcessingWrapper() async throws {
@@ -248,14 +230,12 @@ public class MediaProcesingTests: XCTestCase {
         let video = UserInput.Video.frames(rawFrames)
 
         let userInputProcessing = UserInput.Processing(video: .init(targetFrames: 4))
-        try await Device.withDefaultDevice(.cpu) {
-            let frames = try await MediaProcessing.asProcessedSequence(
-                video,
-                userProcessing: userInputProcessing
-            )
+        let frames = try await MediaProcessing.asProcessedSequence(
+            video,
+            userProcessing: userInputProcessing
+        )
 
-            XCTAssertEqual(frames.frames.count, 4)
-        }
+        XCTAssertEqual(frames.frames.count, 4)
     }
 
     func testVideoProcessingAmbiguousInitInference() async throws {
@@ -271,15 +251,13 @@ public class MediaProcesingTests: XCTestCase {
         }
         let video = UserInput.Video.frames(rawFrames)
 
-        try await Device.withDefaultDevice(.cpu) {
-            // Calling processing: .init() should cleanly and unambiguously resolve to VideoProcessing
-            let frames = try await MediaProcessing.asProcessedSequence(
-                video,
-                processing: .init()
-            )
+        // Calling processing: .init() should cleanly and unambiguously resolve to VideoProcessing
+        let frames = try await MediaProcessing.asProcessedSequence(
+            video,
+            processing: .init()
+        )
 
-            XCTAssertGreaterThan(frames.frames.count, 0)
-        }
+        XCTAssertGreaterThan(frames.frames.count, 0)
     }
 
     func testSampleTimesHelper() {
