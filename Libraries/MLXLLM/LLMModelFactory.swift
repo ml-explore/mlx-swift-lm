@@ -97,6 +97,7 @@ public enum LLMTypeRegistry {
         "smollm3": create(SmolLM3Configuration.self, SmolLM3Model.init),
         "ernie4_5": create(Ernie45Configuration.self, Ernie45Model.init),
         "lfm2": create(LFM2Configuration.self, LFM2Model.init),
+        "lfm3": create(LFM3Configuration.self, LFM3Model.init),
         "baichuan_m1": create(BaichuanM1Configuration.self, BaichuanM1Model.init),
         "exaone4": create(Exaone4Configuration.self, Exaone4Model.init),
         "gpt_oss": create(GPTOSSConfiguration.self, GPTOSSModel.init),
@@ -474,6 +475,11 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         toolCallFormat: .lfm2
     )
 
+    static public let lfm3_1_7b_4bit = ModelConfiguration(
+        id: "LiquidAI/LFM3-1.7B-MLX-4bit",
+        defaultPrompt: "Why is the sky blue?"
+    )
+
     static public let exaone_4_0_1_2b_4bit = ModelConfiguration(
         id: "mlx-community/exaone-4.0-1.2b-4bit",
         defaultPrompt: "Why is the sky blue?"
@@ -591,6 +597,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             smollm3_3b_4bit,
             ernie_45_0_3BPT_bf16_ft,
             lfm2_1_2b_4bit,
+            lfm3_1_7b_4bit,
             baichuan_m1_14b_instruct_4bit,
             exaone_4_0_1_2b_4bit,
             lille_130m_bf16,
