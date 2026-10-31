@@ -66,8 +66,14 @@ typed configuration. It reports the normalized request, request source,
 planned or realized phase, flattened cache topology, per-layer capacity source,
 strategy state, skip reason, allocated bytes, and the container-owned
 `processedTokenCount`. Aggregate compressed, pending, skipped, and
-capacity-application counts, and the total `memoryBytes`, are available on the
+capacity-application counts, and the live-layer `memoryBytes`, are available on the
 same value.
+
+``KVCacheStatus/checkpoint`` reports the saved prefix length (`tokens`) and
+retained cache memory in bytes (`memory`). It is `nil` when no checkpoint is kept.
+The count covers cache tensors, including padding and lengths, rather than total
+checkpoint memory. Storage may be shared with the live cache or forks.
+
 ``LanguageModel/cacheStatus(parameters:)`` and
 ``ModelContainer/cacheStatus(parameters:)`` provide the same shape for planned
 caches. The lower-level ``kvCacheRuntimeReport(cache:configuration:)`` remains
@@ -104,9 +110,27 @@ consume memory. Attention views slice contiguous rows directly and concatenate
 only the selected window when it crosses the ring boundary.
 
 ``ChatSession`` checks the requested rewind against every layer's
-``KVCache/maxTrimCount``. If any layer lacks the necessary history, it rebuilds
-before modifying the caches. Larger history edits can therefore still require a
-full prefill. Recurrent layers do not acquire rewind support from this option.
+``KVCache/maxTrimCount``. Recurrent layers do not acquire rewind support from this
+option.
+
+For text-only conversations, the default balanced prefill also keeps one checkpoint
+before the assistant reply, including any reasoning block supplied by the template.
+If a later template drops that reply's reasoning, the session first tries an exact
+trim, then the saved checkpoint, then a full rebuild. Reuse requires an exact token
+prefix match; it preserves the computation for that prefix rather than changing the
+model's reasoning or attention window.
+Append-only turns keep the existing checkpoint without splitting prefill again.
+
+The checkpoint copies only rotating and recurrent leaves, including inside composite
+caches. Global attention history is trimmed in place. Variance-normalized caches save
+only the incomplete raw tile and reuse the immutable compressed prefix. Crossing a
+tile boundary without that saved tail cannot be rewound exactly. Checkpoint storage
+is therefore bounded by window, recurrent-state, and raw-tile sizes, plus token-prefix
+metadata, rather than a second copy of the full attention history.
+
+Explicit `.unchunked` and `.remainder` prefill schedules keep their original forwards
+and do not create these checkpoints. Media, attention masks, draft caches, and unknown
+cache implementations retain the conservative rebuild path when exact reuse is unavailable.
 
 For raw caches, use ``canTrimPromptCache(_:numTokens:)`` or
 ``trimPromptCache(_:numTokens:)``. The latter returns zero without modifying any

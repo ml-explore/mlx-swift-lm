@@ -167,6 +167,15 @@ public final class ChatSession {
         /// only an exact token match can reuse it.
         var transcriptBuiltCache = true
 
+        /// A prefix of `cachedTokens` and the prefill state that represents it, kept for a
+        /// later prompt that rewrites what followed and diverges past where a trim reaches.
+        var checkpoint: Checkpoint?
+
+        struct Checkpoint {
+            let tokens: [Int]
+            let prefill: PrefillCheckpoint
+        }
+
         @discardableResult
         mutating func record(
             _ assistant: AssistantGeneration,
@@ -180,6 +189,7 @@ public final class ChatSession {
                 // the ledger and rebuild from the retained messages.
                 cachedTokens.removeAll()
                 uncommittedTokens.removeAll()
+                checkpoint = nil
                 return false
             }
 
@@ -198,6 +208,7 @@ public final class ChatSession {
                 // un-emitted lookahead).
                 cachedTokens.removeAll()
                 uncommittedTokens.removeAll()
+                checkpoint = nil
             }
 
             // A turn that produced only reasoning appends an empty assistant message.
@@ -402,7 +413,12 @@ public final class ChatSession {
                 cache: stored.main.cache,
                 plan: stored.main.plan,
                 phase: .realized,
-                processedTokenCount: stored.main.processedTokenCount)
+                processedTokenCount: stored.main.processedTokenCount,
+                checkpoint: stored.conversation?.checkpoint.map {
+                    .init(
+                        tokens: $0.prefill.cache.processedTokenCount,
+                        memory: $0.prefill.cache.retainedBytes)
+                })
         }) {
             return realized
         }
@@ -1125,6 +1141,7 @@ public final class ChatSession {
                             // rather than silently continuing with the old cache policy.
                             restored.cachedTokens.removeAll()
                             restored.uncommittedTokens.removeAll()
+                            restored.checkpoint = nil
                             kvCache = KVCacheStorage(
                                 try model.newCache(parameters: generateParameters),
                                 plan: kvCachePlan)
@@ -1203,6 +1220,8 @@ public final class ChatSession {
                             input: preparedInput, modelConfiguration: modelConfiguration,
                             tokenizer: tokenizer)
                         var prefilledReasoningStartDelimiter: String?
+                        // Where this turn's prefill pauses to checkpoint the cache, in `input`.
+                        var checkpointPosition: Int?
                         pendingMessages.removeAll()
 
                         let speculativeMemoryEvaluation: SpeculativeDecodingMemoryEvaluation?
@@ -1278,16 +1297,16 @@ public final class ChatSession {
                                 hasDraftCache: draftKVCache != nil,
                                 draftCacheIsAligned: draftCacheIsAligned,
                                 maxTrimCount: (kvCache.cache + (draftKVCache?.cache ?? []))
-                                    .map(\.maxTrimCount).min() ?? 0)
+                                    .map(\.maxTrimCount).min() ?? 0,
+                                checkpointLength: currentConversation.checkpoint?.tokens.count)
 
                             var decision = promptCachePolicy.decide(turn: turn, cache: cacheState)
 
-                            // Rewinding is the one decision that can fail while being
-                            // applied: a cache may trim fewer tokens than requested.
+                            // Rewinding can fail while being applied: a cache may trim
+                            // fewer tokens than requested, or refuse a checkpoint.
                             // Verify and downgrade to a rebuild before prefilling.
-                            if case .trimToCommonPrefix(let commonPrefixLength, let trimCount) =
-                                decision
-                            {
+                            switch decision {
+                            case .trimToCommonPrefix(let commonPrefixLength, let trimCount):
                                 let mainTrimmed = kvCache.trim(trimCount)
                                 let draftTrimmed = draftKVCache.map { $0.trim(trimCount) }
                                 let mainTrimIsAligned =
@@ -1298,15 +1317,26 @@ public final class ChatSession {
                                         draftTrimmed == trimCount
                                             && draftCache.processedTokenCount == commonPrefixLength
                                     } ?? true
-
                                 if !(mainTrimIsAligned && draftTrimIsAligned) {
                                     decision = .rebuild
-                                } else if !currentConversation.transcriptBuiltCache {
-                                    // A fork shares its source's arrays. A copy keeps only
-                                    // the prefix, so the next write does not copy the rest.
-                                    kvCache = kvCache.copy()
-                                    draftKVCache = draftKVCache?.copy()
                                 }
+                            case .restoreCheckpoint:
+                                if let checkpoint = currentConversation.checkpoint,
+                                    cachedTokenIds.starts(with: checkpoint.tokens),
+                                    kvCache.restore(checkpoint.prefill.cache)
+                                {
+                                    lmState = checkpoint.prefill.state
+                                } else {
+                                    decision = .rebuild
+                                }
+                            default:
+                                break
+                            }
+                            if decision.rewinds, !currentConversation.transcriptBuiltCache {
+                                // A fork shares its source's arrays. A copy keeps only
+                                // the prefix, so the next write does not copy the rest.
+                                kvCache = kvCache.copy()
+                                draftKVCache = draftKVCache?.copy()
                             }
 
                             // Splitting a prepared input is the other decision that
@@ -1358,13 +1388,14 @@ public final class ChatSession {
                                 }
                                 cachedPromptTokenCount = suffixStart
 
-                            case .trimToCommonPrefix(let commonPrefixLength, _):
+                            case .trimToCommonPrefix(let prefixLength, _),
+                                .restoreCheckpoint(let prefixLength):
                                 input = LMInput(
-                                    tokens: MLXArray(
-                                        Array(promptTokenIds.dropFirst(commonPrefixLength))))
-                                cachedPromptTokenCount = commonPrefixLength
+                                    tokens: MLXArray(Array(promptTokenIds.dropFirst(prefixLength))))
+                                cachedPromptTokenCount = prefixLength
 
                             case .rebuild:
+                                currentConversation.checkpoint = nil
                                 kvCache = KVCacheStorage(
                                     try model.newCache(parameters: generateParameters),
                                     plan: kvCachePlan)
@@ -1385,12 +1416,30 @@ public final class ChatSession {
                                 .appendSuffixToMain(_, let representedTokens),
                                 .appendMediaSuffix(_, let representedTokens):
                                 currentConversation.cachedTokens = representedTokens
-                            case .prefillAll, .trimToCommonPrefix, .rebuild:
+                            case .prefillAll, .trimToCommonPrefix, .restoreCheckpoint, .rebuild:
                                 currentConversation.cachedTokens = promptTokenIds
                             }
                             currentConversation.uncommittedTokens.removeAll()
                             currentConversation.transcriptBuiltCache = true
                             conversation = currentConversation
+
+                            // Append-only turns keep their checkpoint. Rewritten prompts replace
+                            // it before prefilled reasoning and the final prompt token.
+                            if !decision.reusesCachedPrefix || decision.rewinds,
+                                templateMessages.last?.role == .user,
+                                generateParameters.prefill.chunking == .balanced,
+                                !containsNewMedia, !carriesPreparedMedia, draftKVCache == nil,
+                                input.text.mask == nil,
+                                kvCache.needsCheckpoint
+                            {
+                                let prefilledReasoning = modelConfiguration.reasoningConfig?
+                                    .prefilledBlock(
+                                        endingPrompt: promptTokenIds, tokenizer: tokenizer)
+                                let heldBack = max(1, prefilledReasoning?.tokenCount ?? 0)
+                                if input.text.cacheSequenceLength >= heldBack {
+                                    checkpointPosition = input.text.cacheSequenceLength - heldBack
+                                }
+                            }
                         }
 
                         guard input.text.tokens.size > 0 else {
@@ -1429,8 +1478,16 @@ public final class ChatSession {
                             let iterator = try TokenIterator(
                                 input: input, model: model, cacheStorage: kvCache,
                                 state: lmState,
-                                parameters: generateParameters, components: components)
+                                parameters: generateParameters, components: components,
+                                checkpointAt: checkpointPosition)
                             lmState = iterator.state
+                            if let prefill = iterator.prefillCheckpoint,
+                                let tokens = conversation?.cachedTokens
+                            {
+                                conversation?.checkpoint = .init(
+                                    tokens: Array(tokens.prefix(prefill.cache.processedTokenCount)),
+                                    prefill: prefill)
+                            }
 
                             return startGeneration(iterator)
                         }

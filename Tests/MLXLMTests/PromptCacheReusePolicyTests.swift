@@ -204,6 +204,56 @@ struct PromptCacheReusePolicyTests {
         #expect(decision == .rebuild)
     }
 
+    // MARK: - Restore a checkpoint
+
+    /// The previous prompt was `[1, 2, 3]`, checkpointed before its last token, and its reply
+    /// `[7, 8]` is out of reach of a trim.
+    private func checkpointedCache(
+        checkpoint: Int = 2, trimmable: Bool = false, draft: Bool = false
+    ) -> PromptCacheState {
+        var cache = alignedCache([1, 2, 3, 7, 8], trimmable: trimmable)
+        cache.checkpointLength = checkpoint
+        cache.hasDraftCache = draft
+        return cache
+    }
+
+    @Test func `a reply a trim cannot reach is dropped by restoring the checkpoint`() {
+        let decision = PromptCacheReusePolicy().decide(
+            turn: turn(prompt: [1, 2, 3, 9, 4]), cache: checkpointedCache())
+
+        #expect(decision == .restoreCheckpoint(prefixLength: 2))
+        #expect(decision.reusesCachedPrefix)
+        #expect(decision.rewinds)
+    }
+
+    @Test func `a trim that reaches the common prefix keeps more than the checkpoint`() {
+        #expect(
+            PromptCacheReusePolicy().decide(
+                turn: turn(prompt: [1, 2, 3, 7, 9]), cache: checkpointedCache(trimmable: true))
+                == .trimToCommonPrefix(commonPrefixLength: 4, trimCount: 1))
+    }
+
+    @Test func `a restore carries the model state a trim cannot`() {
+        #expect(
+            PromptCacheReusePolicy().decide(
+                turn: turn(prompt: [1, 2, 3, 9, 4], modelState: true),
+                cache: checkpointedCache(trimmable: true))
+                == .restoreCheckpoint(prefixLength: 2))
+    }
+
+    @Test(arguments: ["diverged", "prepared media", "attention mask", "new media", "draft"])
+    func `a checkpoint is restored only when it is safe`(blocker: String) {
+        let decision = PromptCacheReusePolicy().decide(
+            turn: turn(
+                prompt: blocker == "diverged" ? [1, 9, 3, 9, 4] : [1, 2, 3, 9, 4],
+                newMedia: blocker == "new media",
+                preparedMedia: blocker == "prepared media",
+                attentionMask: blocker == "attention mask"),
+            cache: checkpointedCache(draft: blocker == "draft"))
+
+        #expect(decision == .rebuild)
+    }
+
     // MARK: - Rule composition
 
     @Test func `a protocol rule is consulted before the standard rules`() {
