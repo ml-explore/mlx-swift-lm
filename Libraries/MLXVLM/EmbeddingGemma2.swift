@@ -594,6 +594,16 @@ public actor EmbeddingGemma2Embedding {
         self.supportedModalities = modalities
     }
 
+    /// Evict cached media encoders while keeping the text model and supported modalities.
+    ///
+    /// Uses `ModelComponentsProviding.evict(_:)` on the actor's model.
+    ///
+    /// - Returns: The components whose cached modules were evicted.
+    @discardableResult
+    public func evict(_ components: Set<ModelComponent>) -> Set<ModelComponent> {
+        model.evict(components)
+    }
+
     /// Embeds independent items in input order, one at a time to bound working memory.
     /// Retrieval uses `.searchQuery` for queries and `.document` for corpus items.
     public func embed(

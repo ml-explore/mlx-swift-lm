@@ -186,6 +186,11 @@ cached only when used; text needs no processor files. Keep checkpoint files read
 until each component's first use. `supportedModalities` describes the checkpoint's
 allowed modalities, including components that have not loaded yet.
 
+Call `await embeddings.evict([.vision, .audio])` to release cached encoders while
+keeping the text model and supported modalities. `EmbedderModelContainer` exposes
+the same operation. Their next use reloads the encoders, so checkpoint files must
+remain readable and unchanged. Eviction does not clear the MLX allocator cache.
+
 Use `excludedComponents: [.vision, .audio]` to permanently exclude media, or use the
 existing `loadVision: false` / `loadAudio: false` options. Unsupported input fails
 before media decoding. Processor and component loading errors surface on first use.

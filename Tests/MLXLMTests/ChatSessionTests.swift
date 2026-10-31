@@ -135,22 +135,39 @@ public class ChatSessionTests: XCTestCase {
         }
     }
 
+    private struct GatedInputProcessor: UserInputProcessor {
+        let entered: AsyncStream<Void>.Continuation
+        let release: AsyncStream<Void>
+
+        func prepare(input: UserInput) async throws -> LMInput {
+            entered.yield(())
+            for await _ in release { break }
+            return try TestInputProcessor().prepare(input: input)
+        }
+    }
+
     /// The synthetic text model does not consume attention masks itself.
     /// Strip the mask only after `ChatSession` has made its cache-reuse
     /// decision so the regression test can exercise that decision with a
     /// valid masked processor input.
-    private final class MaskTolerantLanguageModel: Module, LanguageModel {
+    private final class MaskTolerantLanguageModel: Module, LanguageModel, ModelComponentsProviding {
         let base: any LanguageModel
+        let vision: OnDemandComponent<Module>?
 
-        init(_ base: any LanguageModel) {
+        init(_ base: any LanguageModel, vision: OnDemandComponent<Module>? = nil) {
             self.base = base
+            self.vision = vision
             super.init()
         }
+
+        var modelComponents: [ModelComponent: [CheckpointComponent]] { [:] }
+        var onDemandComponents: [AnyOnDemandComponent] { vision.map { [$0] } ?? [] }
 
         func prepare(
             _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
         ) throws -> PrepareResult {
-            try base.prepare(
+            if input.image != nil { _ = try vision?.load() }
+            return try base.prepare(
                 LMInput(tokens: input.text.tokens),
                 cache: cache,
                 state: state,
@@ -277,6 +294,14 @@ public class ChatSessionTests: XCTestCase {
         }
     }
 
+    private final class CacheReference: @unchecked Sendable {
+        weak var value: BaseKVCache?
+
+        init(_ cache: KVCache) {
+            value = cache as? BaseKVCache
+        }
+    }
+
     private final class CopyCountingCache: KVCacheSimple {
         let copies: CopyCounter
 
@@ -392,11 +417,15 @@ public class ChatSessionTests: XCTestCase {
         static let anchorKey = LMOutput.Key<MLXArray>("test.ropeDeltas")
 
         @ModuleInfo var inner: Gemma3TextModel
+        let prefillStates: AsyncStream<Int?>.Continuation?
 
         var kvHeads: [Int] { (inner as? KVCacheDimensionProvider)?.kvHeads ?? [] }
 
-        init(_ inner: Gemma3TextModel) {
+        init(
+            _ inner: Gemma3TextModel, prefillStates: AsyncStream<Int?>.Continuation? = nil
+        ) {
             self.inner = inner
+            self.prefillStates = prefillStates
         }
 
         private func batched(_ tokens: MLXArray) -> MLXArray {
@@ -406,6 +435,7 @@ public class ChatSessionTests: XCTestCase {
         func prepare(
             _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
         ) throws -> PrepareResult {
+            prefillStates?.yield(state?[Self.anchorKey]?.item(Int.self))
             let logits = inner(batched(input.text.tokens), cache: cache.isEmpty ? nil : cache)
             // Carry a seeded anchor forward, or start one at zero — the shape
             // of every wired model's cold prefill.
@@ -548,6 +578,7 @@ public class ChatSessionTests: XCTestCase {
             case .noCacheAvailable: 0
             case .emptyPreparedInput: 1
             case .kvCacheConfigurationChanged: 2
+            case .noHistoryAvailable: 3
             }
         }
         func classify(_ event: Generation) -> Int {
@@ -567,6 +598,7 @@ public class ChatSessionTests: XCTestCase {
         }
         XCTAssertEqual(classify(ChatSessionError.noCacheAvailable), 0)
         XCTAssertEqual(classify(ChatSessionError.emptyPreparedInput), 1)
+        XCTAssertEqual(classify(ChatSessionError.noHistoryAvailable), 3)
         XCTAssertEqual(
             classify(ChatSessionError.kvCacheConfigurationChanged(previous: nil, requested: nil)), 2
         )
@@ -2838,6 +2870,371 @@ public class ChatSessionTests: XCTestCase {
         await session.withCache { cache in
             XCTAssertNil(cache)
         }
+    }
+
+    func testEvictedVisionStaysUnloadedForCachedMediaAndReloadsWhenHistoryRebuilds() async throws {
+        let (_, continuation) = AsyncStream<Int>.makeStream()
+        let processor = MediaAwareInputProcessor(
+            tokenizer: PrefixPreservingTokenizer(renderedLengthContinuation: continuation))
+        let vision = OnDemandComponent(.vision) { Module() }
+        vision.setSource(
+            .init(urls: [], namespaces: [], perLayerQuantization: nil, prepare: { $0 }))
+        var context = model(processor: processor)
+        context.model = MaskTolerantLanguageModel(context.model, vision: vision)
+        let container = ModelContainer(context: context)
+        let session = ChatSession(
+            container, generateParameters: GenerateParameters(maxTokens: 3, temperature: 0))
+        _ = try await session.respond(to: "inspect this", image: .array(MLXArray([Float(0)])))
+        XCTAssertTrue(vision.isLoaded)
+
+        let evicted = await container.evict([.vision])
+        XCTAssertEqual(evicted, [.vision])
+        let warm = try await collectGeneration(session.streamDetails(to: "describe it"))
+        XCTAssertGreaterThan(warm.info.cachedPromptTokenCount, 0)
+        XCTAssertFalse(vision.isLoaded)
+
+        try await session.evict()
+
+        struct ReloadFailure: Error {}
+        vision.setSource(
+            .init(
+                urls: [], namespaces: [], perLayerQuantization: nil,
+                prepare: { _ in throw ReloadFailure() }))
+        do {
+            _ = try await session.respond(to: "failed retry")
+            XCTFail("expected ReloadFailure")
+        } catch is ReloadFailure {}
+
+        let plannedAfterFailure = try await session.cacheStatus()
+        XCTAssertEqual(plannedAfterFailure.phase, .planned)
+        XCTAssertNil(plannedAfterFailure.processedTokenCount)
+        XCTAssertFalse(vision.isLoaded)
+
+        vision.setSource(
+            .init(urls: [], namespaces: [], perLayerQuantization: nil, prepare: { $0 }))
+        let cold = try await collectGeneration(session.streamDetails(to: "continue"))
+        XCTAssertEqual(cold.info.cachedPromptTokenCount, 0)
+        XCTAssertTrue(vision.isLoaded)
+    }
+
+    private actor EvictingSessionOwner {
+        private let session: ChatSession
+
+        init(container: ModelContainer, parameters: GenerateParameters) {
+            session = ChatSession(container, generateParameters: parameters)
+        }
+
+        func respond(to prompt: String) async throws -> String {
+            var text = ""
+            for try await chunk in session.streamResponse(to: prompt) { text += chunk }
+            return text
+        }
+
+        func status() async throws -> KVCacheStatus {
+            try await session.cacheStatus()
+        }
+
+        func evict() async throws {
+            try await session.evict()
+            await session.synchronize()
+        }
+    }
+
+    func testActorOwnedSessionEvictsAndReportsResidencyWithoutLosingHistory() async throws {
+        let container = ModelContainer(context: model())
+        let parameters = GenerateParameters(maxTokens: 3, temperature: 0)
+        let owner = EvictingSessionOwner(container: container, parameters: parameters)
+        let answer = try await owner.respond(to: "first")
+        let before = try await owner.status()
+        XCTAssertEqual(before.phase, .realized)
+        XCTAssertGreaterThan(before.memoryBytes, 0)
+
+        try await owner.evict()
+
+        let after = try await owner.status()
+        XCTAssertEqual(after.phase, .planned)
+        XCTAssertEqual(after.memoryBytes, 0)
+        XCTAssertNil(after.processedTokenCount)
+        XCTAssertEqual(after.requestedConfiguration, before.requestedConfiguration)
+        let resumed = try await owner.respond(to: "second")
+        let cold = ChatSession(
+            container, history: [.user("first"), .assistant(answer)],
+            generateParameters: parameters)
+        let expected = try await cold.respond(to: "second")
+        XCTAssertEqual(resumed, expected)
+        let rebuilt = try await owner.status()
+        XCTAssertEqual(rebuilt.phase, .realized)
+        XCTAssertGreaterThan(rebuilt.memoryBytes, 0)
+    }
+
+    func testEvictRebuildsFromHistoryWithTheSameCacheConfiguration() async throws {
+        let (_, continuation) = AsyncStream<Int>.makeStream()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer, configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let container = ModelContainer(context: model(processor: processor))
+
+        for parameters in [
+            GenerateParameters(maxTokens: 3, temperature: 0),
+            GenerateParameters(maxTokens: 3, maxKVSize: 8, temperature: 0),
+            GenerateParameters(maxTokens: 3, kvBits: 4, temperature: 0),
+        ] {
+            let session = ChatSession(
+                container, instructions: "keep the context", generateParameters: parameters)
+            let answer = try await session.respond(to: "first question")
+            try await session.evict()
+            let progress = await session.cacheProgress()
+            XCTAssertNil(progress)
+            XCTAssertEqual(session.instructions, "keep the context")
+
+            let resumed = try await collectGeneration(session.streamDetails(to: "second question"))
+            let cold = ChatSession(
+                container, instructions: "keep the context",
+                history: [.user("first question"), .assistant(answer)],
+                generateParameters: parameters)
+            let rebuilt = try await collectGeneration(cold.streamDetails(to: "second question"))
+            XCTAssertEqual(resumed.text, rebuilt.text)
+            XCTAssertEqual(resumed.info.cachedPromptTokenCount, 0)
+            XCTAssertEqual(resumed.info.promptTokenCount, rebuilt.info.promptTokenCount)
+            let resumedState = await session.withCache(Self.cachedValues)
+            let rebuiltState = await cold.withCache(Self.cachedValues)
+            XCTAssertEqual(resumedState, rebuiltState)
+        }
+    }
+
+    func testEvictBeforeGenerationPreservesHistory() async throws {
+        let container = ModelContainer(context: model())
+        let components = await container.evict([.vision])
+        XCTAssertTrue(components.isEmpty)
+        let parameters = GenerateParameters(maxTokens: 3, temperature: 0)
+        let empty = ChatSession(container, generateParameters: parameters)
+        try await empty.evict()
+        try await empty.evict()
+        let history: [Chat.Message] = [.user("first"), .assistant("answer")]
+        let session = ChatSession(container, history: history, generateParameters: parameters)
+        try await session.evict()
+
+        let reply = try await session.respond(to: "second")
+        let cold = ChatSession(container, history: history, generateParameters: parameters)
+        let expected = try await cold.respond(to: "second")
+        XCTAssertEqual(reply, expected)
+    }
+
+    func testEvictRejectsRawCachesWithoutChangingThem() async throws {
+        let container = ModelContainer(context: model())
+        let parameters = GenerateParameters(maxTokens: 3, temperature: 0)
+        let cache = try await container.perform { context in
+            SendableBox(try context.model.newCache(parameters: parameters))
+        }.consume()
+        let session = ChatSession(container, cache: cache, generateParameters: parameters)
+        _ = try await session.respond(to: "first")
+        let before = await session.withCache(Self.cachedValues)
+        let progress = await session.cacheProgress()
+
+        do {
+            try await session.evict()
+            XCTFail("expected a missing-history error")
+        } catch ChatSessionError.noHistoryAvailable {
+        }
+
+        let after = await session.withCache(Self.cachedValues)
+        let afterProgress = await session.cacheProgress()
+        XCTAssertEqual(before, after)
+        XCTAssertEqual(progress?.main, afterProgress?.main)
+        _ = try await session.respond(to: "second")
+    }
+
+    func testEvictLeavesForksWarm() async throws {
+        let (_, continuation) = AsyncStream<Int>.makeStream()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer, configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 3, temperature: 0))
+        _ = try await session.respond(to: "first")
+        let fork = await session.fork()
+        let before = await fork.withCache(Self.cachedValues)
+
+        try await session.evict()
+
+        let after = await fork.withCache(Self.cachedValues)
+        XCTAssertEqual(before, after)
+        let warm = try await collectGeneration(fork.streamDetails(to: "second"))
+        let cold = try await collectGeneration(session.streamDetails(to: "second"))
+        XCTAssertGreaterThan(warm.info.cachedPromptTokenCount, 0)
+        XCTAssertEqual(cold.info.cachedPromptTokenCount, 0)
+    }
+
+    func testEvictReleasesHybridCachesAndRebuildsRecurrentState() async throws {
+        let data = Data(
+            """
+            {
+                "model_type": "qwen3_5", "hidden_size": 64, "num_hidden_layers": 2,
+                "intermediate_size": 128, "num_attention_heads": 4, "num_key_value_heads": 2,
+                "head_dim": 16, "linear_num_value_heads": 4, "linear_num_key_heads": 2,
+                "linear_key_head_dim": 16, "linear_value_head_dim": 16,
+                "linear_conv_kernel_dim": 4, "rms_norm_eps": 1e-6, "vocab_size": 128,
+                "full_attention_interval": 2, "tie_word_embeddings": true
+            }
+            """.utf8)
+        let model = Qwen35TextModel(
+            try JSONDecoder().decode(Qwen35TextConfiguration.self, from: data))
+        materializeModelForInference(model)
+        let tokenizer = PseudoWordTokenizer(vocabularySize: 128)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer, configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator(), vocabularySize: 128)
+        let container = ModelContainer(
+            context: ModelContext(
+                configuration: processor.configuration, model: model, processor: processor,
+                tokenizer: processor.tokenizer))
+        let parameters = GenerateParameters(maxTokens: 3, maxKVSize: 8, temperature: 0)
+        let session = ChatSession(container, generateParameters: parameters)
+        let question = "a longer question that fills and wraps the attention window before eviction"
+        let answer = try await session.respond(to: question)
+        let references: [CacheReference] =
+            await session.withCache { cache in
+                XCTAssertTrue(cache?.contains { $0 is MambaCache } ?? false)
+                XCTAssertTrue(cache?.contains { $0 is RotatingKVCache } ?? false)
+                return (cache ?? []).map(CacheReference.init)
+            } ?? []
+        XCTAssertEqual(references.count, 2)
+        XCTAssertTrue(references.allSatisfy { $0.value != nil })
+
+        try await session.evict()
+
+        XCTAssertTrue(references.allSatisfy { $0.value == nil })
+        let resumed = try await session.respond(to: "continue")
+        let cold = ChatSession(
+            container, history: [.user(question), .assistant(answer)],
+            generateParameters: parameters)
+        let rebuilt = try await cold.respond(to: "continue")
+        XCTAssertEqual(resumed, rebuilt)
+        let resumedState = await session.withCache(Self.cachedValues)
+        let rebuiltState = await cold.withCache(Self.cachedValues)
+        XCTAssertEqual(resumedState, rebuiltState)
+    }
+
+    func testEvictRebuildsDraftCachesWithoutReloadingTheDraftModel() async throws {
+        let (_, tokenContinuation) = AsyncStream<Int>.makeStream()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: tokenContinuation)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer, configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        let context = model(processor: processor)
+        let draft = ModelContainer(context: model())
+        let loads = DraftModelLoadCounter()
+        let session = ChatSession(
+            ModelContainer(context: context),
+            speculativeDecoding: SpeculativeDecodingConfig(draftModelBytes: 1) {
+                await loads.increment()
+                return draft
+            },
+            generateParameters: GenerateParameters(maxTokens: 3, temperature: 0))
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+        let before = await session.cacheProgress()
+        XCTAssertNotNil(before?.draft)
+        XCTAssertGreaterThan(before?.main ?? 0, 0)
+        XCTAssertGreaterThan(before?.draft ?? 0, 0)
+
+        try await session.evict()
+
+        let evicted = await session.cacheProgress()
+        XCTAssertNil(evicted)
+        let reply = try await collectGeneration(session.streamDetails(to: "third"))
+        XCTAssertNotNil(reply.info.speculativeDecodingTelemetry)
+        XCTAssertEqual(reply.info.cachedPromptTokenCount, 0)
+        let after = await session.cacheProgress()
+        XCTAssertNotNil(after?.draft)
+        XCTAssertGreaterThan(after?.main ?? 0, 0)
+        XCTAssertGreaterThan(after?.draft ?? 0, 0)
+        let loadCount = await loads.value
+        XCTAssertEqual(loadCount, 1)
+    }
+
+    func testEvictDropsCarriedModelState() async throws {
+        let (states, stateContinuation) = AsyncStream<Int?>.makeStream()
+        let (_, tokenContinuation) = AsyncStream<Int>.makeStream()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: tokenContinuation)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer, configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        var context = model(processor: processor)
+        let inner = try XCTUnwrap(context.model as? Gemma3TextModel)
+        context.model = StateProducingModel(inner, prefillStates: stateContinuation)
+        let session = ChatSession(
+            ModelContainer(context: context),
+            generateParameters: GenerateParameters(maxTokens: 3, temperature: 0))
+        _ = try await session.respond(to: "first")
+        _ = try await session.respond(to: "second")
+
+        try await session.evict()
+        _ = try await session.respond(to: "third")
+
+        stateContinuation.finish()
+        var recorded: [Int?] = []
+        for await state in states { recorded.append(state) }
+        XCTAssertEqual(recorded, [nil, 0, nil])
+    }
+
+    func testEvictWaitsForCancelledGenerationCleanup() async throws {
+        let (messages, continuation) = AsyncStream<[RecordedMessage]>.makeStream()
+        let processor = TestInputProcessor(
+            tokenizer: PseudoWordTokenizer(), configuration: ModelConfiguration(id: "test"),
+            messageGenerator: RecordingMessageGenerator(continuation: continuation))
+        let session = ChatSession(
+            model(processor: processor), generateParameters: GenerateParameters(maxTokens: 50))
+        for try await _ in session.streamResponse(to: "interrupted") { break }
+
+        try await session.evict()
+
+        let progress = await session.cacheProgress()
+        XCTAssertNil(progress)
+        session.generateParameters = GenerateParameters(maxTokens: 1)
+        _ = try await session.respond(to: "next question")
+        continuation.finish()
+        var calls: [[RecordedMessage]] = []
+        for await call in messages { calls.append(call) }
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(calls[1], [.init(role: .user, content: "next question")])
+    }
+
+    func testEvictWaitsForGenerationAndRetainsTheCompletedTurn() async throws {
+        let (entered, enteredContinuation) = AsyncStream<Void>.makeStream()
+        let (release, releaseContinuation) = AsyncStream<Void>.makeStream()
+        let base = TestInputProcessor()
+        let container = ModelContainer(
+            context: Self.makeModel(
+                processor: GatedInputProcessor(entered: enteredContinuation, release: release),
+                configuration: base.configuration, tokenizer: base.tokenizer))
+        let parameters = GenerateParameters(maxTokens: 3, temperature: 0)
+        let session = ChatSession(container, generateParameters: parameters)
+        let stream = session.streamDetails(to: "first")
+        var preparation = entered.makeAsyncIterator()
+        _ = await preparation.next()
+        let unblock = Task {
+            releaseContinuation.yield(())
+            releaseContinuation.finish()
+        }
+
+        try await session.evict()
+
+        await unblock.value
+        let progress = await session.cacheProgress()
+        XCTAssertNil(progress)
+        let first = try await collectGeneration(stream)
+        XCTAssertEqual(first.info.generationTokenCount, 3)
+        let next = try await session.respond(to: "second")
+        let cold = ChatSession(
+            container, history: [.user("first"), .assistant(first.text)],
+            generateParameters: parameters)
+        let expected = try await cold.respond(to: "second")
+        XCTAssertEqual(next, expected)
+        enteredContinuation.finish()
     }
 
     func testCacheStatusPreservesTheRealizedRequestWhenParametersChange() async throws {

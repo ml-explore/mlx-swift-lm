@@ -1149,6 +1149,17 @@ struct MuseGlimmerOnDemandVisionTests {
             arrayEqual(
                 try Self.logits(model, Self.imageInput()), try Self.logits(full, Self.imageInput())
             ).item(Bool.self))
+
+        let names = model.parameters().flattened().map(\.0)
+        let container = ModelContainer(context: context)
+        let evicted = await container.evict([.vision, .audio])
+        #expect(evicted == [.vision])
+        #expect(await container.evict([.vision]).isEmpty)
+        #expect(model.parameters().flattened().map(\.0) == names)
+        #expect(
+            arrayEqual(
+                try Self.logits(model, Self.imageInput()), try Self.logits(full, Self.imageInput())
+            ).item(Bool.self))
     }
 }
 

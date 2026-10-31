@@ -828,6 +828,10 @@ extension EmbeddingGemma2Tests {
         MLXArray((0 ..< 44 * 8).map { Float(sin(Double($0) * 0.17)) }, [44, 8])
     }
 
+    private static var audioSamples: MLXArray {
+        MLXArray((0 ..< 1760).map { Float(sin(Double($0) * 0.17)) })
+    }
+
     private static func textVector(_ model: EmbeddingGemma2) -> MLXArray {
         model.embed(inputIds: MLXArray([2, 15, 18, 20, 1] as [Int32], [1, 5]), attentionMask: nil)
     }
@@ -884,6 +888,90 @@ extension EmbeddingGemma2Tests {
         #expect(
             arrayEqual(try #require(try lazy.audioFeatures(Self.audioFrames)), audioReference).item(
                 Bool.self))
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func publicActorEvictsSelectedEncodersAndReloadsIdenticalVectors(scoped: Bool, quantized: Bool)
+        async throws
+    {
+        let checkpoint = try Self.mediaCheckpoint(scoped: scoped, quantized: quantized)
+        defer { try? FileManager.default.removeItem(at: checkpoint.directory) }
+        try Data(
+            #"{"processor_class":"Gemma4Processor","patch_size":4,"pooling_kernel_size":2,"max_soft_tokens":4,"feature_extractor":{"feature_size":8,"sampling_rate":4000,"frame_length":80,"hop_length":40,"fft_length":128,"min_frequency":0.0,"max_frequency":2000.0,"mel_floor":0.001}}"#
+                .utf8
+        ).write(to: checkpoint.directory.appendingPathComponent("processor_config.json"))
+        let embeddings = try await EmbeddingGemma2Embedding(
+            modelDirectory: checkpoint.directory, tokenizerLoader: TestTokenizerLoader())
+        #expect(await embeddings.evict([.vision, .audio]).isEmpty)
+        let text = try await embeddings.embed(.init(text: "Swift"), task: .searchQuery)
+        let image = try await embeddings.embed(
+            .init(images: [.array(Self.imagePixels[0])]), task: .document)
+        let audio = try await embeddings.embed(
+            .init([.audio(.array(Self.audioSamples))]), task: .document)
+
+        #expect(await embeddings.evict([.vision]) == [.vision])
+        #expect(await embeddings.evict([.vision]).isEmpty)
+        #expect(await embeddings.supportedModalities == [.text, .image, .video, .audio])
+        #expect(try await embeddings.embed(.init(text: "Swift"), task: .searchQuery) == text)
+        #expect(
+            try await embeddings.embed(
+                .init(images: [.array(Self.imagePixels[0])]), task: .document) == image)
+        #expect(await embeddings.evict([.vision, .audio]) == [.vision, .audio])
+        #expect(
+            try await embeddings.embed(
+                .init([.audio(.array(Self.audioSamples))]), task: .document) == audio)
+        #expect(await embeddings.evict([.audio]) == [.audio])
+    }
+
+    @Test
+    func publicActorEvictionLeavesImmediateAndExcludedComponentsAlone() async throws {
+        let checkpoint = try Self.mediaCheckpoint()
+        defer { try? FileManager.default.removeItem(at: checkpoint.directory) }
+        let immediate = try await EmbeddingGemma2Embedding(
+            modelDirectory: checkpoint.directory, tokenizerLoader: TestTokenizerLoader(),
+            componentLoading: .immediate)
+        #expect(await immediate.evict([.vision, .audio]).isEmpty)
+        #expect(await immediate.supportedModalities == [.text, .image, .video, .audio])
+        let excluded = try await EmbeddingGemma2Embedding(
+            modelDirectory: checkpoint.directory, tokenizerLoader: TestTokenizerLoader(),
+            excludedComponents: [.vision, .audio])
+        #expect(await excluded.evict([.vision, .audio]).isEmpty)
+        #expect(await excluded.supportedModalities == [.text])
+        #expect(
+            try await immediate.embed(.init(text: "Swift"), task: .searchQuery)
+                == excluded.embed(.init(text: "Swift"), task: .searchQuery))
+    }
+
+    @Test(arguments: [false, true])
+    func embedderContainerEvictionPreservesTextAndReloadsBothEncoders(quantized: Bool) async throws
+    {
+        let checkpoint = try Self.mediaCheckpoint(quantized: quantized)
+        defer { try? FileManager.default.removeItem(at: checkpoint.directory) }
+        let container = try await EmbedderModelFactory.shared.loadContainer(
+            from: checkpoint.directory, using: TestTokenizerLoader())
+        #expect(await container.evict([.vision, .audio]).isEmpty)
+        let before = try await Self.mediaVectors(in: container)
+
+        #expect(await container.evict([.vision]) == [.vision])
+        let loaded = await container.perform { context in
+            (context.model as? any ModelComponentsProviding)?.onDemandComponents
+                .filter(\.isLoaded).map(\.component)
+        }
+        #expect(loaded == [.audio])
+        #expect(await container.evict([.vision, .audio]) == [.audio])
+        #expect(try await Self.mediaVectors(in: container) == before)
+    }
+
+    private static func mediaVectors(in container: EmbedderModelContainer) async throws -> [[Float]]
+    {
+        try await container.perform { context in
+            let model = try #require(context.model as? MLXLMCommon.EmbeddingGemma2)
+            return [
+                Self.textVector(model).asArray(Float.self),
+                try #require(try model.imageFeatures(Self.imagePixels)).asArray(Float.self),
+                try #require(try model.audioFeatures(Self.audioFrames)).asArray(Float.self),
+            ]
+        }
     }
 
     @Test(arguments: [[ModelComponent.vision], [.audio], [.vision, .audio]])
