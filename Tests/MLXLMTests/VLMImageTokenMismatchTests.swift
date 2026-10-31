@@ -9,7 +9,7 @@ import Testing
 
 struct VLMImageTokenMismatchTests {
 
-    private static func makeTinyMistral3() throws -> Mistral3VLM {
+    static func makeTinyMistral3() throws -> Mistral3VLM {
         let json = """
             {
                 "model_type": "mistral3",

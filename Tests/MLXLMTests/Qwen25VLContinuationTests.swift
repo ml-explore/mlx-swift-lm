@@ -132,6 +132,14 @@ final class Qwen25VLContinuationTests: XCTestCase {
         try continuation.assertImageMidContinuationResumeState(makeTinyQwen25VL())
     }
 
+    func testQwen25VLRewoundStateContinuationMatchesFullPrefill() throws {
+        try continuation.assertRewoundStateContinuation(makeTinyQwen25VL())
+    }
+
+    func testQwen25VLRewoundStateKeepsThePrefixMediaDelta() throws {
+        try continuation.assertRewoundStateKeepsThePrefixMediaDelta(makeTinyQwen25VL())
+    }
+
     func testQwen25VLWindowedPrefillMatchesSingleShot() throws {
         try continuation.assertWindowedTextPrefill(makeTinyQwen25VL())
     }
@@ -162,6 +170,14 @@ final class Qwen25VLContinuationTests: XCTestCase {
 
     func testQwen2VLImageMidContinuationResumeState() throws {
         try continuation.assertImageMidContinuationResumeState(makeTinyQwen2VL())
+    }
+
+    func testQwen2VLRewoundStateContinuationMatchesFullPrefill() throws {
+        try continuation.assertRewoundStateContinuation(makeTinyQwen2VL())
+    }
+
+    func testQwen2VLRewoundStateKeepsThePrefixMediaDelta() throws {
+        try continuation.assertRewoundStateKeepsThePrefixMediaDelta(makeTinyQwen2VL())
     }
 
     func testQwen2VLWindowedPrefillMatchesSingleShot() throws {

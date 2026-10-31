@@ -361,10 +361,9 @@ public struct SmolVLMProcessor: UserInputProcessor {
             let finalPromptTokens = tokenizer.encode(text: prompt)
 
             let promptArray = MLXArray(finalPromptTokens).expandedDimensions(axis: 0)
-            let mask = ones(like: promptArray)
 
             return LMInput(
-                text: .init(tokens: promptArray, mask: mask),
+                text: .init(tokens: promptArray),
                 image: .init(pixels: pixels)
             )
         } else {
@@ -447,9 +446,8 @@ public struct SmolVLMProcessor: UserInputProcessor {
             let finalPromptTokens = tokenizer.encode(text: prompt)
 
             let promptArray = MLXArray(finalPromptTokens).expandedDimensions(axis: 0)
-            let mask = ones(like: promptArray)
             return LMInput(
-                text: .init(tokens: promptArray, mask: mask),
+                text: .init(tokens: promptArray),
                 image: .init(pixels: transposedFrames, frames: thwFrames)
             )
         }
