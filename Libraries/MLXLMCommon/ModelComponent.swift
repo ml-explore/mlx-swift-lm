@@ -92,6 +92,14 @@ public class AnyOnDemandComponent: @unchecked Sendable {
         }
     }
 
+    func loadedTensors() -> [MLXArray]? {
+        let module: Module? = stateLock.withLock {
+            if case .loaded(let module) = state { return module }
+            return nil
+        }
+        return module?.innerState()
+    }
+
     /// Whether a source is set and the component has not loaded yet.
     var isPending: Bool {
         stateLock.withLock {

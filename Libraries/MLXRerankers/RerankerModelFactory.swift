@@ -118,7 +118,8 @@ public final class RerankerModelFactory: Sendable {
             let container = ModelContainer(context: context)
             return RerankerContainer(
                 modelID: modelID,
-                scoreKind: .cosineSimilarity
+                scoreKind: .cosineSimilarity,
+                memoryReporter: container
             ) { query, documents, instruction, options in
                 try await container.listwiseRerankerScores(
                     query: query,
@@ -136,7 +137,9 @@ public final class RerankerModelFactory: Sendable {
                 throw RerankerError.unsupportedModel(
                     "\(modelID) did not load an encoder reranker head.")
             }
-            return RerankerContainer(modelID: modelID, scoreKind: scoreKind) {
+            return RerankerContainer(
+                modelID: modelID, scoreKind: scoreKind, memoryReporter: container
+            ) {
                 query, documents, _, options in
                 try await container.rerankerScores(
                     query: query, documents: documents, options: options)
@@ -145,7 +148,9 @@ public final class RerankerModelFactory: Sendable {
             let context = try await LLMModelFactory.shared._load(
                 configuration: resolved, tokenizerLoader: tokenizerLoader)
             let container = ModelContainer(context: context)
-            return RerankerContainer(modelID: modelID, scoreKind: .normalizedRelevance) {
+            return RerankerContainer(
+                modelID: modelID, scoreKind: .normalizedRelevance, memoryReporter: container
+            ) {
                 query, documents, instruction, options in
                 try await container.causalRerankerScores(
                     query: query,

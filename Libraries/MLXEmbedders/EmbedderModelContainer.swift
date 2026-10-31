@@ -26,7 +26,7 @@ import MLXLMCommon
 ///     return result.map { $0.asArray(Float.self) }
 /// }
 /// ```
-public final class EmbedderModelContainer: Sendable {
+public final class EmbedderModelContainer: ModelMemoryReporting {
     private let context: SerialAccessContainer<EmbedderModelContext>
 
     public var configuration: ModelConfiguration {
@@ -97,6 +97,10 @@ public final class EmbedderModelContainer: Sendable {
     }
 
     // MARK: - Thread-safe convenience methods
+
+    public func memory() async throws -> ModelMemory {
+        try await context.read { try $0.model.memory() }
+    }
 
     /// The resolved local model directory for the loaded container.
     public var modelDirectory: URL {

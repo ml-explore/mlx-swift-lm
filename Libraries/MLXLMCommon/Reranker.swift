@@ -364,18 +364,27 @@ public final class RerankerContainer: Reranker, Sendable {
     /// Semantic meaning and numeric range of returned scores.
     public let scoreKind: RerankScoreKind
     private let scoreOperation: ScoreOperation
+    private let memoryReporter: (any ModelMemoryReporting)?
 
     /// Create a type-erased reranker around a scoring operation.
     ///
     /// The operation must return one finite score per document in original input order.
+    /// Pass the container that owns the model as `memoryReporter` to support ``memory()``.
     public init(
         modelID: String,
         scoreKind: RerankScoreKind,
+        memoryReporter: (any ModelMemoryReporting)? = nil,
         scoreOperation: @escaping ScoreOperation
     ) {
         self.modelID = modelID
         self.scoreKind = scoreKind
+        self.memoryReporter = memoryReporter
         self.scoreOperation = scoreOperation
+    }
+
+    /// Measure model tensor buffers, or `nil` if no memory reporter was provided.
+    public func memory() async throws -> ModelMemory? {
+        try await memoryReporter?.memory()
     }
 
     /// Score documents while preserving their original order.

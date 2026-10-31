@@ -32,6 +32,18 @@ public class GatedDeltaTests: XCTestCase {
         }
     }
 
+    /// Largest disagreement as a fraction of the largest value involved.
+    private func relativeDrift(_ lhs: MLXArray, _ rhs: MLXArray) -> Float {
+        let left = lhs.asType(.float32)
+        let right = rhs.asType(.float32)
+        let drift = abs(left - right).max()
+        let scale = maximum(abs(left).max(), abs(right).max())
+        eval(drift)
+        eval(scale)
+        let magnitude = scale.item(Float.self)
+        return magnitude > 0 ? drift.item(Float.self) / magnitude : drift.item(Float.self)
+    }
+
     /// Multi-chunk prefill must match single-chunk prefill at the same total T.
     ///
     /// Regression for the fp32-state fix. Pre-fix, `gatedDeltaKernel` wrote
@@ -235,18 +247,6 @@ public class GatedDeltaTests: XCTestCase {
             useKernel: false
         )
 
-        /// Largest disagreement as a fraction of the largest value involved.
-        func relativeDrift(_ lhs: MLXArray, _ rhs: MLXArray) -> Float {
-            let left = lhs.asType(.float32)
-            let right = rhs.asType(.float32)
-            let drift = abs(left - right).max()
-            let scale = maximum(abs(left).max(), abs(right).max())
-            eval(drift)
-            eval(scale)
-            let magnitude = scale.item(Float.self)
-            return magnitude > 0 ? drift.item(Float.self) / magnitude : drift.item(Float.self)
-        }
-
         XCTAssertLessThan(
             relativeDrift(yKernel, yOps), 1e-4,
             "The differentiable ops path and the fused kernel disagree on the "
@@ -258,4 +258,104 @@ public class GatedDeltaTests: XCTestCase {
         )
     }
 
+    // MARK: - MLXFast
+
+    /// Qwen3.5-9B inputs: 16 key heads, 32 value heads, head dim 128, and
+    /// L2-normalized q and k, as the model passes them. A `decay` sets the
+    /// same `g` for every head and step.
+    private func makeQwen35Inputs(T: Int, decay: Float? = nil) -> Inputs {
+        let inputs = makeInputs(T: T, Hk: 16, Dk: 128, Hv: 32, Dv: 128)
+        func l2(_ x: MLXArray, scale: Float = 1) -> MLXArray {
+            let x = x.asType(.float32)
+            return (x * rsqrt(x.square().sum(axis: -1, keepDims: true)) * scale)
+                .asType(.bfloat16)
+        }
+        var (a, aLog, dtBias) = (inputs.a, inputs.aLog, inputs.dtBias)
+        if let decay {
+            // g = exp(-exp(aLog) * softplus(a + dtBias)) and softplus(0) = log 2.
+            a = MLXArray.zeros(like: a)
+            dtBias = MLXArray.zeros(like: dtBias)
+            aLog = MLXArray(Array(repeating: log(-log(decay) / log(2)), count: 32))
+        }
+        return Inputs(
+            q: l2(inputs.q, scale: 1 / Float(128).squareRoot()), k: l2(inputs.k), v: inputs.v,
+            a: a, b: inputs.b, aLog: aLog, dtBias: dtBias)
+    }
+
+    /// Every step kept, so the masked paths compute the unmasked recurrence
+    /// without the MLXFast kernel, which runs only without a mask.
+    private func keepAll(_ inputs: Inputs) -> MLXArray {
+        MLXArray.ones([inputs.q.dim(0), inputs.q.dim(1)], dtype: .bool)
+    }
+
+    /// The MLXFast kernel must compute what the custom kernel computes.
+    ///
+    /// T = 37 is four chunks of 8 and a remainder of 5, and the call starts
+    /// from the state of an earlier call, as a second prefill chunk does.
+    func testGatedDeltaFastPathMatchesTheKernel() throws {
+        let inputs = makeQwen35Inputs(T: 37)
+        let (_, state) = gatedDeltaUpdate(
+            q: inputs.q, k: inputs.k, v: inputs.v, a: inputs.a, b: inputs.b,
+            aLog: inputs.aLog, dtBias: inputs.dtBias)
+
+        let (yFast, stateFast) = gatedDeltaUpdate(
+            q: inputs.q, k: inputs.k, v: inputs.v, a: inputs.a, b: inputs.b,
+            aLog: inputs.aLog, dtBias: inputs.dtBias, state: state)
+        let (yKernel, stateKernel) = gatedDeltaUpdate(
+            q: inputs.q, k: inputs.k, v: inputs.v, a: inputs.a, b: inputs.b,
+            aLog: inputs.aLog, dtBias: inputs.dtBias, state: state, mask: keepAll(inputs))
+
+        XCTAssertEqual(yFast.dtype, .bfloat16)
+        XCTAssertEqual(stateFast.dtype, .float32)
+        XCTAssertLessThan(relativeDrift(yFast, yKernel), 1e-2)
+        XCTAssertLessThan(relativeDrift(stateFast, stateKernel), 1e-3)
+    }
+
+    /// A decay just below 1 must still decay the state.
+    ///
+    /// In bf16, 0.999 rounds to 1. mlx core casts `g` to the dtype of `q`, so
+    /// without float32 `q` and `k` the state stops decaying and drifts away
+    /// from the custom kernel, which keeps `g` in float32 (ml-explore/mlx#4725).
+    func testGatedDeltaFastPathKeepsDecayNearOneInFloat32() throws {
+        let inputs = makeQwen35Inputs(T: 256, decay: 0.999)
+
+        let (_, stateFast) = gatedDeltaUpdate(
+            q: inputs.q, k: inputs.k, v: inputs.v, a: inputs.a, b: inputs.b,
+            aLog: inputs.aLog, dtBias: inputs.dtBias)
+        let (_, stateKernel) = gatedDeltaUpdate(
+            q: inputs.q, k: inputs.k, v: inputs.v, a: inputs.a, b: inputs.b,
+            aLog: inputs.aLog, dtBias: inputs.dtBias, mask: keepAll(inputs))
+
+        XCTAssertLessThan(
+            relativeDrift(stateFast, stateKernel), 1e-3,
+            "A decay of 0.999 was rounded to 1 before the MLXFast kernel."
+        )
+    }
+
+    /// Training must differentiate through the MLXFast kernel and get the
+    /// gradients of the ops path.
+    func testGatedDeltaFastPathGradientsMatchTheOpsPath() throws {
+        let inputs = makeQwen35Inputs(T: 24)
+        func gradients(mask: MLXArray?) -> [MLXArray] {
+            let loss: ([MLXArray]) -> [MLXArray] = { arrays in
+                let (y, state) = gatedDeltaUpdate(
+                    q: arrays[0], k: arrays[1], v: arrays[2], a: arrays[3], b: arrays[4],
+                    aLog: inputs.aLog, dtBias: inputs.dtBias, mask: mask, useKernel: false)
+                return [y.asType(.float32).square().sum() + state.sum()]
+            }
+            let (_, gradients) = valueAndGrad(loss, argumentNumbers: [0, 1, 2, 3, 4])(
+                [inputs.q, inputs.k, inputs.v, inputs.a, inputs.b])
+            eval(gradients)
+            return gradients
+        }
+
+        let fast = gradients(mask: nil)
+        let ops = gradients(mask: keepAll(inputs))
+        for (name, (fast, ops)) in zip(["q", "k", "v", "a", "b"], zip(fast, ops)) {
+            XCTAssertLessThan(
+                relativeDrift(fast, ops), 2e-2,
+                "d(loss)/d\(name) through the MLXFast kernel differs from the ops path."
+            )
+        }
+    }
 }
