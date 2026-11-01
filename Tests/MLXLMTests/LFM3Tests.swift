@@ -2,11 +2,11 @@
 
 import Foundation
 import MLX
-import MLXLMCommon
 import MLXNN
 import XCTest
 
 @testable import MLXLLM
+@testable import MLXLMCommon
 
 final class LFM3Tests: XCTestCase {
 
@@ -63,6 +63,7 @@ final class LFM3Tests: XCTestCase {
     /// test prompts.
     private func tinyConfiguration(
         layerTypes: [String] = tinyLayerTypes, tieWordEmbeddings: Bool = true,
+        intermediateSize: Int = 48,
         fullRope: String =
             #"{"rope_type": "default", "rope_theta": 1000000.0, "partial_rotary_factor": 0.5}"#
     ) throws -> LFM3Configuration {
@@ -71,7 +72,8 @@ final class LFM3Tests: XCTestCase {
             """
             {
                 "model_type": "lfm3", "vocab_size": 64, "hidden_size": 32,
-                "intermediate_size": 48, "num_hidden_layers": \(layerTypes.count),
+                "intermediate_size": \(intermediateSize),
+                "num_hidden_layers": \(layerTypes.count),
                 "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 16,
                 "norm_eps": 1e-5, "conv_L_cache": 3, "conv_bias": false,
                 "sliding_window": 4, "use_sandwich_norm": true,
@@ -302,5 +304,157 @@ final class LFM3Tests: XCTestCase {
                 }
             }
         }
+    }
+
+    // MARK: - Backbone entry points
+
+    /// Token ids and their embeddings take the same path, so logits match exactly.
+    func testEmbeddingInputMatchesTokenInput() throws {
+        for tied in [true, false] {
+            let model = try tinyModel(tinyConfiguration(tieWordEmbeddings: tied))
+            let tokens = MLXArray((0 ..< 14).map { Int32($0 * 5 % 64) }).reshaped(2, 7)
+
+            let fromTokens = model(tokens, cache: nil)
+            let hidden = model.model(embeddings: model.model.embed(tokens))
+            let fromEmbeddings = model.projectLogits(hidden)
+
+            XCTAssertEqual(hidden.shape, [2, 7, model.model.hiddenSize])
+            XCTAssertEqual(
+                abs(fromEmbeddings - fromTokens).max().item(Float.self), 0, "tied \(tied)")
+            XCTAssertEqual(
+                abs(model.hiddenStates(tokens, cache: nil) - hidden).max().item(Float.self), 0)
+        }
+    }
+
+    /// Embedding prefill in chunks and then one step at a time must match one shot, past
+    /// the sliding window where the rotating caches wrap.
+    func testChunkedEmbeddingPrefillMatchesOneShot() throws {
+        let model = try tinyModel()
+        let tokenCount = 19
+        let tokens = MLXArray((0 ..< tokenCount).map { Int32(($0 * 5 + 1) % 64) })
+            .reshaped(1, tokenCount)
+        let embeddings = model.model.embed(tokens)
+
+        let oneShot = model(tokens, cache: nil)
+        eval(oneShot)
+
+        let decodeCount = 5
+        for chunkSize in [2, 4, 7, 14] {
+            let cache = try model.newCache(parameters: nil)
+            var logits = [MLXArray]()
+            var start = 0
+            while start < tokenCount {
+                let prefillEnd = tokenCount - decodeCount
+                let end = start < prefillEnd ? min(start + chunkSize, prefillEnd) : start + 1
+                let hidden = model.model(embeddings: embeddings[0..., start ..< end], cache: cache)
+                logits.append(model.projectLogits(hidden))
+                eval(logits.last!)
+                start = end
+            }
+
+            let drift = abs(concatenated(logits, axis: 1) - oneShot).max().item(Float.self)
+            XCTAssertLessThan(drift, MatmulPrecision.splitTolerance, "chunk size \(chunkSize)")
+            for (i, layerCache) in cache.enumerated() where !(layerCache is MambaCache) {
+                XCTAssertEqual(layerCache.offset, tokenCount, "layer \(i)")
+            }
+        }
+    }
+
+    /// Masks passed per attention type replace the defaults for that type only.
+    func testAttentionMaskOverrides() throws {
+        let model = try tinyModel()
+        let tokens = MLXArray((0 ..< 9).map { Int32($0 * 3 % 64) }).reshaped(1, 9)
+        let window = model.configuration.slidingWindow
+        let defaults = model.model(tokens)
+
+        let explicit = model.model(
+            tokens,
+            masks: .init(
+                fullAttention: .causal,
+                slidingAttention: .array(createCausalMask(n: 9, offset: 0, windowSize: window))))
+        XCTAssertLessThan(abs(explicit - defaults).max().item(Float.self), 1e-5)
+
+        // A plain causal mask lets sliding layers see past the window.
+        let unwindowed = model.model(tokens, masks: .init(slidingAttention: .causal))
+        XCTAssertGreaterThan(abs(unwindowed - defaults).max().item(Float.self), 1e-3)
+    }
+
+    // MARK: - Mixed-precision checkpoint
+
+    /// An MLX conversion wrapped in `language_model` with 4-bit attention and conv, 6-bit
+    /// MLP, and an 8-bit untied `lm_head`, declared per layer in `config.json`. The prefix
+    /// mapping must rename tensors and settings together or strict loading fails.
+    func testLoadsMixedPrecisionWrappedCheckpoint() throws {
+        let groupSize = 32
+        let configuration = try tinyConfiguration(tieWordEmbeddings: false, intermediateSize: 64)
+        let reference = try tinyModel(configuration)
+
+        let bits = { (path: String) in
+            path == "lm_head" ? 8 : path.contains(".feed_forward.") ? 6 : 4
+        }
+        var arrays = [String: MLXArray]()
+        var quantizedPaths = [String]()
+        for (path, module) in reference.leafModules().flattened() {
+            let weight: MLXArray
+            switch module {
+            case let linear as Linear: weight = linear.weight
+            case let embedding as Embedding: weight = embedding.weight
+            default: continue
+            }
+            let (wq, scales, biases) = quantized(weight, groupSize: groupSize, bits: bits(path))
+            arrays["language_model.\(path).weight"] = wq
+            arrays["language_model.\(path).scales"] = scales
+            arrays["language_model.\(path).biases"] = biases
+            quantizedPaths.append(path)
+        }
+        for (key, value) in reference.parameters().flattened() {
+            let module = key.split(separator: ".").dropLast().joined(separator: ".")
+            if !quantizedPaths.contains(module) {
+                arrays["language_model.\(key)"] = value
+            }
+        }
+        arrays["vision_tower.proj.weight"] = MLXArray.zeros([4, 4])
+        XCTAssertTrue(quantizedPaths.contains("lm_head"))
+        XCTAssertTrue(quantizedPaths.contains { $0.hasSuffix("conv.in_proj") })
+
+        // Per-layer entries use the checkpoint's own (wrapped) names.
+        let overrides =
+            quantizedPaths.filter { bits($0) != 4 }.map { path in
+                #""language_model.\#(path)": {"group_size": \#(groupSize), "bits": \#(bits(path))}"#
+            } + [#""vision_tower.proj": {"group_size": \#(groupSize), "bits": 8}"#]
+        let baseConfiguration = try JSONDecoder().decode(
+            BaseConfiguration.self,
+            from: Data(
+                """
+                {
+                    "model_type": "lfm3",
+                    "quantization": {
+                        "group_size": \(groupSize), "bits": 4,
+                        \(overrides.joined(separator: ",\n"))
+                    }
+                }
+                """.utf8))
+
+        let directory = FileManager.default.temporaryDirectory
+            .appending(component: "lfm3-mixed-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try save(arrays: arrays, url: directory.appending(component: "model.safetensors"))
+
+        let model = LFM3Model(configuration)
+        try loadWeights(
+            modelDirectory: directory, model: model,
+            perLayerQuantization: baseConfiguration.perLayerQuantization)
+
+        let modules = Dictionary(uniqueKeysWithValues: model.leafModules().flattened())
+        for path in quantizedPaths {
+            let module = try XCTUnwrap(modules[path] as? Quantized, path)
+            XCTAssertEqual(module.bits, bits(path), path)
+            XCTAssertEqual(module.groupSize, groupSize, path)
+        }
+
+        let logits = model(MLXArray([Int32(1), 2, 3, 4, 5]).reshaped(1, 5), cache: nil)
+        XCTAssertEqual(logits.shape, [1, 5, 64])
+        XCTAssertFalse(any(isNaN(logits)).item(Bool.self))
     }
 }
