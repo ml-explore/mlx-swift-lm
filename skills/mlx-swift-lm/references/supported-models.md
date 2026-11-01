@@ -84,6 +84,13 @@ LLMRegistry.mellum2_1_12b_a2_5b_thinking_6bit  // mlx-community/Mellum2.1-12B-A2
 // Note: Mellum uses Qwen-style <think> reasoning and JSON tool calls
 ```
 
+### Spark-X2.5 / X2.6
+
+Both families use `model_type: "spark2_5"`. Load an MLX-compatible checkpoint
+by its Hugging Face ID or a local directory. The model uses sliding-window and
+full-attention layers and supports Spark's `<tool_call>` format.
+The chat template requires `tojson` separator support, available in swift-jinja 3.0.
+
 ### Other Supported LLM Types
 
 | model_type | Description |
