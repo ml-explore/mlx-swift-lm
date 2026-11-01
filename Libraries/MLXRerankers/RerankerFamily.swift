@@ -13,6 +13,7 @@ public enum RerankerFamily: Sendable, Hashable, CaseIterable {
     case qwen3Reranker
 
     /// `zeroentropy/zerank-2`: raw logit of `Yes`.
+    /// Separate instructions are ignored; include them in the query instead.
     case zerank2
 
     /// `ContextualAI/ctxl-rerank-v2-instruct-multilingual-1b`: raw logit of token 0.

@@ -329,6 +329,46 @@ final class LoadWeightsTests: XCTestCase {
             names, ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"])
     }
 
+    func testSymlinkedDirectoryLoadsUnindexedWeights() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let checkpoint = directory.appendingPathComponent("snapshot", isDirectory: true)
+        try FileManager.default.createDirectory(at: checkpoint, withIntermediateDirectories: true)
+        try save(
+            arrays: [
+                "layer.weight": MLXArray.zeros([2, 2]),
+                "projector.weight": MLXArray(converting: [1.0, 2.0, 3.0, 4.0]).reshaped(2, 2),
+            ], url: directory.appendingPathComponent("blob.safetensors"))
+        try FileManager.default.createSymbolicLink(
+            at: checkpoint.appendingPathComponent("model.safetensors"),
+            withDestinationURL: directory.appendingPathComponent("blob.safetensors"))
+        let link = directory.appendingPathComponent("link", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: checkpoint)
+
+        XCTAssertEqual(
+            try safetensorWeightURLs(in: link, additionalFiles: ["model.safetensors"]).count, 1)
+        for selection in [WeightFileSelection.automatic, .allFilesPresent] {
+            let model = TwoLayerModel()
+            try loadWeights(modelDirectory: link, model: model, weightFileSelection: selection)
+            XCTAssertEqual(model.projector.weight.asArray(Float.self), [1, 2, 3, 4])
+        }
+        try writeIndex(["layer.weight": "model.safetensors"], in: checkpoint)
+        let indexedModel = TwoLayerModel()
+        try loadWeights(modelDirectory: link, model: indexedModel)
+        XCTAssertEqual(indexedModel.projector.weight.asArray(Float.self), [1, 2, 3, 4])
+    }
+
+    func testMissingWeightDirectoryReportsListingError() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let missing = directory.appendingPathComponent("missing", isDirectory: true)
+
+        XCTAssertThrowsError(try safetensorWeightURLs(in: missing)) { error in
+            XCTAssertEqual((error as NSError).domain, NSCocoaErrorDomain)
+            XCTAssertEqual((error as NSError).code, NSFileReadNoSuchFileError)
+        }
+    }
+
     func testFallsBackToWeightNamesThenToEverythingPresent() throws {
         let weightPrefixed = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: weightPrefixed) }

@@ -1078,8 +1078,9 @@ struct RerankerTests {
         }
     }
 
-    @Test(arguments: ["zerank-2-reranker", "ctxl-rerank-v2-instruct-multilingual-1b"])
-    func rawLogitFactoryLoadsAndScoresTinyCheckpoint(name: String) async throws {
+    @Test(
+        arguments: ["zerank-2-reranker", "ctxl-rerank-v2-instruct-multilingual-1b"], [false, true])
+    func rawLogitFactoryLoadsAndScoresTinyCheckpoint(name: String, symlink: Bool) async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
             .appending(path: name)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -1105,8 +1106,15 @@ struct RerankerTests {
             "true_token_id": classifierID, "false_token_id": NSNull(),
         ])
         .write(to: metadataDirectory.appending(path: "config.json"))
+        let link = directory.deletingLastPathComponent().appending(path: "checkpoint")
+        if symlink {
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: directory)
+        }
+        let family: RerankerFamily? =
+            symlink ? (name == "zerank-2-reranker" ? .zerank2 : .contextual) : nil
         let reranker = try await RerankerModelFactory.shared.loadContainer(
-            from: directory, using: FixtureRerankerTokenizerLoader())
+            from: symlink ? link : directory, using: FixtureRerankerTokenizerLoader(),
+            family: family)
         #expect(reranker.scoreKind == .logit)
         let response = try await reranker.scores(query: "query", documents: ["a", "bbbb"])
         let singleton = try await reranker.scores(
