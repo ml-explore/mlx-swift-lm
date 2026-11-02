@@ -98,6 +98,18 @@ public struct LFM3Configuration: Codable, Sendable {
         self.hiddenLayers = try container.decode(Int.self, forKey: .hiddenLayers)
         self.attentionHeads = try container.decode(Int.self, forKey: .attentionHeads)
         self.kvHeads = try container.decode(Int.self, forKey: .kvHeads)
+        for (key, value) in [
+            (CodingKeys.hiddenSize, hiddenSize), (.attentionHeads, attentionHeads),
+            (.kvHeads, kvHeads),
+        ] where value <= 0 {
+            throw DecodingError.dataCorruptedError(
+                forKey: key, in: container, debugDescription: "\(key.rawValue) must be positive")
+        }
+        guard attentionHeads % kvHeads == 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .kvHeads, in: container,
+                debugDescription: "num_attention_heads must be divisible by num_key_value_heads")
+        }
         self.headDim =
             try container.decodeIfPresent(Int.self, forKey: .headDim)
             ?? hiddenSize / attentionHeads
@@ -113,6 +125,30 @@ public struct LFM3Configuration: Codable, Sendable {
             try container.decodeIfPresent(Bool.self, forKey: .useSandwichNorm) ?? true
         self.tieWordEmbeddings =
             try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? true
+
+        for (key, value) in [
+            (CodingKeys.vocabularySize, vocabularySize), (.hiddenLayers, hiddenLayers),
+            (.intermediateSize, intermediateSize), (.convLCache, convLCache),
+            (.slidingWindow, slidingWindow),
+        ] where value <= 0 {
+            throw DecodingError.dataCorruptedError(
+                forKey: key, in: container, debugDescription: "\(key.rawValue) must be positive")
+        }
+        guard headDim > 0, headDim % 2 == 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .headDim, in: container,
+                debugDescription: "LFM3 head_dim must be positive and even")
+        }
+        guard normEps.isFinite, normEps > 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .normEps, in: container,
+                debugDescription: "norm_eps must be finite and positive")
+        }
+        if let maxPositionEmbeddings, maxPositionEmbeddings <= 0 {
+            throw DecodingError.dataCorruptedError(
+                forKey: .maxPositionEmbeddings, in: container,
+                debugDescription: "max_position_embeddings must be positive")
+        }
 
         // Same default pattern as the reference: full attention every fourth layer from
         // the third, sliding attention in between, short convolutions elsewhere.
@@ -148,6 +184,15 @@ public struct LFM3Configuration: Codable, Sendable {
                 throw DecodingError.dataCorruptedError(
                     forKey: .ropeParameters, in: container,
                     debugDescription: "Unsupported LFM3 rope_type '\(rope.ropeType)'")
+            }
+            guard rope.ropeTheta.isFinite, rope.ropeTheta > 0,
+                rope.partialRotaryFactor.isFinite, (0 ... 1).contains(rope.partialRotaryFactor)
+            else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .ropeParameters, in: container,
+                    debugDescription:
+                        "LFM3 requires finite positive rope_theta and partial_rotary_factor in [0, 1]"
+                )
             }
         }
     }
@@ -259,13 +304,23 @@ class LFM3ShortConv: Module {
         let BCx = inProj(x).split(parts: 3, axis: -1)
         let (B, C) = (BCx[0], BCx[1])
         var Bx = B * BCx[2]
+        if let mask = cache?.makeMask(N: x.dim(1)) {
+            Bx = which(mask[.ellipsis, .newAxis], Bx, 0)
+        }
 
         // The cache holds the last `lCache - 1` inputs, so the conv needs no padding.
         let state =
             cache?[0] ?? MLXArray.zeros([Bx.dim(0), lCache - 1, hiddenSize], dtype: Bx.dtype)
         Bx = concatenated([state, Bx], axis: -2)
         if let cache {
-            cache[0] = contiguous(Bx[0..., (Bx.dim(1) - (lCache - 1))..., 0...])
+            if let lengths = cache.currentLengths {
+                let ends = clip(lengths, min: 0, max: x.dim(1))
+                let positions = (ends[0..., .newAxis] + MLXArray(0 ..< lCache - 1))[
+                    .ellipsis, .newAxis]
+                cache[0] = contiguous(takeAlong(Bx, positions, axis: 1))
+            } else {
+                cache[0] = contiguous(Bx[0..., (Bx.dim(1) - (lCache - 1))..., 0...])
+            }
             cache.advance(x.dim(1))
         }
 
@@ -323,8 +378,11 @@ package class LFM3DecoderLayer: Module {
     ) -> MLXArray {
         var r: MLXArray
         if let attention {
+            precondition(!(cache is ArraysCache), "LFM3 attention requires an attention cache")
             r = attention(operatorNorm(x), mask: mask, cache: cache)
         } else {
+            precondition(
+                cache == nil || cache is MambaCache, "LFM3 convolution requires MambaCache")
             r = conv!(operatorNorm(x), cache: cache as? MambaCache)
         }
         if let postOperatorNorm {
@@ -404,6 +462,11 @@ public class LFM3ModelInner: Module {
     public func callAsFunction(
         embeddings: MLXArray, cache: [KVCache]? = nil, masks: LFM3AttentionMasks = .init()
     ) -> MLXArray {
+        precondition(
+            cache == nil || cache?.count == layers.count, "LFM3 requires one cache per layer")
+        precondition(
+            embeddings.ndim == 3 && embeddings.dim(-1) == hiddenSize && embeddings.dim(1) > 0,
+            "LFM3 expects nonempty embeddings shaped [batch, sequence, hidden_size]")
         var h = embeddings
         let n = h.dim(1)
 

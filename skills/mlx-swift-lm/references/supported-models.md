@@ -100,7 +100,7 @@ LLMRegistry.mellum2_1_12b_a2_5b_thinking_6bit  // mlx-community/Mellum2.1-12B-A2
 | `smollm3` | SmolLM 3 |
 | `ernie4_5` | ERNIE 4.5 |
 | `lfm2`, `lfm2_moe` | LFM 2 |
-| `lfm3` | LFM 3 |
+| `lfm3` | LFM 3 text backbone (no vision, audio, or Omni wrapper) |
 | `exaone4` | EXAONE 4 |
 | `olmo2`, `olmo3`, `olmoe` | OLMo |
 | `falcon_h1` | Falcon H1 |
@@ -112,6 +112,31 @@ LLMRegistry.mellum2_1_12b_a2_5b_thinking_6bit  // mlx-community/Mellum2.1-12B-A2
 | `bailing_moe` | Bailing MoE |
 | `gpt_oss` | GPT OSS |
 | `minicpm` | MiniCPM |
+
+### LFM3 tokenizer requirements
+
+LFM3 needs BPE `ignore_merges: true` and regex splitting by Unicode code point.
+Swift Transformers 1.3.5 does not include fixes
+[#397](https://github.com/huggingface/swift-transformers/pull/397) and
+[#398](https://github.com/huggingface/swift-transformers/pull/398). Supply a
+`TokenizerLoader` containing both fixes or another compatible implementation;
+the model factory rejects known incompatible tokenization at load time. The core
+package does not depend on Swift Transformers.
+
+The official text checkpoint uses XML function calls (`.xmlFunction`), with
+`<tool_call>` and `<function=...>` framing. It does not use the LFM2 format.
+
+Small FP32 reference fixtures run in the unit suite without downloads. Regenerate
+them with `python scripts/lfm3-reference.py`, which pins LiquidAI's source revision.
+For a downloaded official 4-bit checkpoint, `scripts/lfm3-checkpoint-reference.py`
+exports matching FP32 logits from the original Hugging Face implementation.
+`LFM3CheckpointTests` reads `MLX_LFM3_CHECKPOINT` and `MLX_LFM3_REFERENCE_FILE`;
+set `MLX_ENABLE_TF32=0` in the test process for that parity check.
+`MLX_LFM3_LONG_CONTEXT=1` enables the synthetic 4K/16K/32K cache tests.
+The integration project's tokenizer goldens are opt-in with
+`MLX_RUN_LFM3_TOKENIZER=1`; `MLX_LFM3_TOKENIZER_DIRECTORY` selects local tokenizer
+files instead of downloading them. Set these variables in the test process
+(for example, when invoking `xcrun xctest` directly or in Xcode's test scheme).
 
 ## VLM Families
 

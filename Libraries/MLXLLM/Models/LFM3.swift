@@ -52,6 +52,10 @@ public class LFM3Model: Module, LLMModel, KVCacheDimensionProvider {
 
         // PyTorch stores the depthwise conv as [C, 1, K]; MLX expects [C, K, 1].
         for (name, value) in weights where name.hasSuffix("conv.conv.weight") {
+            guard value.ndim == 3 else {
+                throw ModelFactoryError.invalidConfiguration(
+                    "LFM3 convolution tensor \(name) must have rank 3, got \(value.shape)")
+            }
             if value.dim(-1) > value.dim(1) {
                 weights[name] = value.transposed(0, 2, 1)
             }
@@ -67,6 +71,38 @@ public class LFM3Model: Module, LLMModel, KVCacheDimensionProvider {
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
         try model.newCache(parameters: parameters)
     }
+
+    package static func validateTokenizer(_ tokenizer: any Tokenizer) throws {
+        guard tokenizer.convertTokenToId("<|startoftext|>") == 124894,
+            tokenizer.convertTokenToId(".reduce") == 96744
+        else { return }
+        // Probe vocabulary entries affected by ignore_merges and code-point splitting.
+        for (text, pieces) in [
+            (".reduce", [".reduce"]), ("line.\r\nThis", ["line", ".čĊ", "This"]),
+        ] {
+            let expected = pieces.compactMap { tokenizer.convertTokenToId($0) }
+            guard expected.count == pieces.count,
+                !expected.contains(where: { $0 == tokenizer.unknownTokenId })
+            else { continue }
+            guard tokenizer.encode(text: text, addSpecialTokens: false) == expected else {
+                throw LFM3TokenizerError.incompatible
+            }
+        }
+    }
+}
+
+private enum LFM3TokenizerError: LocalizedError {
+    case incompatible
+
+    var errorDescription: String? {
+        "LFM3 requires a tokenizer that honors BPE ignore_merges and splits regexes by code point. "
+            + "Use a tokenizer containing swift-transformers fixes #397 and #398, or a compatible TokenizerLoader."
+    }
+}
+
+extension LFM3Model {
+    public var toolCallFormat: ToolCallFormat? { .xmlFunction }
+    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
 }
 
 extension LFM3Model: HiddenStateLanguageModel {

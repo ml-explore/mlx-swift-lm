@@ -160,6 +160,138 @@ final class LFM3Tests: XCTestCase {
         XCTAssertThrowsError(try decode(json))
     }
 
+    func testInvalidDimensionsFailDuringDecoding() throws {
+        let invalid: [(String, Any)] = [
+            ("hidden_size", 0), ("hidden_size", -1),
+            ("num_attention_heads", 0), ("num_attention_heads", -1),
+            ("num_key_value_heads", 0), ("num_key_value_heads", 3),
+            ("head_dim", 0), ("head_dim", -2), ("head_dim", 127),
+            ("num_hidden_layers", 0), ("num_hidden_layers", -1),
+            ("vocab_size", 0), ("intermediate_size", -1),
+            ("sliding_window", 0), ("sliding_window", -1),
+            ("conv_L_cache", 0), ("conv_L_cache", -1),
+            ("norm_eps", 0), ("norm_eps", -1), ("max_position_embeddings", 0),
+        ]
+        for (key, value) in invalid {
+            var json = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(realConfigJSON.utf8)) as? [String: Any])
+            json[key] = value
+            // Exercise the inferred head dimension too: this used to divide by zero.
+            if key == "num_attention_heads" { json.removeValue(forKey: "head_dim") }
+            let data = try JSONSerialization.data(withJSONObject: json)
+            XCTAssertThrowsError(try JSONDecoder().decode(LFM3Configuration.self, from: data), key)
+            {
+                XCTAssertTrue($0 is DecodingError, "\(key): \($0)")
+            }
+        }
+    }
+
+    func testInvalidRotaryParametersThrow() throws {
+        for rope in [
+            #"{"rope_theta": 0}"#, #"{"rope_theta": -10000}"#,
+            #"{"rope_theta": 10000, "partial_rotary_factor": -0.1}"#,
+            #"{"rope_theta": 10000, "partial_rotary_factor": 1.1}"#,
+        ] {
+            XCTAssertThrowsError(try tinyConfiguration(fullRope: rope))
+        }
+        var json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(realConfigJSON.utf8)) as? [String: Any])
+        json["rope_parameters"] = ["sliding_attention": ["rope_theta": 10000]]
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(
+                LFM3Configuration.self, from: JSONSerialization.data(withJSONObject: json)))
+        json.removeValue(forKey: "hidden_size")
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(
+                LFM3Configuration.self, from: JSONSerialization.data(withJSONObject: json)))
+    }
+
+    func testTokenizerCompatibilityProbes() throws {
+        XCTAssertNoThrow(try LFM3Model.validateTokenizer(ProbeTokenizer()))
+        for broken in [".reduce", "line.\r\nThis"] {
+            XCTAssertThrowsError(try LFM3Model.validateTokenizer(ProbeTokenizer(broken: broken))) {
+                XCTAssertTrue($0.localizedDescription.contains("ignore_merges"))
+            }
+        }
+        // A custom vocabulary without these byte-level entries is not the affected tokenizer.
+        XCTAssertNoThrow(try LFM3Model.validateTokenizer(ProbeTokenizer(hasProbeVocabulary: false)))
+    }
+
+    func testFactoryRejectsIncompatibleTokenizer() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(
+            component: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let config = try tinyConfiguration()
+        try JSONEncoder().encode(config).write(to: directory.appending(component: "config.json"))
+        let model = try tinyModel(config)
+        try save(
+            arrays: Dictionary(uniqueKeysWithValues: model.parameters().flattened()),
+            url: directory.appending(component: "model.safetensors"))
+        do {
+            _ = try await LLMModelFactory.shared.load(
+                from: directory, using: ProbeTokenizerLoader())
+            XCTFail("The factory accepted a tokenizer that ignores ignore_merges")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("ignore_merges"), "\(error)")
+        }
+    }
+
+    private struct ProbeTokenizerLoader: TokenizerLoader {
+        func load(from directory: URL) async throws -> any Tokenizer {
+            ProbeTokenizer(broken: ".reduce")
+        }
+    }
+
+    private struct ProbeTokenizer: Tokenizer {
+        var broken: String? = nil
+        var hasProbeVocabulary = true
+        let bosToken: String? = nil
+        let eosToken: String? = nil
+        let unknownToken: String? = nil
+        private let vocabulary = [
+            "<|startoftext|>": 124894, ".reduce": 96744, "line": 1421, ".čĊ": 64122, "This": 1942,
+        ]
+
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+            if text == broken { return [1, 2] }
+            return text == ".reduce" ? [96744] : [1421, 64122, 1942]
+        }
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String { "" }
+        func convertTokenToId(_ token: String) -> Int? {
+            hasProbeVocabulary ? vocabulary[token] : nil
+        }
+        func convertIdToToken(_ id: Int) -> String? { nil }
+        func applyChatTemplate(
+            messages: [[String: any Sendable]], tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [Int] { [] }
+    }
+
+    func testOfficialXMLToolCallFormat() throws {
+        let model = try tinyModel()
+        XCTAssertEqual(model.toolCallFormat, .xmlFunction)
+        XCTAssertEqual(model.reasoningConfig?.startDelimiter, "<think>")
+        XCTAssertEqual(model.reasoningConfig?.endDelimiter, "</think>")
+        // Rendered by LiquidAI's chat_template.jinja, not LFM2's Python-style format.
+        let payload = """
+            <tool_call>
+            <function=get_weather>
+            <parameter=location>
+            Paris
+            </parameter>
+            </function>
+            </tool_call>
+            """
+        let parser = XMLFunctionParser(startTag: "<tool_call>", endTag: "</tool_call>")
+        let call = try XCTUnwrap(parser.parse(content: payload, tools: nil))
+        XCTAssertEqual(call.function.name, "get_weather")
+        XCTAssertEqual(call.function.arguments["location"], .string("Paris"))
+        XCTAssertNil(
+            parser.parse(
+                content: payload.replacingOccurrences(of: "</parameter>", with: ""), tools: nil))
+    }
+
     func testRegisteredModelType() async throws {
         XCTAssertTrue(LLMRegistry.shared.contains(id: "LiquidAI/LFM3-1.7B-MLX-4bit"))
         let model = try await LLMTypeRegistry.shared.createModel(
@@ -236,6 +368,155 @@ final class LFM3Tests: XCTestCase {
         XCTAssertLessThan(abs(actual - expected).max().item(Float.self), 1e-4)
     }
 
+    func testRotaryFactorsAndLongOffsets() throws {
+        let headDim = 16
+        let x = MLXArray((0 ..< 3 * headDim).map { Float($0 % 17 - 8) / 8 })
+            .reshaped(1, 1, 3, headDim)
+        for factor: Float in [0, 0.25, 0.6, 0.75, 1] {
+            let config = try tinyConfiguration(
+                fullRope: "{\"rope_theta\": 1000000, \"partial_rotary_factor\": \(factor)}")
+            let attention = try XCTUnwrap(try tinyModel(config).model.layers[2].attention)
+            for offset in [0, 257, 4096, 16384, 32768] {
+                let angles = Int(factor * Float(headDim)) / 2
+                let invFreq = MLXArray(
+                    (0 ..< headDim / 2).map { j in
+                        j < angles ? pow(Float(1_000_000), -Float(2 * j) / Float(headDim)) : 0
+                    })
+                let positions = MLXArray((offset ..< offset + 3).map(Float.init))
+                let freqs = positions.expandedDimensions(axis: -1) * invFreq
+                let emb = concatenated([freqs, freqs], axis: -1)
+                let halves = split(x, parts: 2, axis: -1)
+                let rotated = concatenated([-halves[1], halves[0]], axis: -1)
+                let expected = x * cos(emb) + rotated * sin(emb)
+                let actual = applyRotaryPosition(attention.rope, to: x, offset: .scalar(offset))
+                XCTAssertLessThan(
+                    abs(actual - expected).max().item(Float.self), 1e-3,
+                    "factor \(factor), offset \(offset)")
+            }
+        }
+    }
+
+    func testConvolutionStateMatchesExplicitCausalSum() throws {
+        for width in [1, 3, 7] {
+            var json = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: JSONEncoder().encode(tinyConfiguration()))
+                    as? [String: Any])
+            json["conv_L_cache"] = width
+            json["conv_bias"] = true
+            json["use_sandwich_norm"] = false
+            let config = try JSONDecoder().decode(
+                LFM3Configuration.self, from: JSONSerialization.data(withJSONObject: json))
+            let conv = try XCTUnwrap(try tinyModel(config).model.layers[0].conv)
+            let values: [Float] = (0 ..< 704).map { Float($0 % 19 - 9) / 10 }
+            let x = MLXArray(values).reshaped(2, 11, 32)
+            let parts = conv.inProj(x).split(parts: 3, axis: -1)
+            let bx = parts[0] * parts[2]
+            let padded = concatenated([MLXArray.zeros([2, width - 1, 32]), bx], axis: 1)
+            var sum = MLXArray.zeros([2, 11, 32])
+            for k in 0 ..< width {
+                sum = sum + padded[0..., k ..< k + 11, 0...] * conv.conv.weight[0..., k, 0]
+            }
+            if let bias = conv.conv.bias { sum = sum + bias }
+            let expected = conv.outProj(parts[1] * sum)
+            assertClose(conv(x, cache: nil), expected, atol: 1e-5, reducedAtol: 5e-4)
+            for chunkSize in [1, 2, 5, 11] {
+                let cache = MambaCache()
+                var outputs = [MLXArray]()
+                for start in stride(from: 0, to: 11, by: chunkSize) {
+                    outputs.append(
+                        conv(x[0..., start ..< min(start + chunkSize, 11)], cache: cache))
+                    eval(outputs.last!)
+                }
+                assertClose(concatenated(outputs, axis: 1), expected, atol: 1e-5, reducedAtol: 5e-4)
+                let state = try XCTUnwrap(cache[0])
+                XCTAssertEqual(state.shape, [2, width - 1, 32])
+                if width > 1 {
+                    XCTAssertEqual(
+                        abs(state - bx[0..., (11 - (width - 1))..., 0...]).max().item(Float.self), 0
+                    )
+                }
+            }
+        }
+    }
+
+    func testSlidingWindowBoundariesAndCacheCopy() throws {
+        var json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(tinyConfiguration()))
+                as? [String: Any])
+        json["sliding_window"] = 256
+        json["conv_L_cache"] = 7
+        let config = try JSONDecoder().decode(
+            LFM3Configuration.self, from: JSONSerialization.data(withJSONObject: json))
+        let model = try tinyModel(config)
+        for length in [256, 257, 512, 1024] {
+            let tokens = MLXArray((0 ..< 2 * length).map { Int32(($0 * 7 + 3) % 64) }).reshaped(
+                2, length)
+            let expected = model(tokens, cache: nil)
+            eval(expected)
+            for chunkSize in [127, 257] {
+                var cache = try model.newCache(parameters: nil)
+                var outputs = [MLXArray]()
+                for start in stride(from: 0, to: length, by: chunkSize) {
+                    outputs.append(
+                        model(tokens[0..., start ..< min(start + chunkSize, length)], cache: cache))
+                    eval(outputs.last!)
+                    eval(cache)
+                    // Copies model prompt-cache reuse, including convolution state.
+                    cache = cache.map { $0.copy() }
+                }
+                XCTAssertLessThan(
+                    abs(concatenated(outputs, axis: 1) - expected).max().item(Float.self),
+                    MatmulPrecision.splitTolerance)
+                let decode = MLXArray([Int32(1), 2]).reshaped(2, 1)
+                let actual = model(decode, cache: cache)
+                let fresh = try model.newCache(parameters: nil)
+                let oneShot = model(concatenated([tokens, decode], axis: 1), cache: fresh)[
+                    0..., length...]
+                XCTAssertLessThan(
+                    abs(actual - oneShot).max().item(Float.self), MatmulPrecision.splitTolerance)
+                XCTAssertTrue(all(isFinite(actual)).item(Bool.self))
+            }
+        }
+    }
+
+    func testConvolutionPreparedLengthsPreserveLastValidState() throws {
+        var json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(tinyConfiguration()))
+                as? [String: Any])
+        json["conv_L_cache"] = 7
+        json["conv_bias"] = true
+        let config = try JSONDecoder().decode(
+            LFM3Configuration.self, from: JSONSerialization.data(withJSONObject: json))
+        let conv = try XCTUnwrap(try tinyModel(config).model.layers[0].conv)
+        let values: [Float] = (0 ..< 768).map { Float($0 % 19 - 9) / 10 }
+        let x = MLXArray(values).reshaped(3, 8, 32)
+        let lengths = [0, 3, 8]
+        for leftPadded in [false, true] {
+            let independent = lengths.enumerated().map { batch, length in
+                let cache = MambaCache()
+                if length > 0 {
+                    let start = leftPadded ? 8 - length : 0
+                    eval(conv(x[batch ..< batch + 1, start ..< start + length], cache: cache))
+                }
+                return cache
+            }
+            for chunkSize in [2, 5, 8] {
+                let cache = MambaCache(leftPadding: leftPadded ? lengths.map { 8 - $0 } : nil)
+                withPreparedCache([cache], lengths: leftPadded ? nil : lengths) {
+                    for start in stride(from: 0, to: 8, by: chunkSize) {
+                        eval(conv(x[0..., start ..< min(start + chunkSize, 8)], cache: cache))
+                    }
+                }
+                let next = x[0..., 0 ..< 1]
+                let expected = concatenated(
+                    independent.enumerated().map { batch, reference in
+                        conv(next[batch ..< batch + 1], cache: reference.copy() as? MambaCache)
+                    }, axis: 0)
+                assertClose(conv(next, cache: cache), expected, atol: 1e-5, reducedAtol: 1e-4)
+            }
+        }
+    }
+
     func testSanitizeLoadsMLXAndTransformersLayouts() throws {
         let model = try tinyModel()
         let parameters = Dictionary(uniqueKeysWithValues: model.parameters().flattened())
@@ -261,6 +542,16 @@ final class LFM3Tests: XCTestCase {
                 XCTAssertEqual(value.shape, parameters[key]!.shape, key)
             }
             try model.update(parameters: ModuleParameters.unflattened(sanitized), verify: [.all])
+        }
+    }
+
+    func testMalformedConvolutionWeightsThrow() throws {
+        let model = try tinyModel()
+        for shape in [[], [32], [32, 3]] {
+            XCTAssertThrowsError(
+                try model.sanitize(weights: [
+                    "model.layers.0.conv.conv.weight": MLXArray.zeros(shape)
+                ]))
         }
     }
 

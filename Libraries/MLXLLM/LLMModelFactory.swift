@@ -783,6 +783,10 @@ public final class LLMModelFactory: GenericModelFactory {
 
         let tokenizer = try await tokenizerTask
 
+        if model is LFM3Model {
+            try LFM3Model.validateTokenizer(tokenizer)
+        }
+
         let messageGenerator: any MessageGenerator
         if let configuredMessageGenerator = mutableConfiguration.messageGenerator {
             messageGenerator = configuredMessageGenerator
