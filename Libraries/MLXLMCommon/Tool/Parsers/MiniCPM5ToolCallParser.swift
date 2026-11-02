@@ -31,8 +31,8 @@ public struct MiniCPM5ToolCallParser: ToolCallParser, Sendable {
 
         // Isolate everything between the opening tag and `</function>`.
         guard
-            let functionEnd = content.range(
-                of: "</function>", range: nameEnd.upperBound ..< content.endIndex)
+            let functionEnd = Self.range(
+                ofTag: "</function>", in: content, range: nameEnd.upperBound ..< content.endIndex)
         else { return nil }
         let paramSection = String(content[nameEnd.upperBound ..< functionEnd.lowerBound])
 
@@ -41,7 +41,9 @@ public struct MiniCPM5ToolCallParser: ToolCallParser, Sendable {
 
         // Walk each `<param name="...">value</param>` pair in order.
         var searchRange = paramSection.startIndex ..< paramSection.endIndex
-        while let paramStart = paramSection.range(of: "<param name=\"", range: searchRange) {
+        while let paramStart = Self.range(
+            ofTag: "<param name=\"", in: paramSection, range: searchRange)
+        {
             // A malformed param tag invalidates the whole call rather than silently dropping just that argument.
             guard
                 let paramNameEnd = paramSection.range(
@@ -50,8 +52,9 @@ public struct MiniCPM5ToolCallParser: ToolCallParser, Sendable {
             let paramName = String(paramSection[paramStart.upperBound ..< paramNameEnd.lowerBound])
 
             guard
-                let paramEnd = paramSection.range(
-                    of: "</param>", range: paramNameEnd.upperBound ..< paramSection.endIndex)
+                let paramEnd = Self.range(
+                    ofTag: "</param>", in: paramSection,
+                    range: paramNameEnd.upperBound ..< paramSection.endIndex)
             else { return nil }
 
             // Unwrap CDATA; otherwise trim the whitespace the template pads plain values with.
@@ -75,5 +78,23 @@ public struct MiniCPM5ToolCallParser: ToolCallParser, Sendable {
         }
 
         return ToolCall(function: .init(name: funcName, arguments: arguments))
+    }
+
+    /// Finds the first `tag` in `range` that is outside CDATA, since CDATA content holds no tags.
+    /// Returns nil when an unclosed CDATA hides the rest of the text.
+    private static func range(
+        ofTag tag: String, in text: String, range: Range<String.Index>
+    ) -> Range<String.Index>? {
+        var searchStart = range.lowerBound
+        while let match = text.range(of: tag, range: searchStart ..< range.upperBound) {
+            guard let cdata = text.range(of: cdataOpen, range: searchStart ..< match.lowerBound)
+            else { return match }
+            guard
+                let cdataEnd = text.range(
+                    of: cdataClose, range: cdata.upperBound ..< range.upperBound)
+            else { return nil }
+            searchStart = cdataEnd.upperBound
+        }
+        return nil
     }
 }

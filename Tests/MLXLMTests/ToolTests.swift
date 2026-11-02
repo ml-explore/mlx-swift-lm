@@ -2145,6 +2145,19 @@ struct MiniCPM5ToolCallParserTests {
         #expect(toolCall.function.arguments["code"] == .string("if x < 1 && y > 2:\n    pass"))
     }
 
+    @Test("Test MiniCPM5 Tool Call Parser keeps a close tag inside CDATA")
+    func testMiniCPM5ParserCDATAContainsParamClose() throws {
+        let parser = MiniCPM5ToolCallParser()
+        let content = #"""
+            <function name="run"><param name="code"><![CDATA[print("</param>")]]></param></function>
+            """#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.name == "run")
+        #expect(toolCall.function.arguments["code"] == .string(#"print("</param>")"#))
+    }
+
     @Test("Test MiniCPM5 Tool Call Parser rejects a malformed param")
     func testMiniCPM5ParserRejectsMalformedParam() throws {
         let parser = MiniCPM5ToolCallParser()
