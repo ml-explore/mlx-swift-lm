@@ -30,7 +30,7 @@ Developers can use these examples in their own programs -- just import the swift
 - [MLXLLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxllm): Large language model example implementations
 - [MLXVLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxvlm): Vision language model example implementations
 - [MLXEmbedders](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxembedders): Popular encoders and embedding models example implementations
-- [MLXRerankers](Libraries/MLXRerankers/Documentation.docc/Documentation.md): Score and sort documents by relevance to a query with local reranker models (BGE, Qwen3, Zerank-2, ContextualAI, Jina)
+- [MLXRerankers](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxrerankers): Score and sort documents by relevance to a query with local reranker models (BGE, Qwen3, Zerank-2, ContextualAI, Jina)
 - [MLXGuidedGeneration](Libraries/MLXGuidedGeneration/README.md): Grammar-constrained generation (JSON Schema or EBNF) for any MLX model.
 - [MLXFoundationModels](Libraries/MLXFoundationModels/README.md): Bridge MLX models into Apple's `FoundationModels.LanguageModel` for use with `LanguageModelSession`. (Requires the macOS/iOS/visionOS 27.0 SDK.)
 - [MLXScriptedLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxscriptedlm): Scripted tokenizers and language models -- good for tests or stubbing out behavior without weights
@@ -180,7 +180,7 @@ for result in response.results {
 }
 ```
 
-Scores are model-specific, so do not reuse thresholds across models. See the [MLXRerankers documentation](Libraries/MLXRerankers/Documentation.docc/Documentation.md) for custom checkpoints, document identifiers, and execution limits.
+Scores are model-specific, so do not reuse thresholds across models. See the [MLXRerankers documentation](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxrerankers) for custom checkpoints, document identifiers, and execution limits.
 
 ## Contributing
 
