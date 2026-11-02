@@ -40,13 +40,16 @@ final class LFM3CheckpointTests: XCTestCase {
             .reshaped(1, count)
         let cache = try model.newCache(parameters: nil)
         let start = Date.timeIntervalSinceReferenceDate
-        var hidden: MLXArray?
+        var output: MLXArray?
         for offset in stride(from: 0, to: count, by: 256) {
-            hidden = model.hiddenStates(tokens[0..., offset ..< offset + 256], cache: cache)
-            eval(hidden!)
+            output =
+                model.nextTokenLogits(
+                    .init(tokens: tokens[0..., offset ..< offset + 256]), cache: cache, state: nil
+                ).logits
+            eval(output!)
             eval(cache)
         }
-        var logits = model.projectLogits(try XCTUnwrap(hidden)[0..., (-1)...])
+        var logits = try XCTUnwrap(output)[0..., (-1)...]
         eval(logits)
         let prefillSeconds = Date.timeIntervalSinceReferenceDate - start
         let decodeStart = Date.timeIntervalSinceReferenceDate
@@ -75,24 +78,23 @@ final class LFM3CheckpointTests: XCTestCase {
         for length in [19, 257, 1024] {
             let tokens = try XCTUnwrap(reference["tokens_\(length)"])
             let cache = try model.newCache(parameters: nil)
-            var hidden: MLXArray?
+            var output: MLXArray?
             for start in stride(from: 0, to: length, by: 127) {
-                hidden = model.hiddenStates(
-                    tokens[0..., start ..< min(start + 127, length)], cache: cache)
-                eval(hidden!)
+                output =
+                    model.nextTokenLogits(
+                        .init(tokens: tokens[0..., start ..< min(start + 127, length)]),
+                        cache: cache, state: nil
+                    ).logits
+                eval(output!)
                 eval(cache)
             }
-            let final = try XCTUnwrap(hidden)[0..., (-1)...]
-            let logits = model.projectLogits(final)
+            let logits = try XCTUnwrap(output)[0..., (-1)...]
             let expected = try XCTUnwrap(reference["logits_\(length)"])
             let error = abs(logits - expected).max().item(Float.self)
-            let hiddenError = abs(final - (try XCTUnwrap(reference["hidden_\(length)"]))).max()
-                .item(Float.self)
             print(
-                "LFM3 published FP32 \(length): logits_max_abs=\(error), hidden_max_abs=\(hiddenError)"
+                "LFM3 published FP32 \(length): logits_max_abs=\(error)"
             )
             XCTAssertLessThan(error, 2e-4)
-            XCTAssertLessThan(hiddenError, 2e-4)
             XCTAssertEqual(
                 argMax(logits, axis: -1).item(Int.self), argMax(expected, axis: -1).item(Int.self))
         }

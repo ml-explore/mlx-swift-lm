@@ -128,6 +128,16 @@ at load time. The core package does not depend on Swift Transformers.
 
 The official text checkpoint uses XML function calls (`.xmlFunction`), with
 `<tool_call>` and `<function=...>` framing. It does not use the LFM2 format.
+Reasoning uses `.thinkTagsWithEnableThinking`, matching the official template's
+`enable_thinking` flag and default-on behavior. LiquidAI documents that disabling
+thinking traces can be inconsistent, especially on reasoning-heavy tasks; see the
+[model card](https://huggingface.co/LiquidAI/LFM3-1.7B#inference).
+
+The decoder also honors the reference's `tie_embedding` alias, which takes
+precedence over `tie_word_embeddings`. Backbone and hidden-state helpers stay
+inside the package. Ordinary generation uses `nextTokenLogits` to avoid projecting
+unused prompt rows when the quantized projection supports it; full forwards retain
+all positions.
 
 Unit tests generate deterministic weights in memory and compare every operator,
 layer, and logit against FP32 reference values embedded in Swift. Regenerate those

@@ -44,6 +44,12 @@ struct LFM3TokenizerIntegrationTests {
         ])
         #expect(
             plain == [124894, 124899, 5922, 207, 35808, 124900, 207, 124899, 63514, 207, 124901])
+        let disabled = try tokenizer.applyChatTemplate(
+            messages: [["role": "user", "content": "Hello"]],
+            tools: nil, additionalContext: ["enable_thinking": false])
+        #expect(
+            tokenizer.decode(tokens: disabled, skipSpecialTokens: false).hasSuffix(
+                "<think></think>"))
         let messages: [[String: any Sendable]] = [
             ["role": "system", "content": "Be precise."],
             ["role": "user", "content": "Weather?"],

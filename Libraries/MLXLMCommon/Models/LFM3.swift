@@ -23,7 +23,7 @@ public struct LFM3Configuration: Codable, Sendable {
         case slidingAttention = "sliding_attention"
     }
 
-    public struct RopeParameters: Codable, Sendable {
+    package struct RopeParameters: Codable, Sendable {
         package let ropeType: String
         package let ropeTheta: Float
         package let partialRotaryFactor: Float
@@ -40,7 +40,7 @@ public struct LFM3Configuration: Codable, Sendable {
             self.partialRotaryFactor = partialRotaryFactor
         }
 
-        public init(from decoder: Decoder) throws {
+        package init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             self.ropeType =
                 try container.decodeIfPresent(String.self, forKey: .ropeType) ?? "default"
@@ -88,6 +88,10 @@ public struct LFM3Configuration: Codable, Sendable {
         case ropeParameters = "rope_parameters"
     }
 
+    private enum AltCodingKeys: String, CodingKey {
+        case tieEmbedding = "tie_embedding"
+    }
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
@@ -123,8 +127,10 @@ public struct LFM3Configuration: Codable, Sendable {
             try container.decodeIfPresent(Int.self, forKey: .slidingWindow) ?? 256
         self.useSandwichNorm =
             try container.decodeIfPresent(Bool.self, forKey: .useSandwichNorm) ?? true
+        let alt = try decoder.container(keyedBy: AltCodingKeys.self)
         self.tieWordEmbeddings =
-            try container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? true
+            try alt.decodeIfPresent(Bool.self, forKey: .tieEmbedding)
+            ?? container.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? true
 
         for (key, value) in [
             (CodingKeys.vocabularySize, vocabularySize), (.hiddenLayers, hiddenLayers),
@@ -402,11 +408,15 @@ package class LFM3DecoderLayer: Module {
 ///
 /// A `nil` entry uses the default: causal for full attention, and causal within the
 /// sliding window for sliding attention, both sized by the first cache of that type.
-public struct LFM3AttentionMasks {
-    public var fullAttention: MLXFast.ScaledDotProductAttentionMaskMode?
-    public var slidingAttention: MLXFast.ScaledDotProductAttentionMaskMode?
+/// To disable masking, spell out `MLXFast.ScaledDotProductAttentionMaskMode.none`;
+/// a bare `.none` means `nil` and keeps the default.
+/// Build cached sliding array masks with `makeAttentionMask(n:cache:windowSize:returnArray:)`
+/// so their key dimension matches the truncated cache.
+package struct LFM3AttentionMasks {
+    package var fullAttention: MLXFast.ScaledDotProductAttentionMaskMode?
+    package var slidingAttention: MLXFast.ScaledDotProductAttentionMaskMode?
 
-    public init(
+    package init(
         fullAttention: MLXFast.ScaledDotProductAttentionMaskMode? = nil,
         slidingAttention: MLXFast.ScaledDotProductAttentionMaskMode? = nil
     ) {
@@ -417,21 +427,21 @@ public struct LFM3AttentionMasks {
 
 /// The LFM3 text backbone: token embedding, decoder layers, and the final norm.
 ///
-/// The caller owns the caches, one per layer from ``newCache(parameters:)``. Positions come
+/// The caller owns the caches, one per layer from `newCache(parameters:)`. Positions come
 /// from the caches, so a sequence can be fed in chunks of token ids or embeddings.
-public class LFM3ModelInner: Module {
+package class LFM3ModelInner: Module {
     let args: LFM3Configuration
     let firstFullAttentionIdx: Int?
     let firstSlidingAttentionIdx: Int?
 
     package let layers: [LFM3DecoderLayer]
 
-    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
+    @ModuleInfo(key: "embed_tokens") package var embedTokens: Embedding
     @ModuleInfo(key: "embedding_norm") var embeddingNorm: RMSNorm
 
-    public var hiddenSize: Int { args.hiddenSize }
+    package var hiddenSize: Int { args.hiddenSize }
 
-    public init(_ args: LFM3Configuration) {
+    package init(_ args: LFM3Configuration) {
         self.args = args
         self.firstFullAttentionIdx = args.layerTypes.firstIndex(of: .fullAttention)
         self.firstSlidingAttentionIdx = args.layerTypes.firstIndex(of: .slidingAttention)
@@ -447,19 +457,19 @@ public class LFM3ModelInner: Module {
     }
 
     /// Token embeddings `[B, L, hidden]` for token ids `[B, L]`.
-    public func embed(_ inputs: MLXArray) -> MLXArray {
+    package func embed(_ inputs: MLXArray) -> MLXArray {
         embedTokens(inputs)
     }
 
     /// Final normed hidden states `[B, L, hidden]` for token ids `[B, L]`.
-    public func callAsFunction(
+    package func callAsFunction(
         _ inputs: MLXArray, cache: [KVCache]? = nil, masks: LFM3AttentionMasks = .init()
     ) -> MLXArray {
         callAsFunction(embeddings: embed(inputs), cache: cache, masks: masks)
     }
 
     /// Final normed hidden states `[B, L, hidden]` for input embeddings `[B, L, hidden]`.
-    public func callAsFunction(
+    package func callAsFunction(
         embeddings: MLXArray, cache: [KVCache]? = nil, masks: LFM3AttentionMasks = .init()
     ) -> MLXArray {
         precondition(
@@ -494,13 +504,13 @@ public class LFM3ModelInner: Module {
 
     /// Vocabulary logits for final hidden states, through `lmHead` when the checkpoint has
     /// one and the tied token embedding otherwise.
-    public func projectLogits(_ hiddenStates: MLXArray, lmHead: Linear? = nil) -> MLXArray {
+    package func projectLogits(_ hiddenStates: MLXArray, lmHead: Linear? = nil) -> MLXArray {
         lmHead?(hiddenStates) ?? embedTokens.asLinear(hiddenStates)
     }
 
     /// One cache per layer: a conv state for conv layers, a rotating cache bounded by the
     /// sliding window for sliding attention, and a full or `maxKVSize` cache otherwise.
-    public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+    package func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
         try args.layerTypes.map { layerType in
             switch layerType {
             case .conv:
