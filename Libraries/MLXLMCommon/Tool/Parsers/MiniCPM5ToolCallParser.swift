@@ -57,7 +57,8 @@ public struct MiniCPM5ToolCallParser: ToolCallParser, Sendable {
                     range: paramNameEnd.upperBound ..< paramSection.endIndex)
             else { return nil }
 
-            // Unwrap CDATA; otherwise trim the whitespace the template pads plain values with.
+            // Keep a CDATA value exactly as written, minus its markers.
+            // Trim a plain value, in case the model adds spaces or newlines around it.
             let valueSlice = paramSection[paramNameEnd.upperBound ..< paramEnd.lowerBound]
             let rawValue: String
             if valueSlice.hasPrefix(Self.cdataOpen), valueSlice.hasSuffix(Self.cdataClose) {
