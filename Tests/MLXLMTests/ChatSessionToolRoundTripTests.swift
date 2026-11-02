@@ -21,15 +21,23 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
     /// session's generation task.
     private final class ScriptedToolCallTokenizer: MLXLMCommon.Tokenizer, @unchecked Sendable {
         private struct MissingUserQuery: Error {}
+        private struct ConsecutiveToolAndUser: Error {}
 
         private let requiresUserQuery: Bool
         private let toolCallPrefix: String
+        private let rejectUserAfterTool: Bool
+        private let toolCallPasses: Int
         private let plainScript = "It is sunny in Paris today."
         private var pass = 0
 
-        init(requiresUserQuery: Bool = true, toolCallPrefix: String = "") {
+        init(
+            requiresUserQuery: Bool = true, toolCallPrefix: String = "",
+            rejectUserAfterTool: Bool = false, toolCallPasses: Int = 1
+        ) {
             self.requiresUserQuery = requiresUserQuery
             self.toolCallPrefix = toolCallPrefix
+            self.rejectUserAfterTool = rejectUserAfterTool
+            self.toolCallPasses = toolCallPasses
         }
 
         private var toolCallScript: String {
@@ -58,6 +66,15 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
             else {
                 throw MissingUserQuery()
             }
+            if rejectUserAfterTool {
+                for (previous, current) in zip(messages, messages.dropFirst()) {
+                    if previous["role"] as? String == "tool",
+                        current["role"] as? String == "user"
+                    {
+                        throw ConsecutiveToolAndUser()
+                    }
+                }
+            }
             pass += 1
             return encode(text: "")
         }
@@ -67,7 +84,7 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
         }
 
         func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
-            let script = pass <= 1 ? toolCallScript : plainScript
+            let script = pass <= toolCallPasses ? toolCallScript : plainScript
             return String(script.prefix(min(tokenIds.count * 4, script.count)))
         }
 
@@ -98,6 +115,21 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
         func generate(messages: [Chat.Message]) -> [Message] {
             log.record(messages)
             return DefaultMessageGenerator().generate(messages: messages)
+        }
+    }
+
+    private actor DispatchGate {
+        private var released = false
+        private var waiter: CheckedContinuation<Void, Never>?
+
+        func wait() async {
+            if !released { await withCheckedContinuation { waiter = $0 } }
+        }
+
+        func release() {
+            released = true
+            waiter?.resume()
+            waiter = nil
         }
     }
 
@@ -207,6 +239,61 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
         XCTAssertEqual(toolCalls.count, 1)
         let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: any Sendable])
         XCTAssertEqual(function["name"] as? String, "get_weather")
+    }
+
+    func testImmediateSteeringAfterToolWaitsForAssistant() async throws {
+        try await checkSteeringAfterTool(policy: .nextSafeBoundary)
+    }
+
+    func testQueuedSteeringAfterToolWaitsForAssistant() async throws {
+        try await checkSteeringAfterTool(policy: .nextStepBoundary)
+    }
+
+    func testSteeringWaitsThroughConsecutiveToolCalls() async throws {
+        try await checkSteeringAfterTool(policy: .nextSafeBoundary, toolCallPasses: 2)
+    }
+
+    private func checkSteeringAfterTool(
+        policy: SteeringPolicy, toolCallPasses: Int = 1
+    ) async throws {
+        let log = MessageLog()
+        let gate = DispatchGate()
+        let (dispatchStarted, started) = AsyncStream<Void>.makeStream()
+        let context = Self.makeContext(
+            tokenizer: ScriptedToolCallTokenizer(
+                rejectUserAfterTool: true, toolCallPasses: toolCallPasses),
+            messageGenerator: RecordingMessageGenerator(log: log))
+        let session = ChatSession(
+            context, generateParameters: GenerateParameters(maxTokens: 24),
+            tools: [Self.weatherTool],
+            toolDispatch: { _ in
+                started.yield(())
+                await gate.wait()
+                return "sunny"
+            })
+        let stream = session.streamDetails(to: "Weather?")
+        var iterator = dispatchStarted.makeAsyncIterator()
+        _ = await iterator.next()
+        let id = try session.steer("Be concise", policy: policy)
+        await gate.release()
+
+        var applied: [UUID] = []
+        for try await event in stream {
+            if case .steering(.applied(let ids)) = event { applied += ids }
+        }
+        XCTAssertEqual(applied, [id])
+        let passes = log.all
+        XCTAssertEqual(passes.count, toolCallPasses + 2)
+        guard passes.count == toolCallPasses + 2 else { return }
+        for index in 1 ... toolCallPasses {
+            XCTAssertEqual(passes[index].last?.role, .tool)
+            XCTAssertEqual(passes[index].last?.content, "sunny")
+        }
+        let expectedRoles: [Chat.Message.Role] =
+            [.user] + Array(repeating: [.assistant, .tool], count: toolCallPasses).flatMap { $0 }
+            + [.assistant, .user]
+        XCTAssertEqual(passes.last?.map(\.role), expectedRoles)
+        XCTAssertEqual(passes.last?.last?.content, "Be concise")
     }
 
     func testTokenObservationOrdersEachAutomaticToolPassBeforeItsCompletion() async throws {

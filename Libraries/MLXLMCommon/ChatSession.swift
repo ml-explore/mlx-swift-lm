@@ -2001,7 +2001,11 @@ public final class ChatSession {
                         }
 
                         try Task.checkCancellation()
-                        applyingSteering = try steering.take(closeIfEmpty: pendingMessages.isEmpty)
+                        // Let the assistant answer tool results before adding a user turn.
+                        if !pendingMessages.contains(where: { $0.role == .tool }) {
+                            applyingSteering = try steering.take(
+                                closeIfEmpty: pendingMessages.isEmpty)
+                        }
                         if !applyingSteering.isEmpty {
                             // This step cannot carry the instructions into a new user
                             // message. Report them and let the response finish; the

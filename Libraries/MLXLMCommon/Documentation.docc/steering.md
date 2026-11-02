@@ -107,8 +107,9 @@ steered twice can generate up to three times `maxTokens`.
 
 ## Tools, cancellation, and cache reuse
 
-With `toolDispatch`, steering waits for all tools from the current step and
-places their results before the new instruction. Automatically dispatched calls
+With `toolDispatch`, steering waits for tool results and the next assistant
+output before adding the instruction. This keeps tool results and user instructions
+from becoming consecutive user turns in strict templates. Automatically dispatched calls
 remain hidden from the public stream, as in ordinary generation. Without a
 dispatcher, ordinary tool handling still works; a pending instruction that needs
 tool results is reported as ``SteeringError/toolResultsRequired`` and the

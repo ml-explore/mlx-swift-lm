@@ -212,12 +212,13 @@ public class ChatSessionTests: XCTestCase {
         }
         XCTAssertEqual(toolCount, 0)
         XCTAssertEqual(applied, [id])
-        XCTAssertEqual(infos.count, 2)
-        XCTAssertTrue(infos.allSatisfy { $0.stopReason == .stop })
+        XCTAssertEqual(infos.map(\.stopReason), [.stop, .steered, .stop])
         var messageIterator = messages.makeAsyncIterator()
         _ = await messageIterator.next()
+        let toolContinuation = await messageIterator.next()
         let rendered = await messageIterator.next()
-        XCTAssertEqual(rendered?.map(\.role), [.user, .assistant, .tool, .user])
+        XCTAssertEqual(toolContinuation?.map(\.role), [.user, .assistant, .tool])
+        XCTAssertEqual(rendered?.map(\.role), [.user, .assistant, .tool, .assistant, .user])
         XCTAssertEqual(rendered?[2].content, "sunny")
         XCTAssertEqual(rendered?.last?.content, "give temperatures in Celsius")
     }
@@ -268,8 +269,9 @@ public class ChatSessionTests: XCTestCase {
         _ = try await session.respond(to: "recover")
         var messageIterator = messages.makeAsyncIterator()
         _ = await messageIterator.next()
+        _ = await messageIterator.next()
         let recovered = await messageIterator.next()
-        XCTAssertEqual(recovered?.map(\.role), [.user, .assistant, .tool, .user])
+        XCTAssertEqual(recovered?.map(\.role), [.user, .assistant, .tool, .assistant, .user])
         XCTAssertEqual(recovered?[2].content, "sunny")
         XCTAssertEqual(recovered?.last?.content, "recover")
     }

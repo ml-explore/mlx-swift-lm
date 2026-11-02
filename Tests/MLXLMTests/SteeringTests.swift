@@ -76,9 +76,9 @@ final class SteeringTests: XCTestCase {
             steering: control)
         var info: GenerateCompletionInfo?
         for await event in stream { info = event.info ?? info }
-        let result = await task.value
-        XCTAssertEqual(result.tokens, [1])
-        XCTAssertEqual(result.state.consume()?[LMOutput.Key<Int>("finalizedAt")], 1)
+        let result = (await task.value).consume()
+        XCTAssertEqual(result.generatedTokens, [1])
+        XCTAssertEqual(result.state?[LMOutput.Key<Int>("finalizedAt")], 1)
         XCTAssertEqual(info?.stopReason, .steered)
         // Ending a step does not consume or close its turn's mailbox.
         XCTAssertTrue(control.requestsEarlyBoundary)
@@ -95,8 +95,8 @@ final class SteeringTests: XCTestCase {
             steering: control)
         var info: GenerateCompletionInfo?
         for await event in stream { info = event.info ?? info }
-        let result = await task.value
-        XCTAssertEqual(result.tokens, [1, 4, 4])
+        let result = (await task.value).consume()
+        XCTAssertEqual(result.generatedTokens, [1, 4, 4])
         XCTAssertEqual(info?.stopReason, .length)
     }
 
@@ -116,8 +116,8 @@ final class SteeringTests: XCTestCase {
             info = event.info ?? info
             if event.toolCall != nil { calls += 1 }
         }
-        let result = await task.value
-        XCTAssertEqual(result.tokens, [1, 5, 6, 99])
+        let result = (await task.value).consume()
+        XCTAssertEqual(result.generatedTokens, [1, 5, 6, 99])
         XCTAssertEqual(info?.stopReason, .stop)
         XCTAssertEqual(calls, 1)
         XCTAssertTrue(control.requestsEarlyBoundary)
@@ -134,8 +134,8 @@ final class SteeringTests: XCTestCase {
             promptTokenCount: 2, modelConfiguration: ModelConfiguration(id: "test"),
             tokenizer: BoundaryTokenizer(), iterator: iterator, steering: control)
         for await _ in stream {}
-        let result = await task.value
-        XCTAssertEqual(result.tokens, [1, 4, 4])
+        let result = (await task.value).consume()
+        XCTAssertEqual(result.generatedTokens, [1, 4, 4])
     }
 
     func testMailboxBoundsAndPromotion() throws {
@@ -414,8 +414,8 @@ final class SteeringTests: XCTestCase {
             info = event.info ?? info
             if event.toolCall != nil { calls += 1 }
         }
-        let result = await task.value
-        XCTAssertEqual(result.tokens, [1, 7, 8, 99])
+        let result = (await task.value).consume()
+        XCTAssertEqual(result.generatedTokens, [1, 7, 8, 99])
         XCTAssertEqual(info?.stopReason, .stop)
         XCTAssertEqual(calls, 1)
         XCTAssertTrue(control.requestsEarlyBoundary)
