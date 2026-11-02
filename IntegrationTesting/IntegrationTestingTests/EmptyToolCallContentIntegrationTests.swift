@@ -8,7 +8,11 @@ import MLXVLM
 import Testing
 import Tokenizers
 
-struct EmptyToolCallContentIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite struct EmptyToolCallContentIntegrationTests {}
+}
+
+extension ModelLoadingSuite.EmptyToolCallContentIntegrationTests {
     private func tokenizer(id: String, revision: String) async throws -> any MLXLMCommon.Tokenizer {
         let downloader: any Downloader = #hubDownloader()
         let loader: any TokenizerLoader = #huggingFaceTokenizerLoader()

@@ -48,8 +48,11 @@ private struct FlashlightArguments {
 ///
 /// The behavioral tests run against every model in ``models`` so the replay
 /// path is exercised across template dialects, not tuned to one model family.
-@Suite(.serialized, .timeLimit(.minutes(5)))
-struct MultiTurnToolCallingTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(5))) struct MultiTurnToolCallingTests {}
+}
+
+extension ModelLoadingSuite.MultiTurnToolCallingTests {
 
     /// Models whose chat templates render tool calls and `tool` responses.
     /// Both families are run so the multi-turn path is verified as
@@ -175,7 +178,7 @@ struct MultiTurnToolCallingTests {
         }
     }
 
-    @Test(arguments: MultiTurnToolCallingTests.models)
+    @Test(arguments: ModelLoadingSuite.MultiTurnToolCallingTests.models)
     func continuationRoundIncorporatesToolOutput(modelID: String) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
@@ -215,7 +218,7 @@ struct MultiTurnToolCallingTests {
         )
     }
 
-    @Test(arguments: MultiTurnToolCallingTests.models)
+    @Test(arguments: ModelLoadingSuite.MultiTurnToolCallingTests.models)
     func requiredContinuationCallsAnotherRealTool(modelID: String) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let (model, reasoningLevel) = makeMultiTurnModel(modelID)
@@ -240,7 +243,7 @@ struct MultiTurnToolCallingTests {
         #expect(response.isEmpty)
     }
 
-    @Test(arguments: MultiTurnToolCallingTests.models)
+    @Test(arguments: ModelLoadingSuite.MultiTurnToolCallingTests.models)
     func continuationPromptContainsToolOutput(modelID: String) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 
@@ -263,7 +266,7 @@ struct MultiTurnToolCallingTests {
         )
     }
 
-    @Test(arguments: MultiTurnToolCallingTests.models)
+    @Test(arguments: ModelLoadingSuite.MultiTurnToolCallingTests.models)
     func continuationPromptContainsStructuredToolOutput(modelID: String) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 

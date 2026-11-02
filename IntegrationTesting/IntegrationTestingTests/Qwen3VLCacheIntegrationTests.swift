@@ -9,17 +9,18 @@ import MLXVLM
 import Testing
 import Tokenizers
 
-@Suite(.serialized)
-struct Qwen3VLCacheIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct Qwen3VLCacheIntegrationTests {}
+}
+
+extension ModelLoadingSuite.Qwen3VLCacheIntegrationTests {
     @Test func imageContinuationAfterCacheRotation() async throws {
         let modelID = IntegrationTestModelIDs.vlm
         let configuration =
             hfSnapshotDir(modelId: modelID).map {
                 ModelConfiguration(directory: $0)
             } ?? ModelConfiguration(id: modelID)
-        let container = try await VLMModelFactory.shared.loadContainer(
-            from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-            configuration: configuration)
+        let container = try await models.vlmContainer(for: configuration)
         let parameters = GenerateParameters(
             maxTokens: 8,
             kvCache: KVCacheConfiguration(

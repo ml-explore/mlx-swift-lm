@@ -12,8 +12,11 @@ import FoundationModels
 /// the channel, so an observer-based test passes when the consumer gets
 /// nothing. The framework counts output tokens from text fragments, so a
 /// total-only check passes when input tokens are zero.
-@Suite(.serialized, .timeLimit(.minutes(10)))
-struct SessionUsageAccountingTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(10))) struct SessionUsageAccountingTests {}
+}
+
+extension ModelLoadingSuite.SessionUsageAccountingTests {
 
     @Test
     func freshSessionReportsZeroUsage() async throws {

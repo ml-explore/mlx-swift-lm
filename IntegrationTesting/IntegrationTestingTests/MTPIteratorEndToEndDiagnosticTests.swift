@@ -70,12 +70,27 @@ private let has31BPair: Bool =
 /// HF cache on first use (~35GB); subsequent tests and runs reuse the cache.
 private let downloader: any Downloader = #hubDownloader()
 
+/// Loads the pair as one `TestModelManager` entry, since the test needs both at once.
 private func loadTargetAndDrafter(
     targetModelId: String,
     drafterModelId: String,
     targetRevision: String? = nil,
-    drafterRevision: String? = nil,
-    drafterConfigType: any Codable.Type = Gemma4AssistantConfiguration.self
+    drafterRevision: String? = nil
+) async throws -> LoadedPair {
+    let key =
+        "pair:\(targetModelId)@\(targetRevision ?? "main")+\(drafterModelId)@\(drafterRevision ?? "main")"
+    return try await TestModelManager.shared.load(key) {
+        try await loadTargetAndDrafterUncached(
+            targetModelId: targetModelId, drafterModelId: drafterModelId,
+            targetRevision: targetRevision, drafterRevision: drafterRevision)
+    }
+}
+
+private func loadTargetAndDrafterUncached(
+    targetModelId: String,
+    drafterModelId: String,
+    targetRevision: String?,
+    drafterRevision: String?
 ) async throws -> LoadedPair {
     // Target — VLM factory's downloader-based load path gives us a full
     // ModelContext (model + tokenizer + processor + configuration),
@@ -108,8 +123,11 @@ private func loadTargetAndDrafter(
 
 // MARK: - 31B end-to-end iterator exercise
 
-@Suite(.serialized)
-struct MTPIteratorEndToEndDiagnosticTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct MTPIteratorEndToEndDiagnosticTests {}
+}
+
+extension ModelLoadingSuite.MTPIteratorEndToEndDiagnosticTests {
 
     /// Load the bit-exact-verified 31B target+drafter pair and run the MTP
     /// `generate(...)` overload for 32 tokens at the production blockSize=4

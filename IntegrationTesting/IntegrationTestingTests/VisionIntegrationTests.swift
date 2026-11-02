@@ -30,11 +30,15 @@ struct ColorReport {
 /// on the suite: the swift-testing `@Suite`/`@Test` macros reject an
 /// availability-annotated declaration here, so this mirrors the runtime gate
 /// every other suite in this target uses (e.g. `IntegrationTests`).
-@Suite(
-    .serialized,
-    .timeLimit(.minutes(10)),
-    .enabled(if: ProcessInfo.processInfo.environment["MLX_RUN_VLM_INTEGRATION"] == "1"))
-struct VisionIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(
+        .serialized,
+        .timeLimit(.minutes(10)),
+        .enabled(if: ProcessInfo.processInfo.environment["MLX_RUN_VLM_INTEGRATION"] == "1"))
+    struct VisionIntegrationTests {}
+}
+
+extension ModelLoadingSuite.VisionIntegrationTests {
 
     /// Colors exercised by ``namesImageColor(color:)``. `Sendable` with a plain
     /// `String` raw value so it's a valid parameterized-test argument (`CIColor`

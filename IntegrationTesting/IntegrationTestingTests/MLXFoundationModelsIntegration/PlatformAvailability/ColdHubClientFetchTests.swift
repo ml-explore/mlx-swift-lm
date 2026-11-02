@@ -5,6 +5,7 @@
 import Foundation
 import FoundationModels
 import HuggingFace
+import IntegrationTestHelpers
 import MLXFoundationModels
 import MLXHuggingFace
 import MLXLMCommon
@@ -37,8 +38,13 @@ import Tokenizers
 ///   other test already loaded this model, `loadContainer()` would return the
 ///   cached instance and never touch our throwaway cache. `evictAll()` before
 ///   the load, plus `.serialized` and isolated invocation, keeps the fetch cold.
-@Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["MLX_RUN_COLD_FETCH"] == "1"))
-struct ColdHubClientFetchTests {
+extension ModelLoadingSuite {
+    @Suite(
+        .serialized, .enabled(if: ProcessInfo.processInfo.environment["MLX_RUN_COLD_FETCH"] == "1"))
+    struct ColdHubClientFetchTests {}
+}
+
+extension ModelLoadingSuite.ColdHubClientFetchTests {
 
     /// The smallest model in the fixtures, to keep the real download cheap.
     private static let modelID = TestFixtures.gemmaModelID
@@ -70,15 +76,22 @@ struct ColdHubClientFetchTests {
             return cache.repoDirectory(repo: repo, kind: .model)
         }
 
+        // A unique key so the manager never hands back a warm container.
+        let managerKey = "cold-fetch:\(UUID().uuidString)"
         let model = MLXLanguageModel(
             configuration: ModelConfiguration(id: Self.modelID),
             capabilities: [],
             weightsLocation: weightsLocation,
             load: { configuration, progress in
-                try await loadModelContainer(
-                    from: #hubDownloader(HuggingFace.HubClient(cache: cache)),
-                    using: #huggingFaceTokenizerLoader(),
-                    configuration: configuration, progressHandler: progress)
+                try await TestModelManager.shared.load(
+                    managerKey,
+                    onUnload: { await makeTestModel(configuration.name).evict() }
+                ) {
+                    try await loadModelContainer(
+                        from: #hubDownloader(HuggingFace.HubClient(cache: cache)),
+                        using: #huggingFaceTokenizerLoader(),
+                        configuration: configuration, progressHandler: progress)
+                }
             })
 
         // Drop any in-memory entry so `loadContainer()` runs the load closure
