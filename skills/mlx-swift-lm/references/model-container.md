@@ -273,6 +273,20 @@ let modelDir = resolved.modelDirectory
 container = nil  // Model memory freed
 ```
 
+Measure what a loaded model holds. Shared buffers count once; on-demand
+components (such as a VLM vision tower) appear after they load. KV caches are
+not included: use `KVCacheStatus.memoryBytes` for those.
+
+```swift
+let memory = try await container.memory()  // ModelMemory
+print(memory.model, memory.total)
+for component in memory.components {
+    print(component.kind.name, component.bytes)
+}
+
+let cacheBytes = try await session.cacheStatus().memoryBytes
+```
+
 ## Updating Model Parameters
 
 ```swift

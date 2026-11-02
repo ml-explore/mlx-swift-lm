@@ -14,16 +14,31 @@ This article focuses on **estimating model weight bytes** so you can create a **
 
 ## Measuring weight bytes at runtime
 
-If you can afford to load the model, the most accurate approach is to sum `nbytes` across all
-parameter arrays. Loading a model already materializes weights, so you get a reliable number
-without running any extra inference.
+If you can afford to load the model, measure it with ``ModelContainer/memory()``. It reads the
+MLX buffers behind the model's tensors, counts a shared buffer once, and includes on-demand
+components, such as a vision tower, once they have loaded.
 
 ```swift
-let context = try await LLMModelFactory.shared.load(configuration: config)
-let weightBytes = context.model
-    .parameters()
-    .flattened()
-    .reduce(0) { $0 + $1.1.nbytes }
+let container = try await LLMModelFactory.shared.loadContainer(
+    from: #hubDownloader(), using: #huggingFaceTokenizerLoader(), configuration: config)
+let memory = try await container.memory()
+let weightBytes = memory.total
+```
+
+``ModelMemory`` lists the model and each loaded component separately. Measure again after a
+component loads on first use. The KV cache is not included; read
+``KVCacheStatus/memoryBytes`` for it.
+
+Summing `nbytes` across the parameter arrays gives a similar number from array metadata alone,
+but it can count a shared buffer more than once and misses on-demand components:
+
+```swift
+let weightBytes = await container.perform { context in
+    context.model
+        .parameters()
+        .flattened()
+        .reduce(0) { $0 + $1.1.nbytes }
+}
 ```
 
 You can optionally sanity check with `Memory.snapshot()` before/after load. In practice, the

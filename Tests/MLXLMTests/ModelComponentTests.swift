@@ -161,6 +161,37 @@ final class ModelComponentTests: XCTestCase {
         XCTAssertEqual(model.parameters().flattened().map(\.0), parameters)
     }
 
+    func testMemoryFootprintIncludesPublishedOnDemandTensors() throws {
+        let checkpoint = try writeCheckpoint()
+        defer { try? FileManager.default.removeItem(at: checkpoint.directory) }
+        let model = Captioner()
+        try loadWeights(
+            modelDirectory: checkpoint.directory, model: model, quantization: quantization)
+
+        let before = try model.memory()
+        XCTAssertEqual(before.total, Memory.bufferSize(model.innerState()))
+
+        let vision = try model.vision.load()
+        let after = try model.memory()
+        XCTAssertEqual(
+            after.total, Memory.bufferSize(model.innerState() + vision.innerState()))
+        XCTAssertEqual(after.model, before.total)
+        XCTAssertEqual(after.components.map(\.kind), [.vision])
+        XCTAssertEqual(
+            after.components.first?.bytes, after.total - before.total)
+        XCTAssertGreaterThan(after.total, before.total)
+
+        vision.tower.update(parameters: .unflattened(["weight": model.language.weight]))
+        let shared = try model.memory()
+        XCTAssertEqual(
+            shared.total, Memory.bufferSize(model.innerState() + vision.innerState()))
+        XCTAssertEqual(shared.model, before.model)
+        XCTAssertLessThan(shared.total, after.total)
+        XCTAssertEqual(
+            shared.model + shared.components.reduce(0) { $0 + $1.bytes },
+            shared.total)
+    }
+
     func testConcurrentFirstUsesLoadOnce() throws {
         let checkpoint = try writeCheckpoint()
         defer { try? FileManager.default.removeItem(at: checkpoint.directory) }

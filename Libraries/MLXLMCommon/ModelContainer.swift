@@ -29,7 +29,7 @@ import MLXNN
 ///     }
 /// }
 /// ```
-public final class ModelContainer: Sendable {
+public final class ModelContainer: ModelMemoryReporting {
     private let context: SerialAccessContainer<ModelContext>
 
     public var configuration: ModelConfiguration {
@@ -127,6 +127,10 @@ public final class ModelContainer: Sendable {
     }
 
     // MARK: - Thread-safe convenience methods
+
+    public func memory() async throws -> ModelMemory {
+        try await context.read { try $0.model.memory() }
+    }
 
     /// Authoritative planned cache status for the given generation parameters.
     ///

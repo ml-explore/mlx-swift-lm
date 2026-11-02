@@ -7,8 +7,8 @@ import MLXLMCommon
 ///
 /// When the grammar forces deterministic tokens (e.g. JSON structural
 /// characters `{`, `}`, `,`, `:`), they're fed through the model one at
-/// a time to update the KV cache. Each pass uses the optimized T_q=1
-/// Metal kernel.
+/// a time to update the KV cache, after the sampled token that preceded
+/// them. Each pass uses the optimized T_q=1 Metal kernel.
 ///
 /// The loop overlaps grammar mask computation (CPU) with the model forward
 /// pass (GPU). After committing a token, the grammar state is ready for the
@@ -384,15 +384,17 @@ public enum GuidedGenerationLoop {
 
                 if shouldStopAfterFF { break }
 
-                // Process FF tokens one at a time to update KV cache.
+                // Feed the sampled token before its FF tokens, so later logits
+                // condition on the same tokens as the output.
                 // Batching (T_q > 1 with populated cache) triggers an MLX
                 // bug: scaledDotProductAttention in .causal mode creates a
                 // mask of shape (T_q, T_q) instead of (T_q, T_kv), causing
                 // a broadcast failure on models with global attention layers
                 // (e.g., Gemma 3). Single-token passes (T_q=1) use the
                 // optimized Metal kernel and skip the mask entirely.
-                for (i, ffToken) in ffTokens.enumerated() {
-                    let tokenInput = LMInput.Text(tokens: MLXArray([ffToken]))
+                let fedTokens = [Int32(tokenId)] + ffTokens
+                for (i, fedToken) in fedTokens.enumerated() {
+                    let tokenInput = LMInput.Text(tokens: MLXArray([fedToken]))
                     let result = model(
                         tokenInput[text: .newAxis],
                         cache: cacheStorage.cache.isEmpty ? nil : cacheStorage.cache,
@@ -401,7 +403,7 @@ public enum GuidedGenerationLoop {
                     cacheStorage.commitProcessedTokens(tokenInput.cacheSequenceLength)
                     modelState = result.state
                     // Only need logits from the last FF token
-                    if i == ffTokens.count - 1 {
+                    if i == fedTokens.count - 1 {
                         logits = result.logits
                     }
                 }

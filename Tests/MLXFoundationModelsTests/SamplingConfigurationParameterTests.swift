@@ -17,7 +17,8 @@ struct SamplingConfigurationParameterTests {
             maxTokens: 32,
             requestedTemperature: nil,
             samplingConfiguration: MLXSamplingConfiguration(
-                mode: .topK(40), seed: UInt64.max))
+                mode: .topK(40), seed: UInt64.max),
+            prefillStepSize: nil)
 
         #expect(parameters.seed == UInt64.max)
         #expect(parameters.topK == 40)
@@ -30,7 +31,8 @@ struct SamplingConfigurationParameterTests {
             maxTokens: 32,
             requestedTemperature: 0.7,
             samplingConfiguration: MLXSamplingConfiguration(
-                mode: .nucleus(0.9), seed: 7))
+                mode: .nucleus(0.9), seed: 7),
+            prefillStepSize: nil)
 
         #expect(parameters.seed == 7)
         #expect(parameters.topP == Float(0.9))
@@ -43,7 +45,8 @@ struct SamplingConfigurationParameterTests {
         let parameters = MLXLanguageModel.Executor.makeParameters(
             maxTokens: 32,
             requestedTemperature: nil,
-            samplingConfiguration: nil)
+            samplingConfiguration: nil,
+            prefillStepSize: nil)
 
         #expect(parameters.seed == nil)
         #expect(parameters.temperature == 0.6)
@@ -58,7 +61,8 @@ struct SamplingConfigurationParameterTests {
             maxTokens: 32,
             requestedTemperature: 0,
             samplingConfiguration: MLXSamplingConfiguration(
-                mode: .topK(40), seed: 7))
+                mode: .topK(40), seed: 7),
+            prefillStepSize: nil)
 
         #expect(parameters.seed == 7)
         #expect(parameters.sampler() is ArgMaxSampler)
