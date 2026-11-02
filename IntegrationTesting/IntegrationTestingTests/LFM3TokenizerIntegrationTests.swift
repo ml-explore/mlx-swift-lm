@@ -1,5 +1,3 @@
-// Copyright © 2026 Apple Inc.
-
 import Foundation
 import Testing
 import Tokenizers
