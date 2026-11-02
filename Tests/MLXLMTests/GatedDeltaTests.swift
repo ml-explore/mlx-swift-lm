@@ -316,6 +316,9 @@ public class GatedDeltaTests: XCTestCase {
     /// In bf16, 0.999 rounds to 1. mlx core casts `g` to the dtype of `q`, so
     /// without float32 `q` and `k` the state stops decaying and drifts away
     /// from the custom kernel, which keeps `g` in float32 (ml-explore/mlx#4725).
+    ///
+    /// On NAX hardware mlx core runs a chunked kernel that drifts more over 256
+    /// steps. A lost decay still drifts far more than that.
     func testGatedDeltaFastPathKeepsDecayNearOneInFloat32() throws {
         let inputs = makeQwen35Inputs(T: 256, decay: 0.999)
 
@@ -326,9 +329,10 @@ public class GatedDeltaTests: XCTestCase {
             q: inputs.q, k: inputs.k, v: inputs.v, a: inputs.a, b: inputs.b,
             aLog: inputs.aLog, dtBias: inputs.dtBias, mask: keepAll(inputs))
 
+        let drift = relativeDrift(stateFast, stateKernel)
         XCTAssertLessThan(
-            relativeDrift(stateFast, stateKernel), 1e-3,
-            "A decay of 0.999 was rounded to 1 before the MLXFast kernel."
+            drift, MatmulPrecision.tolerance(float32: 1e-3, reduced: 1e-2),
+            "A decay of 0.999 was rounded to 1 before the MLXFast kernel (drift \(drift))."
         )
     }
 

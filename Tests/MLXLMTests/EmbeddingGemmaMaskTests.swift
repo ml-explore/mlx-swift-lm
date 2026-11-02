@@ -7,7 +7,6 @@ import Testing
 @testable import MLXEmbedders
 
 // A tiny EmbeddingGemma with random weights: 3 query heads, 1 key/value head, as in the real model.
-// Every MLX op runs on the CPU via `Device.withDefaultDevice(.cpu)`.
 // The shape precondition in Gemma3ModelBackbone (mask and inputs must match) is documented only:
 // the repo has no way to test a precondition failure.
 
@@ -112,41 +111,35 @@ struct EmbeddingGemmaMaskTests {
 
     @Test("G1a: flag false ignores the padding mask in attention")
     func causalIgnoresMask() throws {
-        try Device.withDefaultDevice(.cpu) {
-            let m = model(try config(bidirectional: false))
-            let (ids, mask) = padded([12, 7])
-            let (withMask, _) = run(m, ids, mask: mask)
-            let (withoutMask, _) = run(m, ids, mask: nil)
-            #expect(bitEqual(withMask, withoutMask))
-        }
+        let m = model(try config(bidirectional: false))
+        let (ids, mask) = padded([12, 7])
+        let (withMask, _) = run(m, ids, mask: mask)
+        let (withoutMask, _) = run(m, ids, mask: nil)
+        #expect(bitEqual(withMask, withoutMask))
     }
 
     @Test("G1b: flag false is causal, a later token never changes an earlier state")
     func causalIgnoresFuture() throws {
-        try Device.withDefaultDevice(.cpu) {
-            let m = model(try config(bidirectional: nil))
-            var ids = tokens(10)
-            let (before, _) = run(m, [ids], mask: nil)
-            ids[9] = ids[9] % 63 + 1
-            let (after, _) = run(m, [ids], mask: nil)
-            #expect(bitEqual(before[0, ..<9], after[0, ..<9]))
-            #expect(!bitEqual(before[0, 9], after[0, 9]))
-        }
+        let m = model(try config(bidirectional: nil))
+        var ids = tokens(10)
+        let (before, _) = run(m, [ids], mask: nil)
+        ids[9] = ids[9] % 63 + 1
+        let (after, _) = run(m, [ids], mask: nil)
+        #expect(bitEqual(before[0, ..<9], after[0, ..<9]))
+        #expect(!bitEqual(before[0, 9], after[0, 9]))
     }
 
     @Test("G1c: flag false keeps the causal window of slidingWindow keys")
     func causalWindow() throws {
-        try Device.withDefaultDevice(.cpu) {
-            // One sliding layer; the window is applied only when the input is longer than it.
-            let m = model(try config(bidirectional: false, layers: 1, slidingWindow: 4))
-            var ids = tokens(10)
-            let (before, _) = run(m, [ids], mask: nil)
-            ids[0] = ids[0] % 63 + 1
-            let (after, _) = run(m, [ids], mask: nil)
-            // Position 3 sees token 0 (distance 3 < 4); position 4 does not (distance 4).
-            #expect(!bitEqual(before[0, 3], after[0, 3]))
-            #expect(bitEqual(before[0, 4 ..< 10], after[0, 4 ..< 10]))
-        }
+        // One sliding layer; the window is applied only when the input is longer than it.
+        let m = model(try config(bidirectional: false, layers: 1, slidingWindow: 4))
+        var ids = tokens(10)
+        let (before, _) = run(m, [ids], mask: nil)
+        ids[0] = ids[0] % 63 + 1
+        let (after, _) = run(m, [ids], mask: nil)
+        // Position 3 sees token 0 (distance 3 < 4); position 4 does not (distance 4).
+        #expect(!bitEqual(before[0, 3], after[0, 3]))
+        #expect(bitEqual(before[0, 4 ..< 10], after[0, 4 ..< 10]))
     }
 
     // MARK: - Configuration
@@ -167,91 +160,77 @@ struct EmbeddingGemmaMaskTests {
 
     @Test("G3: flag true is bidirectional in both directions")
     func bidirectional() throws {
-        try Device.withDefaultDevice(.cpu) {
-            // Length 5 fits inside the half window of 4, so every layer sees the whole sequence.
-            let m = model(try config(bidirectional: true))
-            let ids = tokens(5)
-            let (base, _) = run(m, [ids], mask: nil)
-            var lastChanged = ids
-            lastChanged[4] = lastChanged[4] % 63 + 1
-            let (afterLast, _) = run(m, [lastChanged], mask: nil)
-            #expect(!bitEqual(base[0, 0], afterLast[0, 0]))
-            var firstChanged = ids
-            firstChanged[0] = firstChanged[0] % 63 + 1
-            let (afterFirst, _) = run(m, [firstChanged], mask: nil)
-            #expect(!bitEqual(base[0, 4], afterFirst[0, 4]))
-        }
+        // Length 5 fits inside the half window of 4, so every layer sees the whole sequence.
+        let m = model(try config(bidirectional: true))
+        let ids = tokens(5)
+        let (base, _) = run(m, [ids], mask: nil)
+        var lastChanged = ids
+        lastChanged[4] = lastChanged[4] % 63 + 1
+        let (afterLast, _) = run(m, [lastChanged], mask: nil)
+        #expect(!bitEqual(base[0, 0], afterLast[0, 0]))
+        var firstChanged = ids
+        firstChanged[0] = firstChanged[0] % 63 + 1
+        let (afterFirst, _) = run(m, [firstChanged], mask: nil)
+        #expect(!bitEqual(base[0, 4], afterFirst[0, 4]))
     }
 
     @Test(
         "G4: the sliding window reaches slidingWindow / 2 tokens on each side",
         arguments: [8, 9])
     func slidingWindow(slidingWindow: Int) throws {
-        try Device.withDefaultDevice(.cpu) {
-            // One sliding layer; half window 4 for 8 and 9 (transformers: |i - j| < sw // 2 + 1).
-            let m = model(try config(bidirectional: true, layers: 1, slidingWindow: slidingWindow))
-            let ids = tokens(12)
-            let (base, _) = run(m, [ids], mask: nil)
-            var first = ids
-            first[0] = first[0] % 63 + 1
-            let (afterFirst, _) = run(m, [first], mask: nil)
-            #expect(!bitEqual(base[0, 4], afterFirst[0, 4]))
-            #expect(bitEqual(base[0, 5 ..< 12], afterFirst[0, 5 ..< 12]))
-            var last = ids
-            last[11] = last[11] % 63 + 1
-            let (afterLast, _) = run(m, [last], mask: nil)
-            #expect(!bitEqual(base[0, 7], afterLast[0, 7]))
-            #expect(bitEqual(base[0, ..<7], afterLast[0, ..<7]))
-        }
+        // One sliding layer; half window 4 for 8 and 9 (transformers: |i - j| < sw // 2 + 1).
+        let m = model(try config(bidirectional: true, layers: 1, slidingWindow: slidingWindow))
+        let ids = tokens(12)
+        let (base, _) = run(m, [ids], mask: nil)
+        var first = ids
+        first[0] = first[0] % 63 + 1
+        let (afterFirst, _) = run(m, [first], mask: nil)
+        #expect(!bitEqual(base[0, 4], afterFirst[0, 4]))
+        #expect(bitEqual(base[0, 5 ..< 12], afterFirst[0, 5 ..< 12]))
+        var last = ids
+        last[11] = last[11] % 63 + 1
+        let (afterLast, _) = run(m, [last], mask: nil)
+        #expect(!bitEqual(base[0, 7], afterLast[0, 7]))
+        #expect(bitEqual(base[0, ..<7], afterLast[0, ..<7]))
     }
 
     @Test("G5: a right-padded batch matches the texts run one at a time")
     func rightPadding() throws {
-        try Device.withDefaultDevice(.cpu) {
-            // The short row has padded query rows whose window holds no real key.
-            expectBatchMatchesSingles(model(try config(bidirectional: true)), lengths: [20, 3])
-        }
+        // The short row has padded query rows whose window holds no real key.
+        expectBatchMatchesSingles(model(try config(bidirectional: true)), lengths: [20, 3])
     }
 
     @Test(
         "G6: a mixed batch, one text longer than the window and one short, stays finite and exact")
     func mixedBatch() throws {
-        try Device.withDefaultDevice(.cpu) {
-            expectBatchMatchesSingles(model(try config(bidirectional: true)), lengths: [40, 6])
-        }
+        expectBatchMatchesSingles(model(try config(bidirectional: true)), lengths: [40, 6])
     }
 
     @Test("G7: a left-padded batch matches the texts run one at a time")
     func leftPadding() throws {
-        try Device.withDefaultDevice(.cpu) {
-            expectBatchMatchesSingles(
-                model(try config(bidirectional: true)), lengths: [20, 3], left: true)
-        }
+        expectBatchMatchesSingles(
+            model(try config(bidirectional: true)), lengths: [20, 3], left: true)
     }
 
     @Test("G8: a 1-D input with a 1-D mask equals the 2-D version")
     func oneDimensional() throws {
-        try Device.withDefaultDevice(.cpu) {
-            let m = model(try config(bidirectional: true))
-            let ids = tokens(9)
-            let mask: [Int32] = [1, 1, 1, 1, 1, 1, 0, 0, 0]
-            let flat = m(
-                MLXArray(ids), positionIds: nil, tokenTypeIds: nil, attentionMask: MLXArray(mask))
-            let (states, pooled) = run(m, [ids], mask: [mask])
-            #expect(bitEqual(flat.hiddenStates!, states))
-            #expect(bitEqual(flat.pooledOutput!, pooled))
-        }
+        let m = model(try config(bidirectional: true))
+        let ids = tokens(9)
+        let mask: [Int32] = [1, 1, 1, 1, 1, 1, 0, 0, 0]
+        let flat = m(
+            MLXArray(ids), positionIds: nil, tokenTypeIds: nil, attentionMask: MLXArray(mask))
+        let (states, pooled) = run(m, [ids], mask: [mask])
+        #expect(bitEqual(flat.hiddenStates!, states))
+        #expect(bitEqual(flat.pooledOutput!, pooled))
     }
 
     @Test("G9: bfloat16 weights with padding run and stay finite")
     func bfloat16() throws {
-        try Device.withDefaultDevice(.cpu) {
-            let m = model(try config(bidirectional: true))
-            m.update(parameters: m.parameters().mapValues { $0.asType(.bfloat16) })
-            let (ids, mask) = padded([12, 5])
-            let (states, pooled) = run(m, ids, mask: mask)
-            #expect(states.dtype == .bfloat16)
-            #expect(!hasNaN(states) && !hasNaN(pooled))
-        }
+        let m = model(try config(bidirectional: true))
+        m.update(parameters: m.parameters().mapValues { $0.asType(.bfloat16) })
+        let (ids, mask) = padded([12, 5])
+        let (states, pooled) = run(m, ids, mask: mask)
+        #expect(states.dtype == .bfloat16)
+        #expect(!hasNaN(states) && !hasNaN(pooled))
     }
 }

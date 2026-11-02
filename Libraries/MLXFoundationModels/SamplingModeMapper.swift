@@ -7,7 +7,7 @@ import MLXLMCommon
 /// `GenerateParameters` fields MLX's sampler consumes.
 ///
 /// The adapter keeps the Foundation Models seed alongside this mode in
-/// ``MLXSamplingConfiguration`` and applies mode policy through
+/// `MLXSamplingConfiguration` and applies mode policy through
 /// ``resolveSamplingParameters(mode:clampedTemperature:)``.
 public enum MLXSamplingMode: Sendable, Equatable {
     /// Deterministic decoding — always pick the most likely token.

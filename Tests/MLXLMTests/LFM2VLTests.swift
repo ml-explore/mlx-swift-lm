@@ -8,7 +8,7 @@ import Testing
 
 @testable import MLXVLM
 
-// Tests of the LFM2-VL text configuration and output head. They run on the CPU.
+// Tests of the LFM2-VL text configuration and output head
 
 private func tinyLFM2VLJSON(textExtras: String = "", extras: String = "") -> String {
     """
@@ -143,45 +143,41 @@ struct LFM2VLTests {
 
     @Test("sanitize maps Hugging Face names and drops unused keys")
     func sanitizeKeys() throws {
-        try Device.withDefaultDevice(.cpu) {
-            let hf: [String: MLXArray] = [
-                "model.language_model.embed_tokens.weight": MLXArray.zeros([1]),
-                "model.language_model.layers.0.conv.conv.weight": MLXArray.zeros([16, 1, 3]),
-                "lm_head.weight": MLXArray.zeros([1]),
-            ]
-            let tied = try tinyModel().sanitize(weights: hf)
-            #expect(
-                Set(tied.keys) == [
-                    "language_model.model.embed_tokens.weight",
-                    "language_model.model.layers.0.conv.conv.weight",
-                ])
-            #expect(tied["language_model.model.layers.0.conv.conv.weight"]?.shape == [16, 3, 1])
+        let hf: [String: MLXArray] = [
+            "model.language_model.embed_tokens.weight": MLXArray.zeros([1]),
+            "model.language_model.layers.0.conv.conv.weight": MLXArray.zeros([16, 1, 3]),
+            "lm_head.weight": MLXArray.zeros([1]),
+        ]
+        let tied = try tinyModel().sanitize(weights: hf)
+        #expect(
+            Set(tied.keys) == [
+                "language_model.model.embed_tokens.weight",
+                "language_model.model.layers.0.conv.conv.weight",
+            ])
+        #expect(tied["language_model.model.layers.0.conv.conv.weight"]?.shape == [16, 3, 1])
 
-            let untiedModel = try tinyModel(
-                textExtras: #", "tie_word_embeddings": true"#,
-                extras: #" "tie_word_embeddings": false,"#)
-            let untied = untiedModel.sanitize(weights: hf)
-            #expect(Set(untied.keys) == Set(tied.keys).union(["language_model.lm_head.weight"]))
-            #expect(Set(untiedModel.sanitize(weights: untied).keys) == Set(untied.keys))
-            let topTied = try tinyModel(
-                textExtras: #", "tie_word_embeddings": false"#,
-                extras: #" "tie_word_embeddings": true,"#)
-            #expect(Set(topTied.sanitize(weights: hf).keys) == Set(tied.keys))
-        }
+        let untiedModel = try tinyModel(
+            textExtras: #", "tie_word_embeddings": true"#,
+            extras: #" "tie_word_embeddings": false,"#)
+        let untied = untiedModel.sanitize(weights: hf)
+        #expect(Set(untied.keys) == Set(tied.keys).union(["language_model.lm_head.weight"]))
+        #expect(Set(untiedModel.sanitize(weights: untied).keys) == Set(untied.keys))
+        let topTied = try tinyModel(
+            textExtras: #", "tie_word_embeddings": false"#,
+            extras: #" "tie_word_embeddings": true,"#)
+        #expect(Set(topTied.sanitize(weights: hf).keys) == Set(tied.keys))
     }
 
     @Test("An untied model projects with lm_head")
     func untiedHead() throws {
-        try Device.withDefaultDevice(.cpu) {
-            let model = try tinyModel(textExtras: #", "tie_word_embeddings": false"#)
-            let text = MLXArray([Int32(1), 2, 3, 4])[.newAxis]
-            #expect(abs(model(text, cache: nil)).max().item(Float.self) > 0)
-            // With a zero head the logits are zero; tied embeddings would not give that.
-            try model.update(
-                parameters: ModuleParameters.unflattened([
-                    "language_model.lm_head.weight": MLXArray.zeros([32, 16])
-                ]), verify: [.noUnusedKeys])
-            #expect(abs(model(text, cache: nil)).max().item(Float.self) == 0)
-        }
+        let model = try tinyModel(textExtras: #", "tie_word_embeddings": false"#)
+        let text = MLXArray([Int32(1), 2, 3, 4])[.newAxis]
+        #expect(abs(model(text, cache: nil)).max().item(Float.self) > 0)
+        // With a zero head the logits are zero; tied embeddings would not give that.
+        try model.update(
+            parameters: ModuleParameters.unflattened([
+                "language_model.lm_head.weight": MLXArray.zeros([32, 16])
+            ]), verify: [.noUnusedKeys])
+        #expect(abs(model(text, cache: nil)).max().item(Float.self) == 0)
     }
 }
