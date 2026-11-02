@@ -413,7 +413,8 @@ public final class EmbeddingGemma2: Module, BaseLanguageModel, ModelComponentsPr
     ///   - inputIds: `[B, L]` tokens.
     ///   - attentionMask: `[B, L]`, `1` for real tokens. Attention and pooling ignore padding.
     ///   - softTokens: `[soft tokens, hidden]` features of every image, video and audio
-    ///     placeholder in `inputIds`, in sequence order; single row only.
+    ///     placeholder in `inputIds`, row by row in sequence order (`[B, n, hidden]` for a
+    ///     batch).
     /// - Returns: `[B, embeddingDim]` unit-length float32 embeddings.
     public func embed(
         inputIds: MLXArray, attentionMask: MLXArray?, softTokens: MLXArray? = nil
@@ -428,13 +429,13 @@ public final class EmbeddingGemma2: Module, BaseLanguageModel, ModelComponentsPr
         // Matches the reference: sqrt(hidden) is rounded to the weight dtype (22.625 in bf16).
         hidden = hidden * MLXArray(Float(config.hiddenSize).squareRoot()).asType(hidden.dtype)
         if let softTokens, let first = softTokenIDs.first {
-            precondition(inputIds.dim(0) == 1)
             let isSoftToken = softTokenIDs.dropFirst().reduce(inputIds .== first) {
                 $0 .|| (inputIds .== $1)
             }
-            let index = maximum(cumsum(isSoftToken.asType(.int32), axis: 1) - 1, 0)
+            // Number placeholders across rows, in the order of `softTokens`.
+            let index = maximum(cumsum(isSoftToken.flattened().asType(.int32)) - 1, 0)
             let rows = softTokens.asType(hidden.dtype).reshaped(-1, hidden.dim(-1))
-                .take(index.squeezed(axis: 0), axis: 0).expandedDimensions(axis: 0)
+                .take(index, axis: 0).reshaped(hidden.shape)
             hidden = MLX.where(isSoftToken.expandedDimensions(axis: -1), rows, hidden)
         }
         hidden = languageModel(hidden, attentionMask: attentionMask)
