@@ -30,6 +30,7 @@ Developers can use these examples in their own programs -- just import the swift
 - [MLXLLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxllm): Large language model example implementations
 - [MLXVLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxvlm): Vision language model example implementations
 - [MLXEmbedders](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxembedders): Popular encoders and embedding models example implementations
+- [MLXRerankers](Libraries/MLXRerankers/Documentation.docc/Documentation.md): Score and sort documents by relevance to a query with local reranker models (BGE, Qwen3, Zerank-2, ContextualAI, Jina)
 - [MLXGuidedGeneration](Libraries/MLXGuidedGeneration/README.md): Grammar-constrained generation (JSON Schema or EBNF) for any MLX model.
 - [MLXFoundationModels](Libraries/MLXFoundationModels/README.md): Bridge MLX models into Apple's `FoundationModels.LanguageModel` for use with `LanguageModelSession`. (Requires the macOS/iOS/visionOS 27.0 SDK.)
 - [MLXScriptedLM](https://swiftpackageindex.com/ml-explore/mlx-swift-lm/main/documentation/mlxscriptedlm): Scripted tokenizers and language models -- good for tests or stubbing out behavior without weights
@@ -147,6 +148,39 @@ if #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) {
 Here, we combine `MLXFoundationModels` with [`MLXGuidedGeneration`](Libraries/MLXGuidedGeneration/README.md) by requesting a `@Generable` type: the response is grammar-constrained to that type's schema. `MLXGuidedGeneration` is a standalone primitive that constrains any MLX model's output to a schema.
 
 Other capabilities include `.vision`, `.toolCalling`, and `.reasoning`. See [Libraries/MLXFoundationModels](Libraries/MLXFoundationModels/README.md) for the full capability set, custom weights and loaders, and more information about using MLXFoundationModels.
+
+## Reranking
+
+`MLXRerankers` loads local reranker models through one API. `RerankerModelFactory` reads the checkpoint configuration and picks the matching implementation, so BGE v2, Qwen3, Zerank-2, ContextualAI, and Jina v3/v3.5 rerankers share the same calling code. Add the `MLXRerankers` product to your target:
+
+```swift
+import HuggingFace
+import MLXHuggingFace
+import MLXLMCommon
+import MLXRerankers
+import Tokenizers
+
+let reranker = try await RerankerModelFactory.shared.loadContainer(
+    from: #hubDownloader(),
+    using: #huggingFaceTokenizerLoader(),
+    id: "Qwen/Qwen3-Reranker-0.6B"
+)
+
+let candidates = [
+    "Swift tasks run inside a hierarchy that propagates cancellation.",
+    "The Golden Gate Bridge opened in 1937.",
+]
+let response = try await reranker.rerank(
+    query: "How does Swift structured concurrency work?",
+    documents: candidates,
+    topK: 1
+)
+for result in response.results {
+    print(result.score, candidates[result.index])
+}
+```
+
+Scores are model-specific, so do not reuse thresholds across models. See the [MLXRerankers documentation](Libraries/MLXRerankers/Documentation.docc/Documentation.md) for custom checkpoints, document identifiers, and execution limits.
 
 ## Contributing
 
