@@ -27,8 +27,11 @@ import MLXLMCommon
 /// the actual stream the model produces, masks reject every extending
 /// token, and generation appears to "freeze" while burning through its
 /// token budget.
-@Suite(.serialized)
-struct TokenizerVocabExtractorTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct TokenizerVocabExtractorTests {}
+}
+
+extension ModelLoadingSuite.TokenizerVocabExtractorTests {
 
     // MARK: - Qwen (BPE with Ġ / Ċ conventions)
 

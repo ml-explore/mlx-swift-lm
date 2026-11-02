@@ -4,6 +4,7 @@ import CoreImage
 import CoreMedia
 import Foundation
 import HuggingFace
+import IntegrationTestHelpers
 import MLX
 import MLXEmbedders
 import MLXHuggingFace
@@ -13,10 +14,15 @@ import MLXVLM
 import Testing
 import Tokenizers
 
-@Suite(.serialized)
-struct EmbeddingGemma2ComponentIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct EmbeddingGemma2ComponentIntegrationTests {}
+}
+
+extension ModelLoadingSuite.EmbeddingGemma2ComponentIntegrationTests {
     @Test
     func realCheckpointMatchesImmediateLoadingAcrossModalities() async throws {
+        // This test makes its own fresh loads to compare their memory use.
+        await TestModelManager.shared.unload()
         let resolved = try await resolve(
             configuration: ModelConfiguration(id: "mlx-community/embeddinggemma-2-8bit"),
             from: #hubDownloader(), useLatest: false, progressHandler: { _ in })

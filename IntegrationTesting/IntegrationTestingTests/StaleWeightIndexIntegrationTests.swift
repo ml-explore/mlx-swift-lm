@@ -28,17 +28,23 @@ import Tokenizers
 private let staleIndexModelID = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
 private let staleIndexRevision = "2fd8dacbdb8f1e54b8c005f081ec5bf79c56376b"
 
-@Suite(.serialized)
-struct StaleWeightIndexIntegrationTests {
-    private let downloader = #hubDownloader()
-    private let tokenizerLoader = #huggingFaceTokenizerLoader()
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct StaleWeightIndexIntegrationTests {
+        private let downloader = #hubDownloader()
+        private let tokenizerLoader = #huggingFaceTokenizerLoader()
+    }
+}
 
+extension ModelLoadingSuite.StaleWeightIndexIntegrationTests {
     @Test func qwen3VLWithStaleIndexLoadsAndGenerates() async throws {
-        let context = try await VLMModelFactory.shared.load(
-            from: downloader,
-            using: tokenizerLoader,
-            configuration: ModelConfiguration(
-                id: staleIndexModelID, revision: staleIndexRevision))
+        let configuration = ModelConfiguration(
+            id: staleIndexModelID, revision: staleIndexRevision)
+        let context = try await TestModelManager.shared.load(
+            TestModelManager.key("vlm-context", configuration)
+        ) {
+            try await VLMModelFactory.shared.load(
+                from: downloader, using: tokenizerLoader, configuration: configuration)
+        }
 
         let input = try await context.processor.prepare(
             input: UserInput(chat: [.user("What is 2+2? Reply with just the number.")]))

@@ -39,8 +39,11 @@ private struct CharacterizationFlashlightArguments {
 /// Both Gemma-4 E2B and Qwen-3 are expected to terminate the guided grammar and
 /// hand the parser a valid developer tool call. Add rows when another model
 /// needs this same required-mode boundary coverage.
-@Suite(.serialized, .timeLimit(.minutes(5)))
-struct ToolCallGrammarCharacterizationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(5))) struct ToolCallGrammarCharacterizationTests {}
+}
+
+extension ModelLoadingSuite.ToolCallGrammarCharacterizationTests {
 
     struct Case: CustomStringConvertible, Sendable {
         let modelID: String
@@ -93,7 +96,7 @@ struct ToolCallGrammarCharacterizationTests {
         return Transcript(entries: [.instructions(instructions), .prompt(prompt)])
     }
 
-    @Test(arguments: ToolCallGrammarCharacterizationTests.cases)
+    @Test(arguments: ModelLoadingSuite.ToolCallGrammarCharacterizationTests.cases)
     func characterizeToolCallBoundary(_ testCase: Case) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 

@@ -15,8 +15,11 @@ import FoundationModels
 /// Each tier uses unbounded string fields (no `maxLength`) to maximize adversarial
 /// pressure. The token budget is set to `hardReserve + 128`, forcing the model into
 /// the hard reserve zone after generating just one or two verbose string values.
-@Suite(.serialized, .timeLimit(.minutes(8)))
-struct HardReserveStressTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(8))) struct HardReserveStressTests {}
+}
+
+extension ModelLoadingSuite.HardReserveStressTests {
 
     static let modelID = TestFixtures.gemmaModelID
     static let multiplier = 8

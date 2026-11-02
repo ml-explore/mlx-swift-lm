@@ -16,8 +16,11 @@ import FoundationModels
 /// if level N passes but N+1 fails, we know where the budget or grammar
 /// breaks down. All schemas use `$ref`/`$defs` to match real `@Generable`
 /// output. All string fields have `maxLength` to keep generation bounded.
-@Suite(.serialized, .timeLimit(.minutes(5)))
-struct GuidedGenerationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(5))) struct GuidedGenerationTests {}
+}
+
+extension ModelLoadingSuite.GuidedGenerationTests {
 
     static let modelID = TestFixtures.gemmaModelID
 

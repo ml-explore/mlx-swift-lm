@@ -8,11 +8,14 @@ import MLXLMCommon
 import Testing
 import Tokenizers
 
-@Suite(.serialized)
-struct RerankerModelIntegrationTests {
-    private let downloader = #hubDownloader()
-    private let tokenizerLoader = #huggingFaceTokenizerLoader()
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct RerankerModelIntegrationTests {
+        private let downloader = #hubDownloader()
+        private let tokenizerLoader = #huggingFaceTokenizerLoader()
+    }
+}
 
+extension ModelLoadingSuite.RerankerModelIntegrationTests {
     @Test func bgeV2M3ReferenceScores() async throws {
         try await RerankerIntegrationTests.bgeV2M3(
             downloader: downloader, tokenizerLoader: tokenizerLoader)
