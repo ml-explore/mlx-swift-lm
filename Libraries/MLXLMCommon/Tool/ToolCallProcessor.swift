@@ -130,6 +130,7 @@ public class ToolCallProcessor {
     var canEndForSteering: Bool {
         state == .normal && toolCallBuffer.isEmpty && orderedOutputQueue.isEmpty
             && toolCalls.isEmpty && rejectedToolCallCount == 0
+            && (recoveryScanner?.canEndForSteering ?? true)
     }
 
     /// Whether this processor uses inline format (no start tag).

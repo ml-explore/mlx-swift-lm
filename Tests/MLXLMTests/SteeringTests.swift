@@ -41,6 +41,7 @@ final class SteeringTests: XCTestCase {
             let pieces = [
                 1: "hello ", 2: "<en", 3: "ough", 4: " more",
                 5: "{\"name\":\"weather\",\"arguments\":", 6: "{}}",
+                7: "<function=weather>", 8: "</function>",
             ]
             if tokenIds == [10] { return "\u{fffd}" }
             if tokenIds == [10, 11] { return "é" }
@@ -370,4 +371,54 @@ final class SteeringTests: XCTestCase {
         XCTAssertTrue(output.contains { if case .toolCall = $0 { true } else { false } })
         XCTAssertTrue(processor.canEndForSteering)
     }
+
+    func testRecoveryStateCannotEndForSteering() {
+        let tools: [[String: any Sendable]] = [
+            ["function": ["name": "weather"] as [String: any Sendable]]
+        ]
+        let examples: [(String, String)] = [
+            ("<fun", "ction=weather></function>"),
+            ("<function=weather>", "</function>"),
+            ("`example ", "end` "),
+            ("\n```\nexample ", "\n```\n"),
+            ("<think>example ", "</think>"),
+            (#"{"example":"value"#, "\"} "),
+        ]
+        for (prefix, suffix) in examples {
+            let processor = ToolCallProcessor(format: .json, tools: tools)
+            _ = processor.processChunkOutputs("Hello ")
+            XCTAssertTrue(processor.canEndForSteering, prefix)
+            _ = processor.processChunkOutputs(prefix)
+            XCTAssertFalse(processor.canEndForSteering, prefix)
+            _ = processor.processChunkOutputs(suffix)
+            XCTAssertTrue(processor.canEndForSteering, prefix)
+        }
+    }
+
+    func testSteeringWaitsForRecoveredToolCall() async throws {
+        let tools: [[String: any Sendable]] = [
+            ["function": ["name": "weather"] as [String: any Sendable]]
+        ]
+        let control = SteeringControl()
+        let iterator = FinalizingIterator(
+            tokens: [1, 7, 8, 99],
+            onNext: { index in
+                if index == 1 { _ = try? control.enqueue("now", policy: .nextSafeBoundary) }
+            })
+        let (stream, task) = generateTaskRecordingTokens(
+            promptTokenCount: 2, modelConfiguration: ModelConfiguration(id: "test"),
+            tokenizer: BoundaryTokenizer(), iterator: iterator, tools: tools, steering: control)
+        var info: GenerateCompletionInfo?
+        var calls = 0
+        for await event in stream {
+            info = event.info ?? info
+            if event.toolCall != nil { calls += 1 }
+        }
+        let result = await task.value
+        XCTAssertEqual(result.tokens, [1, 7, 8, 99])
+        XCTAssertEqual(info?.stopReason, .stop)
+        XCTAssertEqual(calls, 1)
+        XCTAssertTrue(control.requestsEarlyBoundary)
+    }
+
 }
