@@ -524,12 +524,14 @@ struct EmbeddingGemma2Tests {
             input: sourceWidth, output: width)
         let dense = matmul(matmul(rows, pixels), columns.transposed())
         let expected = round(clip(dense * 255, min: 0, max: 255)) / 255
-        let actual = Device.withDefaultDevice(cpu ? .cpu : .gpu) {
-            EmbeddingGemma2ImageProcessor.resized(compact, height: height, width: width)
+        for input in [compact, pixels, compact, pixels] {
+            let actual = Device.withDefaultDevice(cpu ? .cpu : .gpu) {
+                EmbeddingGemma2ImageProcessor.resized(input, height: height, width: width)
+            }
+            try MLX.checkedEval(actual, expected)
+            #expect(actual.shape == [1, 3, height, width])
+            #expect(abs(actual - expected).max().item(Float.self) <= 1.0 / 255 + 1e-7)
         }
-        try MLX.checkedEval(actual, expected)
-        #expect(actual.shape == [1, 3, height, width])
-        #expect(abs(actual - expected).max().item(Float.self) <= 1.0 / 255 + 1e-7)
     }
 
     @Test(arguments: ["public.png", "public.jpeg"])
