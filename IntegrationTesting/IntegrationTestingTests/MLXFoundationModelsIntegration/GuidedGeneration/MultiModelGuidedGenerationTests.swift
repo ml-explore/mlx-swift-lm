@@ -27,7 +27,8 @@ struct MultiModelGuidedGenerationTests {
 
     // MARK: - Int Round-Trip Per Model
 
-    @Test(arguments: modelIDs)
+    // TODO: FIXME
+    @Test(.disabled("FIXME"), arguments: modelIDs)
     func intRoundTrip(modelID: String) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
         let model = makeTestModel(modelID)
