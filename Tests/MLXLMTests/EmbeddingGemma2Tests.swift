@@ -566,6 +566,33 @@ struct EmbeddingGemma2Tests {
         expectClose(output, expected, atol: 1e-5, reducedAtol: 1e-2)
     }
 
+    /// A batch of image sequences embeds as each sequence does alone.
+    @Test
+    func batchedImagesMatchEachAlone() throws {
+        let config = try Self.decode(Self.tinyVisionConfig)
+        let model = EmbeddingGemma2(config)
+        try model.update(
+            parameters: ModuleParameters.unflattened(try Self.deterministicWeights(for: model)),
+            verify: .all)
+        let features = try (0 ..< 2).map { shift in
+            let values: [Float] = (0 ..< (3 * 16 * 32)).map {
+                Float(($0 * 13 + shift * 101) % 256) / 255
+            }
+            return try #require(try model.imageFeatures(MLXArray(values, [1, 3, 16, 32])))
+        }
+        let tokens = try EmbeddingGemma2Sequence.tokens(
+            [.text([9, 11]), .image(tokens: 8)], configuration: config, beginOfSequence: 2,
+            endOfSequence: 1, limit: 64)
+        let ids = MLXArray(tokens.map(Int32.init), [1, tokens.count])
+        let alone = features.map { model.embed(inputIds: ids, attentionMask: nil, softTokens: $0) }
+        let batched = model.embed(
+            inputIds: concatenated([ids, ids]), attentionMask: nil,
+            softTokens: concatenated(features))
+        try MLX.checkedEval(batched)
+        #expect(batched.shape == [2, 12])
+        expectClose(batched, concatenated(alone), atol: 1e-5, reducedAtol: 1e-2)
+    }
+
     /// A tiny `gemma4_audio` tower: chunks of 4 over 11 soft tokens, so the attention
     /// window crosses both ends of the sequence.
     private static func tinyAudioConfig(futureContext: Int) -> String {

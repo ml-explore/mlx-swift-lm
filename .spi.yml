@@ -1,4 +1,4 @@
 version: 1
 builder:
   configs:
-    - documentation_targets: [MLXLLM, MLXVLM, MLXLMCommon, MLXEmbedders, MLXScriptedLM]
+    - documentation_targets: [MLXLMCommon, MLXLLM, MLXVLM, MLXEmbedders, MLXFoundationModels, MLXGuidedGeneration, MLXHuggingFace, MLXHuggingFaceMacros, MLXRerankers, MLXScriptedLM]

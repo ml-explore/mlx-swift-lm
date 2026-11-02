@@ -31,32 +31,15 @@ jobs:
     if: github.repository == 'ml-explore/mlx-swift-lm'
     runs-on: [self-hosted, macos]
     timeout-minutes: 120
+    env:
+      DEVELOPER_DIR: /Applications/Xcode-latest.app/Contents/Developer
+      # xcodebuild does not forward DEVELOPER_DIR to xctest. MLX's CPU JIT runs g++
+      # from inside the tests, so pass it with the TEST_RUNNER_ prefix.
+      TEST_RUNNER_DEVELOPER_DIR: /Applications/Xcode-latest.app/Contents/Developer
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-
-      - name: Select Xcode 26
-        shell: bash
-        run: |
-          # This job runs on Xcode 26 only. The MLXFoundationModels adapter and its
-          # integration tests are gated on canImport(FoundationModels, _version: 2)
-          # (macOS 27 SDK), so on Xcode 26 they compile out and only the SDK-agnostic
-          # suites (MTP, Qwen3VL/Qwen3.5 vision, Coherence, Gemma4, tool calls, masks)
-          # build and run — i.e. exactly the tests that compile on this SDK.
-          # Fail loudly if no Xcode 26 is installed rather than fall through to a 27
-          # toolchain (which would fail to compile against a moving FoundationModels beta).
-          version_of() { "$1/Contents/Developer/usr/bin/xcodebuild" -version 2>/dev/null | head -1; }
-          dev=""
-          for app in $(ls -d /Applications/Xcode_26*.app /Applications/Xcode-26*.app /Applications/Xcode.app 2>/dev/null | sort -Vr); do
-            case "$(version_of "$app")" in "Xcode 26"*) dev="$app/Contents/Developer"; break ;; esac
-          done
-          if [ -z "$dev" ]; then
-            echo "::error::Xcode 26 not found on this runner."
-            exit 1
-          fi
-          echo "Selected $(version_of "$(dirname "$(dirname "$dev")")") at $dev"
-          echo "DEVELOPER_DIR=$dev" >> "$GITHUB_ENV"
 
       - name: Verify MetalToolchain installed
         shell: bash
@@ -70,13 +53,16 @@ jobs:
           # Model-dependent tests must run in a single xctest worker: concurrent
           # workers race on the shared on-disk Hugging Face cache. Disable parallel
           # testing (see IntegrationTestingTests/.../Support/FMTestHelpers.swift).
+          # Keep the result bundle outside the package root. xcodebuild re-resolves
+          # the package graph when files there change, and the resolve can crash it.
+          rm -rf "$RUNNER_TEMP/IntegrationTesting.xcresult"
           xcodebuild test \
             -project IntegrationTesting/IntegrationTesting.xcodeproj \
             -scheme IntegrationTesting \
             -destination 'platform=macOS' \
             -parallel-testing-enabled NO \
             -skipPackagePluginValidation \
-            -resultBundlePath IntegrationTesting.xcresult
+            -resultBundlePath "$RUNNER_TEMP/IntegrationTesting.xcresult"
 
       - name: Upload test results
         if: failure()
@@ -84,7 +70,7 @@ jobs:
         with:
           name: integration-test-results
           path: |
-            IntegrationTesting.xcresult
+            ${{ runner.temp }}/IntegrationTesting.xcresult
             ~/Library/Logs/DiagnosticReports/*
           retention-days: 7
 
