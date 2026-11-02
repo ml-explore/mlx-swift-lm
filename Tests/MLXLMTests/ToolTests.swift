@@ -2182,4 +2182,23 @@ struct MiniCPM5ToolCallParserTests {
         #expect(toolCall.function.name == "calculator")
         #expect(toolCall.function.arguments["expression"] == .string("90/432*2134"))
     }
+
+    @Test("Test MiniCPM5 Format via ToolCallProcessor keeps a function close tag inside CDATA")
+    func testMiniCPM5FormatProcessorCDATAContainsFunctionClose() throws {
+        let processor = ToolCallProcessor(format: .miniCPM5)
+        let content = #"""
+            <function name="run"><param name="code"><![CDATA[print("</function>")]]></param></function>
+            """#
+
+        _ = processor.processChunk(content)
+
+        withKnownIssue(
+            "ToolCallProcessor ends the call at the first </function>, even inside CDATA"
+        ) {
+            #expect(processor.toolCalls.count == 1)
+            let toolCall = try #require(processor.toolCalls.first)
+            #expect(toolCall.function.name == "run")
+            #expect(toolCall.function.arguments["code"] == .string(#"print("</function>")"#))
+        }
+    }
 }
