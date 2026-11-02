@@ -6,7 +6,7 @@ and safetensors. Download checkpoint revision d0ca73dcfa70ce18733754a492cdc1fb01
 separately. This script runs LiquidAI's pinned Python code on the CPU and uses
 about 8 GB of memory to dequantize the same weights used by the Swift test.
 
-python scripts/lfm3-checkpoint-reference.py /path/to/checkpoint /tmp/lfm3-reference.safetensors
+python tools/lfm3-checkpoint-reference.py /path/to/checkpoint /tmp/lfm3-reference.safetensors
 Then run LFM3CheckpointTests with MLX_LFM3_CHECKPOINT, MLX_LFM3_REFERENCE_FILE
 and MLX_ENABLE_TF32=0 set in the test process environment.
 """

@@ -783,8 +783,8 @@ public final class LLMModelFactory: GenericModelFactory {
 
         let tokenizer = try await tokenizerTask
 
-        if model is LFM3Model {
-            try LFM3Model.validateTokenizer(tokenizer)
+        if let model = model as? LLMModel {
+            try model.validate(tokenizer: tokenizer)
         }
 
         let messageGenerator: any MessageGenerator

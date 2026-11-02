@@ -116,22 +116,29 @@ LLMRegistry.mellum2_1_12b_a2_5b_thinking_6bit  // mlx-community/Mellum2.1-12B-A2
 ### LFM3 tokenizer requirements
 
 LFM3 needs BPE `ignore_merges: true` and regex splitting by Unicode code point.
-Swift Transformers 1.3.5 does not include fixes
+Swift Transformers 1.3.5 is incompatible. Stable
+[1.4.0](https://github.com/huggingface/swift-transformers/releases/tag/1.4.0)
+includes both required fixes:
 [#397](https://github.com/huggingface/swift-transformers/pull/397) and
-[#398](https://github.com/huggingface/swift-transformers/pull/398). Supply a
-`TokenizerLoader` containing both fixes or another compatible implementation;
-the model factory rejects known incompatible tokenization at load time. The core
-package does not depend on Swift Transformers.
+[#398](https://github.com/huggingface/swift-transformers/pull/398). The token-ID and
+chat/tool-template integration tests pass with 1.4.0. Supply a `TokenizerLoader`
+using that release or another compatible implementation. The model rejects known
+incompatible tokenization through the generic `LLMModel.validate(tokenizer:)` hook
+at load time. The core package does not depend on Swift Transformers.
 
 The official text checkpoint uses XML function calls (`.xmlFunction`), with
 `<tool_call>` and `<function=...>` framing. It does not use the LFM2 format.
 
-Small FP32 reference fixtures run in the unit suite without downloads. Regenerate
-them with `python scripts/lfm3-reference.py`, which pins LiquidAI's source revision.
-For a downloaded official 4-bit checkpoint, `scripts/lfm3-checkpoint-reference.py`
+Unit tests generate deterministic weights in memory and compare every operator,
+layer, and logit against FP32 reference values embedded in Swift. Regenerate those
+values with `python tools/lfm3-reference.py`, which pins LiquidAI's source revision.
+No model files or downloads are needed to run the unit tests.
+For a downloaded official 4-bit checkpoint, `tools/lfm3-checkpoint-reference.py`
 exports matching FP32 logits from the original Hugging Face implementation.
-`LFM3CheckpointTests` reads `MLX_LFM3_CHECKPOINT` and `MLX_LFM3_REFERENCE_FILE`;
-set `MLX_ENABLE_TF32=0` in the test process for that parity check.
+`IntegrationTesting/IntegrationTestingTests/LFM3CheckpointTests.swift` reads
+`MLX_LFM3_CHECKPOINT` and `MLX_LFM3_REFERENCE_FILE`; set `MLX_ENABLE_TF32=0` in the
+test process for that parity check. The same integration class covers temporary
+mixed-precision checkpoints and factory rejection of incompatible tokenizers.
 `MLX_LFM3_LONG_CONTEXT=1` enables the synthetic 4K/16K/32K cache tests.
 The integration project's tokenizer goldens are opt-in with
 `MLX_RUN_LFM3_TOKENIZER=1`; `MLX_LFM3_TOKENIZER_DIRECTORY` selects local tokenizer

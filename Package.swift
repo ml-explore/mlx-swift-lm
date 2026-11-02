@@ -185,9 +185,6 @@ let package = Package(
             ],
             resources: [
                 .process("Resources/1080p_30.mov"), .process("Resources/audio_only.mov"),
-                .process("Resources/lfm3-reference-config.json"),
-                .process("Resources/lfm3-reference-weights.safetensors"),
-                .process("Resources/lfm3-reference-outputs.safetensors"),
             ]
         ),
         .macro(

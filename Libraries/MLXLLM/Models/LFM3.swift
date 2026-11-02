@@ -72,7 +72,7 @@ public class LFM3Model: Module, LLMModel, KVCacheDimensionProvider {
         try model.newCache(parameters: parameters)
     }
 
-    package static func validateTokenizer(_ tokenizer: any Tokenizer) throws {
+    public func validate(tokenizer: any Tokenizer) throws {
         guard tokenizer.convertTokenToId("<|startoftext|>") == 124894,
             tokenizer.convertTokenToId(".reduce") == 96744
         else { return }

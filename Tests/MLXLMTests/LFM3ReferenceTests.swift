@@ -7,22 +7,29 @@ import XCTest
 @testable import MLXLMCommon
 
 final class LFM3ReferenceTests: XCTestCase {
-    private func resource(_ name: String, _ extensionName: String) throws -> URL {
-        try XCTUnwrap(Bundle.module.url(forResource: name, withExtension: extensionName))
+    private func makeModel() throws -> LFM3Model {
+        let config = try JSONDecoder().decode(
+            LFM3Configuration.self, from: Data(LFM3ReferenceValues.configuration.utf8))
+        let model = LFM3Model(config)
+        var weights = [String: MLXArray]()
+        // Match the Python oracle independently of module traversal order.
+        for (i, entry) in model.parameters().flattened().sorted(by: { $0.0 < $1.0 }).enumerated() {
+            let (name, parameter) = entry
+            let shift: Float = parameter.ndim == 1 && parameter.size == config.hiddenSize ? 1 : 0
+            let values = (0 ..< parameter.size).map { Float(($0 + i * 3) % 17 - 8) / 32 + shift }
+            weights[name] = MLXArray(values, parameter.shape)
+        }
+        try model.update(parameters: ModuleParameters.unflattened(weights), verify: [.all])
+        eval(model)
+        return model
     }
 
     func testLongContextChunking() throws {
         guard ProcessInfo.processInfo.environment["MLX_LFM3_LONG_CONTEXT"] == "1" else {
             throw XCTSkip("Set MLX_LFM3_LONG_CONTEXT=1 for 4K, 16K and 32K cache checks")
         }
-        let config = try JSONDecoder().decode(
-            LFM3Configuration.self,
-            from: Data(contentsOf: resource("lfm3-reference-config", "json")))
-        let model = LFM3Model(config)
-        let weights = try loadArrays(url: resource("lfm3-reference-weights", "safetensors"))
-        try model.update(
-            parameters: ModuleParameters.unflattened(model.sanitize(weights: weights)),
-            verify: [.all])
+        let model = try makeModel()
+        let config = model.configuration
         for length in [4096, 16384, 32768] {
             let tokens = MLXArray((0 ..< length).map { Int32(($0 * 7 + 3) % 16) }).reshaped(
                 1, length)
@@ -60,23 +67,16 @@ final class LFM3ReferenceTests: XCTestCase {
     func testOriginalHuggingFaceFloat32Parity() throws {
         // CPU pins IEEE FP32, including on devices that use TF32 for GPU matmuls.
         try Device.withDefaultDevice(.cpu) {
-            let config = try JSONDecoder().decode(
-                LFM3Configuration.self,
-                from: Data(contentsOf: resource("lfm3-reference-config", "json")))
-            let model = LFM3Model(config)
-            let weights = try loadArrays(url: resource("lfm3-reference-weights", "safetensors"))
-            try model.update(
-                parameters: ModuleParameters.unflattened(model.sanitize(weights: weights)),
-                verify: [.all])
-            let reference = try loadArrays(url: resource("lfm3-reference-outputs", "safetensors"))
-            let tokens = try XCTUnwrap(reference["tokens"])
+            let model = try makeModel()
+            let config = model.configuration
+            let tokens = MLXArray((0 ..< 38).map { Int32(($0 * 7 + 3) % 16) }).reshaped(2, 19)
 
             func compare(_ actual: MLXArray, _ key: String) throws {
-                let expected = try XCTUnwrap(reference[key], key)
-                XCTAssertEqual(actual.shape, expected.shape, key)
+                let values = try XCTUnwrap(LFM3ReferenceValues.outputs[key], key)
+                XCTAssertEqual(actual.size, values.count, key)
+                let expected = MLXArray(values, actual.shape)
                 let maximum = abs(actual - expected).max().item(Float.self)
-                let relative = maximum / max(abs(expected).max().item(Float.self), 1e-8)
-                print("LFM3 FP32 \(key): max_abs=\(maximum), normalized_max=\(relative)")
+                print("LFM3 FP32 \(key): max_abs=\(maximum)")
                 XCTAssertLessThan(maximum, 2e-5, key)
             }
 
@@ -103,7 +103,10 @@ final class LFM3ReferenceTests: XCTestCase {
             try compare(logits, "logits")
             XCTAssertEqual(
                 argMax(logits, axis: -1).asArray(Int.self),
-                argMax(try XCTUnwrap(reference["logits"]), axis: -1).asArray(Int.self))
+                argMax(
+                    MLXArray(try XCTUnwrap(LFM3ReferenceValues.outputs["logits"]), logits.shape),
+                    axis: -1
+                ).asArray(Int.self))
 
             let cache = try model.newCache(parameters: nil)
             var outputs = [MLXArray]()
@@ -111,7 +114,7 @@ final class LFM3ReferenceTests: XCTestCase {
                 outputs.append(model(tokens[0..., start ..< end], cache: cache))
                 eval(outputs.last!)
             }
-            try compare(concatenated(outputs, axis: 1), "cached_logits")
+            try compare(concatenated(outputs, axis: 1), "logits")
         }
     }
 }

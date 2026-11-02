@@ -2,7 +2,7 @@ import Foundation
 import Testing
 import Tokenizers
 
-// Opt in after selecting a tokenizer with swift-transformers #397 and #398.
+// Opt in with swift-transformers 1.4.0 or another tokenizer with #397 and #398.
 @Suite(
     .serialized, .enabled(if: ProcessInfo.processInfo.environment["MLX_RUN_LFM3_TOKENIZER"] == "1"))
 struct LFM3TokenizerIntegrationTests {

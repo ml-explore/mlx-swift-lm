@@ -11,6 +11,10 @@ public protocol LLMModel: LanguageModel, LoRAModel {
     ///
     /// The default implementation returns `DefaultMessageGenerator`.
     func messageGenerator(tokenizer: Tokenizer) -> MessageGenerator
+
+    /// Check tokenizer requirements before the factory returns a model context.
+    /// The default implementation accepts any tokenizer.
+    func validate(tokenizer: Tokenizer) throws
 }
 
 extension LLMModel {
@@ -64,4 +68,6 @@ extension LLMModel {
     public func messageGenerator(tokenizer: Tokenizer) -> MessageGenerator {
         DefaultMessageGenerator()
     }
+
+    public func validate(tokenizer: Tokenizer) throws {}
 }
