@@ -79,6 +79,15 @@ Declare what a model may do with the `capabilities:` list at construction. Decla
 | `.reasoning` | Run "thinking" models that emit a reasoning trace. |
 | `.vision` | Accept image inputs. |
 
+### The schema in the prompt
+
+During guided generation, `MLXLanguageModel` adds the response schema, including its `@Guide` descriptions, to the session's system prompt, so the model knows what each property is for. To leave the prompt unchanged, pass `includeSchemaInPrompt: false`. The grammar enforces the structure either way, but including the schema directly gives the model more information about what it's generating.
+
+Consider `includeSchemaInPrompt: false` when:
+- The schema is large relative to the model's context. Every guided request carries the full schema JSON, which also adds prefill time before the first token.
+- Your instructions or prompt already describe the response.
+- You want to control the wording or placement within the transcript, such as in cases where multiple different schemas are used within a single session.
+
 ## Availability
 
 `MLXLanguageModel` exposes an `availability` property — `.available`, `.downloading`, `.unavailable(...)` — for gating on model and download state.
