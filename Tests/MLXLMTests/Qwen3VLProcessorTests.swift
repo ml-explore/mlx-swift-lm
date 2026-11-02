@@ -67,18 +67,54 @@ final class Qwen3VLProcessorTests: XCTestCase {
         XCTAssertNil(prepared.video)
     }
 
-    func testImageInputKeepsAttentionMaskAndMediaPayload() async throws {
-        let processor = try makeProcessor(promptTokens: [90, 91, 92])
+    /// No Qwen VL model reads the mask, and a mask stops `ChatSession` from reusing the
+    /// cache, so a follow-up to an image would prefill the whole conversation again.
+    func testImageInputCarriesNoAttentionMaskAndKeepsMediaPayload() async throws {
+        let json = Data(
+            """
+            {
+              "image_mean": [0.5, 0.5, 0.5],
+              "image_std": [0.5, 0.5, 0.5],
+              "min_pixels": 1024,
+              "max_pixels": 1024,
+              "merge_size": 2,
+              "patch_size": 16,
+              "temporal_patch_size": 2,
+              "image_processor_type": "Qwen2VLImageProcessor"
+            }
+            """.utf8)
+        let tokenizer = ProcessorTokenizer(promptTokens: [90, 91, 92])
+        let processors: [(String, any UserInputProcessor)] = [
+            (
+                "Qwen2VL",
+                Qwen2VLProcessor(
+                    try JSONDecoder().decode(Qwen2VLProcessorConfiguration.self, from: json),
+                    tokenizer: tokenizer)
+            ),
+            (
+                "Qwen25VL",
+                Qwen25VLProcessor(
+                    try JSONDecoder().decode(Qwen25VLProcessorConfiguration.self, from: json),
+                    tokenizer: tokenizer)
+            ),
+            (
+                "Qwen3VL",
+                Qwen3VLProcessor(
+                    try JSONDecoder().decode(Qwen3VLProcessorConfiguration.self, from: json),
+                    tokenizer: tokenizer)
+            ),
+        ]
         let image = CIImage(color: .black).cropped(
             to: CGRect(x: 0, y: 0, width: 32, height: 32))
         var input = UserInput(prompt: "describe", images: [.ciImage(image)])
         input.processing = .init(minPixels: 1024, maxPixels: 1024)
 
-        let prepared = try await processor.prepare(input: input)
+        for (name, processor) in processors {
+            let prepared = try await processor.prepare(input: input)
 
-        let mask = try XCTUnwrap(prepared.text.mask)
-        XCTAssertEqual(mask.shape, prepared.text.tokens.shape)
-        XCTAssertNotNil(prepared.image)
-        XCTAssertNil(prepared.video)
+            XCTAssertNil(prepared.text.mask, name)
+            XCTAssertNotNil(prepared.image, name)
+            XCTAssertNil(prepared.video, name)
+        }
     }
 }

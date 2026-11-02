@@ -250,8 +250,8 @@ final class QwenVLPreparedInputSplitTests: XCTestCase {
         let suffixIds = turnTokens(frame: frame2, leadingText: 2, trailingText: 3)
         let full = input(ids: prefixIds + suffixIds, frames: [frame1, frame2])
 
-        // land two tokens into the suffix's placeholder run
-        let insideBlock = prefixIds.count + 2 + 1 + 2
+        // land one token into the suffix's two-placeholder run
+        let insideBlock = prefixIds.count + 2 + 1 + 1
         XCTAssertNil(split(full, droppingFirst: insideBlock))
     }
 
@@ -392,13 +392,19 @@ final class QwenVLPreparedInputSplitTests: XCTestCase {
         XCTAssertNil(split(full, droppingFirst: ids.count + 5))
     }
 
-    /// Nothing remains for the suffix -- the caller has no reason to reuse and the
-    /// split must not hand back an image-free payload that looks reusable.
-    func testSplitRefusesWhenAllMediaBelongsToThePrefix() throws {
+    /// A rewind past every media item leaves a text suffix: the placeholders, and the
+    /// features the cache holds for them, all belong to the prefix. The split hands
+    /// back that text suffix rather than refusing, which is what lets a media-carrying
+    /// prompt rewind at all.
+    func testSplitReturnsATextSuffixWhenAllMediaBelongsToThePrefix() throws {
         let frame1 = THW(1, 4, 6)
         let prefixIds = turnTokens(frame: frame1, leadingText: 3, trailingText: 4)
         let suffixIds = Array(repeating: 3, count: 5)
         let full = input(ids: prefixIds + suffixIds, frames: [frame1])
-        XCTAssertNil(split(full, droppingFirst: prefixIds.count))
+
+        let suffix = try XCTUnwrap(split(full, droppingFirst: prefixIds.count))
+        XCTAssertEqual(suffix.text.tokens.asArray(Int.self), suffixIds)
+        XCTAssertNil(suffix.image)
+        XCTAssertNil(suffix.video)
     }
 }

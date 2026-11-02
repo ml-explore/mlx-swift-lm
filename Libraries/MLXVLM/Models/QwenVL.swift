@@ -52,6 +52,28 @@ public struct QwenVL {
         return resumeState
     }
 
+    /// The state a cache rewound to `prefix` resumes from, in the same offset-relative frame as
+    /// ``continuationResumeState(ropeDeltas:cacheOffset:key:)``.
+    ///
+    /// The carried delta is what the cached media shifted M-RoPE positions by; text advances
+    /// positions one for one. Dropping only text therefore leaves the delta as it is, and a
+    /// media-free prefix resumes at zero whatever was dropped. Media on both sides of the cut
+    /// would need its grids to recompute the delta, so that rewind returns `nil` and the cache
+    /// is rebuilt.
+    static func rewoundState(
+        _ state: LMOutput.State, keeping prefix: [Int], dropping dropped: [Int],
+        imageTokenId: Int, videoTokenId: Int, key: LMOutput.Key<MLXArray>
+    ) -> LMOutput.State? {
+        func holdsMedia(_ tokens: [Int]) -> Bool {
+            tokens.contains { $0 == imageTokenId || $0 == videoTokenId }
+        }
+        guard holdsMedia(dropped) else { return state }
+        guard !holdsMedia(prefix) else { return nil }
+        var rewound = LMOutput.State()
+        rewound[key] = MLXArray([Int32(0)])
+        return rewound
+    }
+
     /// Rotates half the hidden dims of the input
     static func rotateHalf(_ x: MLXArray) -> MLXArray {
         let index = x.dim(-1) / 2
@@ -331,8 +353,8 @@ public struct QwenVL {
         let ids = tokens.asArray(Int.self)
         guard prefixTokenCount > 0, prefixTokenCount < ids.count else { return nil }
 
-        // The processor pairs media with an all-ones mask. Anything else is a real
-        // padding mask this routine will not reinterpret.
+        // A mask that masks nothing can be sliced with the tokens. Anything else is a
+        // real padding mask this routine will not reinterpret.
         if let mask = input.text.mask {
             guard mask.size == ids.count else { return nil }
             guard mask.asType(.int32).asArray(Int32.self).allSatisfy({ $0 == 1 }) else {
@@ -348,7 +370,9 @@ public struct QwenVL {
                     ids: ids, prefixTokenCount: prefixTokenCount, padTokenId: imageTokenId,
                     mergeSize: mergeSize)
             else { return nil }
-            splitImage = LMInput.ProcessedImage(pixels: split.pixels, frames: split.frames)
+            splitImage =
+                split.frames.isEmpty
+                ? nil : LMInput.ProcessedImage(pixels: split.pixels, frames: split.frames)
         }
 
         // A video placeholder inside an image-only payload would mean the prompt
@@ -371,7 +395,8 @@ public struct QwenVL {
     /// Returns `nil` when the payload cannot be attributed item-by-item, or when the
     /// cut falls *inside* a media block -- in that case the suffix would carry a
     /// partial set of placeholders and neither the feature merge nor the position
-    /// walk would line up.
+    /// walk would line up. A prefix that covers every item leaves no frames: the
+    /// suffix is text.
     private static func splitVisionPayload(
         pixels: MLXArray,
         positionIds: MLXArray?,
@@ -427,8 +452,6 @@ public struct QwenVL {
         guard consumedPads == prefixPadCount else { return nil }
 
         let remainingFrames = Array(frames[droppedItems...])
-        guard !remainingFrames.isEmpty else { return nil }
-
         let remainingPixels = pixels[consumedRows ..< pixels.dim(0), 0...]
         return (remainingPixels, remainingFrames)
     }

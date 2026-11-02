@@ -864,8 +864,7 @@ public struct Idefics3Processor: UserInputProcessor {
             // No image scenario
             let tokens = tokenizer.encode(text: prompt)
             let tokensArray = MLXArray(tokens).expandedDimensions(axis: 0)
-            let mask = ones(like: tokensArray)
-            return LMInput(text: .init(tokens: tokensArray, mask: mask), image: nil)
+            return LMInput(text: .init(tokens: tokensArray), image: nil)
         } else {
             // Single image scenario
             guard input.images.count == 1 else {
@@ -879,7 +878,6 @@ public struct Idefics3Processor: UserInputProcessor {
             promptTokens.insert(imageTokenId, at: imageTokenIndex)
 
             let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-            let mask = ones(like: promptArray)
 
             var image = try input.images[0].asCIImage()
             image = MediaProcessing.inSRGBToneCurveSpace(image)
@@ -916,7 +914,7 @@ public struct Idefics3Processor: UserInputProcessor {
             }
 
             return LMInput(
-                text: .init(tokens: promptArray, mask: mask),
+                text: .init(tokens: promptArray),
                 image: .init(pixels: pixels)
             )
         }
