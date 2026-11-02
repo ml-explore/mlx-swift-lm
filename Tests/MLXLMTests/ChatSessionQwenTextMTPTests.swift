@@ -173,6 +173,15 @@ struct ChatSessionQwenTextMTPTests {
         #expect(probe.draftCount == 0)
         #expect(status.processedTokenCount == 5)
         #expect(probe.cache.offset == status.processedTokenCount)
+
+        for prompt in ["b", "c"] {
+            let next = try await collect(session.streamDetails(to: prompt))
+            #expect(next.info.promptTokenCount == 1)
+            #expect(next.info.cachedPromptTokenCount > 0)
+            #expect(next.info.proposedDraftTokens == nil)
+        }
+        #expect(probe.cacheCreationCount == 1)
+        #expect(probe.cache.refusedWidths == [2])
     }
 
     @Test("warm MTP staging refusal preserves target cache and carried state")
@@ -277,30 +286,74 @@ struct ChatSessionQwenTextMTPTests {
         #expect(regularResult.info.speculativeDecodingFallbackReason == nil)
     }
 
-    @Test("a target-only sampling turn drops the warm MTP continuation")
-    func samplingChangeDropsMTPContinuationWithoutDroppingTargetCache() async throws {
+    @Test(
+        "MTP recovers after unsupported sampling and then reuses its cache",
+        arguments: [true, false])
+    func samplingChangeRecoversMTP(warm: Bool) async throws {
         let session = ChatSession(
             makeModelContext(),
             speculativeDecoding: try makeMTPConfiguration(),
             generateParameters: .init(maxTokens: 4, temperature: 0)
         )
 
-        _ = try await collect(session.streamDetails(to: "a"))
+        if warm { _ = try await collect(session.streamDetails(to: "a")) }
         session.generateParameters.temperature = 0.6
         let targetOnly = try await collect(session.streamDetails(to: "b"))
         session.generateParameters.temperature = 0
-        let afterDrop = try await collect(session.streamDetails(to: "c"))
+        let recovered = try await collect(session.streamDetails(to: "c"))
+        let next = try await collect(session.streamDetails(to: "d"))
 
-        #expect(targetOnly.info.promptTokenCount == 2)
-        #expect(targetOnly.info.cachedPromptTokenCount > 0)
+        #expect(targetOnly.info.promptTokenCount == (warm ? 2 : 1))
+        #expect((targetOnly.info.cachedPromptTokenCount > 0) == warm)
         #expect(targetOnly.info.proposedDraftTokens == nil)
         #expect(targetOnly.info.speculativeDecodingFallbackReason == .unsupportedSampling)
-        // A target-only pass commits its final token directly, so the next
-        // append has only the new user token left to prefill.
-        #expect(afterDrop.info.promptTokenCount == 1)
-        #expect(afterDrop.info.cachedPromptTokenCount > 0)
-        #expect(afterDrop.info.proposedDraftTokens == nil)
-        #expect(afterDrop.info.speculativeDecodingFallbackReason == .unavailableContinuation)
+        #expect(recovered.text == "xxxx")
+        #expect(recovered.info.promptTokenCount > 2)
+        #expect(recovered.info.cachedPromptTokenCount == 0)
+        #expect((recovered.info.proposedDraftTokens ?? 0) > 0)
+        #expect(recovered.info.speculativeDecodingFallbackReason == nil)
+        #expect(next.info.promptTokenCount == 2)
+        #expect(next.info.cachedPromptTokenCount > 0)
+        #expect((next.info.proposedDraftTokens ?? 0) > 0)
+        #expect(next.info.speculativeDecodingFallbackReason == nil)
+    }
+
+    @Test(
+        "a failed MTP recovery does not repeatedly rebuild the target cache",
+        arguments: [true, false])
+    func failedRecoveryPreservesWarmTargetCache(stagingFailure: Bool) async throws {
+        let probe = MTPStagingProbe()
+        let session = ChatSession(
+            makeModelContext(probe: probe),
+            speculativeDecoding: try makeMTPConfiguration(model: QwenStyleMTPDrafter(probe: probe)),
+            generateParameters: .init(maxTokens: 4, temperature: 0))
+
+        _ = try await collect(session.streamDetails(to: "a"))
+        session.generateParameters.temperature = 0.6
+        _ = try await collect(session.streamDetails(to: "b"))
+        probe.cache.refusesSpeculativeStaging = stagingFailure
+        probe.refusesFinalization = !stagingFailure
+        session.generateParameters.temperature = 0
+        let recovery = try await collect(session.streamDetails(to: "c"))
+        #expect(recovery.info.cachedPromptTokenCount == 0)
+        #expect(recovery.info.promptTokenCount > 2)
+        #expect(
+            recovery.info.speculativeDecodingFallbackReason
+                == (stagingFailure ? .unsupportedCache : nil))
+        #expect(probe.cacheCreationCount == 2)
+        let draftCount = probe.draftCount
+
+        for (index, temperature) in [Float(0), Float(0.6), Float(0), Float(0)].enumerated() {
+            session.generateParameters.temperature = temperature
+            let result = try await collect(session.streamDetails(to: "d"))
+            #expect(result.text == "xxxx")
+            #expect(result.info.promptTokenCount == (stagingFailure || index > 0 ? 1 : 2))
+            #expect(result.info.cachedPromptTokenCount > 0)
+            #expect(result.info.proposedDraftTokens == nil)
+            #expect(probe.cacheCreationCount == 2)
+            #expect(probe.draftCount == draftCount)
+        }
+        #expect(probe.cache.refusedWidths == (stagingFailure ? [2] : []))
     }
 
     @Test("a cache-plan change rebuilds target and MTP state together")
@@ -471,6 +524,14 @@ struct ChatSessionQwenTextMTPTests {
         #expect(second.info.speculativeDecodingTelemetry == nil)
         #expect(first.info.speculativeDecodingFallbackReason == nil)
         #expect(second.info.speculativeDecodingFallbackReason == .unsupportedMedia)
+
+        for prompt in ["c", "d"] {
+            let next = try await collect(session.streamDetails(to: prompt))
+            #expect(next.info.promptTokenCount == 1)
+            #expect(next.info.cachedPromptTokenCount > 0)
+            #expect(next.info.proposedDraftTokens == nil)
+            #expect(next.info.speculativeDecodingFallbackReason == .unsupportedMedia)
+        }
     }
 
     @Test("consumer cancellation finalizes MTP before a clean next turn")
@@ -900,6 +961,11 @@ private final class MTPStateEmittingTarget: Module, LanguageModel, KVCacheDimens
 
     func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
         guard let probe else { return try [makeAttentionKVCache(parameters: parameters)] }
+        if probe.cacheCreationCount > 0 {
+            let cache = SpeculativeStagingCache()
+            cache.refusesSpeculativeStaging = probe.cache.refusesSpeculativeStaging
+            probe.cache = cache
+        }
         probe.cacheCreationCount += 1
         return [probe.cache]
     }
@@ -1016,7 +1082,7 @@ private final class QwenStyleMTPDrafter: Module, ResumableMTPDrafterModel {
         state.seedToken = nil
         state.seedHidden = nil
         state.proposalAppended = 0
-        return true
+        return probe?.refusesFinalization != true
     }
 
     func resumeDrafterState(
@@ -1079,12 +1145,13 @@ private final class MTPStagingProbe {
         let targetMarker: Int?
     }
 
-    let cache = SpeculativeStagingCache()
+    var cache = SpeculativeStagingCache()
     var cacheCreationCount = 0
     var preparations: [Preparation] = []
     var draftCount = 0
     var finalizedPositions: [Int] = []
     var failAfterPreparationWrite = false
+    var refusesFinalization = false
 }
 
 private final class SpeculativeStagingCache: KVCache {

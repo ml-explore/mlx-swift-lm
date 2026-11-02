@@ -198,6 +198,8 @@ public final class ChatSession {
 
     private struct Conversation {
         var messages: [Chat.Message]
+        // Do not repeatedly rebuild the transcript after an MTP attempt fails.
+        var allowsMTPRecovery = true
         /// Exact tokens represented by the main KV cache when its count
         /// matches the model-cache progress. An empty value paired with
         /// nonzero progress is an invalidated ledger and forces a rebuild.
@@ -1400,6 +1402,15 @@ public final class ChatSession {
                             var decision = promptCachePolicy.decide(
                                 turn: turn, cache: cacheState)
 
+                            if mtpSupportsResumption, !mtpSpeculativeStateIsReady,
+                                currentConversation.allowsMTPRecovery,
+                                kvCache.processedTokenCount > 0,
+                                speculationIsEligibleForParameters,
+                                !carriesPreparedMedia, !isToolResultContinuation
+                            {
+                                decision = .rebuild
+                            }
+
                             // Rewinding is the one decision that can fail while being
                             // applied: a cache may trim fewer tokens than requested.
                             // Verify and downgrade to a rebuild before prefilling.
@@ -1620,6 +1631,7 @@ public final class ChatSession {
                             case .mtp(_, let blockSize) = speculativeDecoding.strategy,
                             let drafter = mtpDrafter
                         {
+                            conversation?.allowsMTPRecovery = false
                             do {
                                 let iterator = try MTPSpeculativeTokenIterator(
                                     input: input,
@@ -1819,6 +1831,9 @@ public final class ChatSession {
                                     currentConversation.messages.removeSubrange(
                                         conversationMessageCountBeforePending...)
                                 }
+                            }
+                            if mtpDrafterContinuation != nil {
+                                currentConversation.allowsMTPRecovery = true
                             }
                             conversation = currentConversation
                         }
