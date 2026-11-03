@@ -35,6 +35,16 @@ public class LFM3Model: Module, LLMModel, KVCacheDimensionProvider {
         projectLogits(model(inputs, cache: cache))
     }
 
+    public func nextTokenLogits(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        let hidden = hiddenStates(input.tokens, cache: cache)
+        let projection: Module = lmHead ?? model.embedTokens
+        return .init(
+            logits: projectLogits(
+                quantizedVocabularyProjectionInput(hidden, projection: projection)))
+    }
+
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
         // MLX conversions nest the text model under `language_model`. Keep only the text
         // model, which drops any vision or audio tensors. The same mapping renames the
@@ -71,12 +81,12 @@ public class LFM3Model: Module, LLMModel, KVCacheDimensionProvider {
 
 extension LFM3Model: HiddenStateLanguageModel {
     /// Final normed hidden states `[B, L, hidden]` for token ids `[B, L]`.
-    public func hiddenStates(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+    package func hiddenStates(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
         model(inputs, cache: cache)
     }
 
     /// Vocabulary logits for final hidden states, tied or untied.
-    public func projectLogits(_ hiddenStates: MLXArray) -> MLXArray {
+    package func projectLogits(_ hiddenStates: MLXArray) -> MLXArray {
         model.projectLogits(hiddenStates, lmHead: lmHead)
     }
 }
@@ -85,4 +95,10 @@ extension LFM3Model: LoRAModel {
     public var loraLayers: [Module] {
         model.layers
     }
+}
+
+// MARK: - Chat conventions
+
+extension LFM3Model {
+    public var reasoningConfig: ReasoningConfig? { .alwaysOnThinking }
 }

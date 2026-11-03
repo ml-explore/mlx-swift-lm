@@ -160,11 +160,35 @@ final class LFM3Tests: XCTestCase {
         XCTAssertThrowsError(try decode(json))
     }
 
+    /// The LFM2 key `tie_embedding` overrides `tie_word_embeddings`, as in the reference.
+    func testTieEmbeddingKeyOverridesTieWordEmbeddings() throws {
+        let tiny = { (keys: String) in
+            try self.decode(
+                """
+                {
+                    "hidden_size": 32, "intermediate_size": 48, "num_hidden_layers": 3,
+                    "num_attention_heads": 4, "num_key_value_heads": 2\(keys)
+                }
+                """)
+        }
+        XCTAssertTrue(try tiny("").tieWordEmbeddings)
+        XCTAssertFalse(try tiny(#", "tie_word_embeddings": false"#).tieWordEmbeddings)
+        XCTAssertFalse(try tiny(#", "tie_embedding": false"#).tieWordEmbeddings)
+        XCTAssertFalse(
+            try tiny(#", "tie_embedding": false, "tie_word_embeddings": true"#).tieWordEmbeddings)
+        XCTAssertTrue(
+            try tiny(#", "tie_embedding": true, "tie_word_embeddings": false"#).tieWordEmbeddings)
+    }
+
     func testRegisteredModelType() async throws {
         XCTAssertTrue(LLMRegistry.shared.contains(id: "LiquidAI/LFM3-1.7B-MLX-4bit"))
         let model = try await LLMTypeRegistry.shared.createModel(
             configuration: Data(realConfigJSON.utf8), modelType: "lfm3")
         XCTAssertTrue(model is LFM3Model)
+    }
+
+    func testDeclaresAlwaysOnThinking() throws {
+        XCTAssertEqual(LFM3Model(try tinyConfiguration()).reasoningConfig, .alwaysOnThinking)
     }
 
     // MARK: - Model
@@ -181,9 +205,81 @@ final class LFM3Tests: XCTestCase {
 
     func testUntiedEmbeddingsUseLMHead() throws {
         let model = try tinyModel(tinyConfiguration(tieWordEmbeddings: false))
-        XCTAssertNotNil(model.lmHead)
-        XCTAssertEqual(
-            model(MLXArray([Int32(1), 2, 3]).reshaped(1, 3), cache: nil).shape, [1, 3, 64])
+        let lmHead = try XCTUnwrap(model.lmHead)
+        let tokens = MLXArray([Int32(1), 2, 3]).reshaped(1, 3)
+        let logits = model(tokens, cache: nil)
+        XCTAssertEqual(logits.shape, [1, 3, 64])
+        XCTAssertEqual(abs(logits - lmHead(model.model(tokens))).max().item(Float.self), 0)
+    }
+
+    /// Distinct values for every tensor, from a hash of one running index over the parameters
+    /// in name order: `1 + u` for norms and `u / 2` otherwise, with `u` in [-0.5, 0.5).
+    private func hashedWeights(_ model: Module) -> [String: MLXArray] {
+        var start = 0
+        var weights = [String: MLXArray]()
+        for (key, value) in model.parameters().flattened().sorted(by: { $0.0 < $1.0 }) {
+            let values = (start ..< start + value.size).map { i in
+                let u = Double(UInt64(i) * 2_654_435_761 % (1 << 32)) / 4_294_967_296 - 0.5
+                return Float(value.ndim == 1 ? 1 + u : u / 2)
+            }
+            weights[key] = MLXArray(values, value.shape)
+            start += value.size
+        }
+        return weights
+    }
+
+    /// Expected logits come from modeling_lfm3.py in float32 on the CPU with the same weights
+    /// and tokens: the first 8 at positions 3, 10 and 18, with a sliding window of 4.
+    func testLogitsMatchReference() throws {
+        let model = try tinyModel()
+        try model.update(
+            parameters: ModuleParameters.unflattened(hashedWeights(model)), verify: [.all])
+        let tokens = MLXArray((0 ..< 19).map { Int32(($0 * 7 + 3) % 64) }).reshaped(1, 19)
+        let expected: [Int: [Float]] = [
+            3: [
+                0.124086142, -0.628987074, 0.808857799, -0.596109271, 0.524976909, -1.24413228,
+                0.590065658, -0.482998401,
+            ],
+            10: [
+                0.897291958, -1.01679277, -0.422243804, -0.528702438, -0.0963748991, 2.48546743,
+                -0.584653139, 0.0170748997,
+            ],
+            18: [
+                0.402512223, -0.151311055, -0.361906171, -0.781367064, 0.596630931, 0.113322325,
+                0.043631494, -0.346791685,
+            ],
+        ]
+
+        let logits = model(tokens, cache: nil)
+
+        for (position, values) in expected {
+            assertClose(
+                logits[0, position, 0 ..< 8], MLXArray(values), atol: 1e-4, reducedAtol: 2e-2,
+                "position \(position)")
+        }
+    }
+
+    /// The quantized fast path projects only the trailing rows, and the last row must stay
+    /// bitwise equal to the full forward pass, tied or untied.
+    func testNextTokenLogitsMatchFullForward() throws {
+        for (tied, bits) in [(true, 4), (true, 8), (false, 6)] {
+            let model = try tinyModel(
+                tinyConfiguration(tieWordEmbeddings: tied, intermediateSize: 64))
+            quantize(model: model, groupSize: 32, bits: bits)
+            for length in [1, 97, 200] {
+                let text = LMInput.Text(
+                    tokens: MLXArray((0 ..< length).map { Int32(($0 * 7 + 3) % 64) })
+                        .reshaped(1, length))
+                let expected = model(text.tokens, cache: nil)[0..., -1, 0...]
+                let actual = model.nextTokenLogits(text, cache: nil, state: nil).logits
+                if length > 96 {
+                    XCTAssertLessThan(actual.dim(1), length)
+                }
+                XCTAssertTrue(
+                    arrayEqual(actual[0..., -1, 0...], expected).item(Bool.self),
+                    "tied \(tied), bits \(bits), length \(length)")
+            }
+        }
     }
 
     func testCacheTypesPerLayer() throws {
@@ -367,16 +463,21 @@ final class LFM3Tests: XCTestCase {
         let window = model.configuration.slidingWindow
         let defaults = model.model(tokens)
 
-        let explicit = model.model(
-            tokens,
-            masks: .init(
-                fullAttention: .causal,
-                slidingAttention: .array(createCausalMask(n: 9, offset: 0, windowSize: window))))
-        XCTAssertLessThan(abs(explicit - defaults).max().item(Float.self), 1e-5)
+        let difference = { (masks: LFM3AttentionMasks) in
+            abs(model.model(tokens, masks: masks) - defaults).max().item(Float.self)
+        }
 
-        // A plain causal mask lets sliding layers see past the window.
-        let unwindowed = model.model(tokens, masks: .init(slidingAttention: .causal))
-        XCTAssertGreaterThan(abs(unwindowed - defaults).max().item(Float.self), 1e-3)
+        // An override equal to its type's default changes nothing, so each one reaches only
+        // its own layers.
+        let windowed = MLXFast.ScaledDotProductAttentionMaskMode.array(
+            createCausalMask(n: 9, offset: 0, windowSize: window))
+        XCTAssertLessThan(difference(.init(fullAttention: .causal)), 1e-5)
+        XCTAssertLessThan(difference(.init(slidingAttention: windowed)), 1e-5)
+
+        // Any other mask changes the output: no mask on full layers, no window on sliding ones.
+        let unmasked = MLXFast.ScaledDotProductAttentionMaskMode.none
+        XCTAssertGreaterThan(difference(.init(fullAttention: unmasked)), 1e-3)
+        XCTAssertGreaterThan(difference(.init(slidingAttention: .causal)), 1e-3)
     }
 
     // MARK: - Mixed-precision checkpoint
