@@ -871,6 +871,44 @@ public struct DeferredTokenLogProbabilities {
     }
 }
 
+/// The cache and model state a prefill passed through, for a caller that returns to them later.
+package struct PrefillCheckpoint {
+    package let cache: KVCacheStorage.Checkpoint
+    package let state: LMOutput.State?
+}
+
+extension LanguageModel {
+    /// Evaluates `input` into `cache` without sampling, so the cache ends at its last position.
+    ///
+    /// - Returns: the model state to continue from, as a ``TokenIterator`` carries it.
+    package func prefill(
+        _ input: LMInput, into cache: KVCacheStorage, state: LMOutput.State?,
+        parameters: PrefillParameters
+    ) throws -> LMOutput.State? {
+        let length = input.text.cacheSequenceLength
+        switch try prepare(input, cache: cache.cache, state: state, prefill: parameters) {
+        case .tokens(let remaining):
+            cache.commitProcessedTokens(length - remaining.cacheSequenceLength)
+            var state = state
+            if remaining.cacheSequenceLength > 0 {
+                // Only the cache writes are evaluated; the logits are never read.
+                let output = withPreparedCache(cache.cache, lengths: remaining.sequenceLengths) {
+                    nextTokenLogits(
+                        remaining[text: .newAxis], cache: cache.cache.isEmpty ? nil : cache.cache,
+                        state: state)
+                }
+                cache.commitProcessedTokens(remaining.cacheSequenceLength)
+                state = output.state
+            }
+            parameters.progress?(input.text.tokens.size, input.text.tokens.size)
+            return state
+        case .logits(let output):
+            cache.commitProcessedTokens(length)
+            return output.state
+        }
+    }
+}
+
 /// Generator of tokens.
 ///
 /// This is typically used via a call to ``generate(input:cache:state:parameters:context:components:wiredMemoryTicket:tools:)`` returning `AsyncStream<Generation>`.
@@ -934,6 +972,9 @@ public struct TokenIterator: TokenIteratorProtocol {
     // Internal metrics
     public var promptPrefillTime: TimeInterval = 0.0
 
+    /// The cache and model state at the position prefill was asked to stop at.
+    package private(set) var prefillCheckpoint: PrefillCheckpoint?
+
     /// Initialize a `TokenIterator` with the given tokens. Note: this has been
     /// replaced with ``init(input:model:cache:state:parameters:components:)``.
     ///
@@ -989,7 +1030,8 @@ public struct TokenIterator: TokenIteratorProtocol {
         cacheStorage: KVCacheStorage,
         state: LMOutput.State? = nil,
         parameters: GenerateParameters,
-        components: GenerationComponents = .init()
+        components: GenerationComponents = .init(),
+        checkpointAt checkpointPosition: Int? = nil
     ) throws {
         let kvCachePlan = cacheStorage.plan
         let cacheStorage = try kvCachePlan.validated(cacheStorage)
@@ -1006,7 +1048,8 @@ public struct TokenIterator: TokenIteratorProtocol {
         self.maxTokens = parameters.maxTokens
 
         self.promptPrefillTime = try measure {
-            try prepare(input: input, prefill: parameters.prefill)
+            try prepare(
+                input: input, prefill: parameters.prefill, checkpointAt: checkpointPosition)
         }
     }
 
@@ -1063,9 +1106,20 @@ public struct TokenIterator: TokenIteratorProtocol {
             prefill: .init(stepSize: prefillStepSize), maxTokens: maxTokens)
     }
 
-    mutating func prepare(input: LMInput, prefill: PrefillParameters = .init()) throws {
+    /// - Parameter checkpointPosition: a position in `input` where prefill stops to record
+    ///   ``prefillCheckpoint``. The input must then be text only.
+    mutating func prepare(
+        input: LMInput, prefill: PrefillParameters = .init(),
+        checkpointAt checkpointPosition: Int? = nil
+    ) throws {
         processor?.prompt(input.text.tokens)
         prefill.prefix?(cacheStorage.processedTokenCount)
+        var input = input
+        var prefill = prefill
+        if let checkpointPosition, prefill.chunking == .balanced {
+            (input, prefill) = try prefillToCheckpoint(
+                input, at: checkpointPosition, prefill: prefill)
+        }
         let inputLength = input.text.cacheSequenceLength
 
         switch try model.prepare(input, cache: cache, state: state, prefill: prefill) {
@@ -1098,6 +1152,37 @@ public struct TokenIterator: TokenIteratorProtocol {
         }
 
         try kvCachePlan.applyAndValidate(to: cacheStorage)
+    }
+
+    /// Prefills `input` up to `position`, records ``prefillCheckpoint`` there, and returns the
+    /// rest of the input with the parameters to prefill it as the remainder of one prefill.
+    private mutating func prefillToCheckpoint(
+        _ input: LMInput, at position: Int, prefill: PrefillParameters
+    ) throws -> (LMInput, PrefillParameters) {
+        precondition(
+            input.image == nil && input.video == nil && input.audio == nil
+                && input.text.mask == nil,
+            "a prefill checkpoint splits text-only input")
+        let total = input.text.cacheSequenceLength
+        precondition(
+            (0 ..< total).contains(position),
+            "a prefill checkpoint leaves at least the last input token to sample from")
+
+        if position > 0 {
+            state = try model.prefill(
+                LMInput(text: input.text[.ellipsis, ..<position]), into: cacheStorage,
+                state: state, parameters: prefill.pass(after: 0, of: total))
+        }
+        if kvCachePlan.requiresRealizedCheckpoint {
+            try kvCachePlan.applyAndValidate(to: cacheStorage)
+        }
+        prefillCheckpoint = cacheStorage.checkpoint().map {
+            PrefillCheckpoint(cache: $0, state: state)
+        }
+        return (
+            LMInput(text: input.text[.ellipsis, position...]),
+            prefill.pass(after: position, of: total)
+        )
     }
 
     mutating func convertToToken(logits: MLXArray) -> MLXArray {

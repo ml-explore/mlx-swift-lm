@@ -41,6 +41,11 @@ enum PromptCacheReuseDecision: Equatable {
     /// feed `promptTokens[commonPrefixLength...]`.
     case trimToCommonPrefix(commonPrefixLength: Int, trimCount: Int)
 
+    /// Return the main cache and its carried model state to the checkpoint
+    /// taken after `prefixLength` tokens, then feed `promptTokens[prefixLength...]`.
+    /// A cache that refuses the checkpoint must be downgraded to ``rebuild``.
+    case restoreCheckpoint(prefixLength: Int)
+
     /// The cache cannot be reconciled with this prompt. Discard it, drop any
     /// carried model state, and feed the whole prompt.
     case rebuild
@@ -48,9 +53,20 @@ enum PromptCacheReuseDecision: Equatable {
     /// `true` when a non-empty cached prefix is carried into this turn.
     var reusesCachedPrefix: Bool {
         switch self {
-        case .appendSuffix, .appendSuffixToMain, .appendMediaSuffix, .trimToCommonPrefix:
+        case .appendSuffix, .appendSuffixToMain, .appendMediaSuffix, .trimToCommonPrefix,
+            .restoreCheckpoint:
             return true
         case .prefillAll, .rebuild:
+            return false
+        }
+    }
+
+    /// `true` when applying this decision drops cached positions past the reused prefix.
+    var rewinds: Bool {
+        switch self {
+        case .trimToCommonPrefix, .restoreCheckpoint:
+            return true
+        case .prefillAll, .appendSuffix, .appendSuffixToMain, .appendMediaSuffix, .rebuild:
             return false
         }
     }
@@ -134,6 +150,10 @@ struct PromptCacheState: Sendable {
 
     /// Exact rewind limit across all participating layers.
     var maxTrimCount: Int = 0
+
+    /// The length of a candidate checkpoint. Applying a restore must verify its
+    /// token prefix and cache compatibility before reusing it.
+    var checkpointLength: Int?
 }
 
 /// One reusability rule.
@@ -157,6 +177,7 @@ struct PromptCacheReusePolicy: Sendable {
         ExtendCachedPrefixRule(),
         AppendOnlyMediaRule(),
         RewindToCommonPrefixRule(),
+        RestoreCheckpointRule(),
     ]
 
     private let rules: [any PromptCacheReuseRule]
@@ -235,9 +256,10 @@ struct AppendOnlyMediaRule: PromptCacheReuseRule {
     }
 }
 
-/// Rewinds to the longest common prefix, or rebuilds when that is unsafe.
+/// Trims back to the longest common prefix.
 ///
-/// This rule always decides, so it is the natural terminal rule.
+/// Declines when the trim is unsafe or out of reach, leaving the turn to a
+/// checkpoint or, failing that, the policy's rebuild.
 struct RewindToCommonPrefixRule: PromptCacheReuseRule {
     func reuse(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision? {
         // A cache at position zero has nothing to rewind and nothing to
@@ -263,14 +285,32 @@ struct RewindToCommonPrefixRule: PromptCacheReuseRule {
             && !turn.carriesAttentionMask
             && !turn.carriesModelState
 
-        guard canRewind else {
-            // The template changed an already-cached portion of the transcript,
-            // or this input carries state/media that cannot be rewound safely.
-            // Rebuild rather than combining a mismatched prompt with stale
-            // model state.
-            return .rebuild
-        }
+        // The template changed an already-cached portion of the transcript, or
+        // this input carries state/media that a trim cannot rewind safely.
+        guard canRewind else { return nil }
 
         return .trimToCommonPrefix(commonPrefixLength: commonPrefixLength, trimCount: trimCount)
+    }
+}
+
+/// Returns to a checkpoint when the cache cannot trim back to where the prompt
+/// diverges, as when a template drops a past reply's reasoning. Unlike a trim,
+/// a restore also returns the model state carried with the cache.
+struct RestoreCheckpointRule: PromptCacheReuseRule {
+    func reuse(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision? {
+        guard let checkpointLength = cache.checkpointLength,
+            checkpointLength > 0,
+            checkpointLength <= cache.cachedTokens.count,
+            checkpointLength < turn.promptTokens.count,
+            cache.mainCacheIsAligned,
+            !cache.hasDraftCache,
+            !turn.carriesNewMedia,
+            !turn.carriesPreparedMedia,
+            !turn.carriesAttentionMask,
+            turn.promptTokens.starts(with: cache.cachedTokens.prefix(checkpointLength))
+        else {
+            return nil
+        }
+        return .restoreCheckpoint(prefixLength: checkpointLength)
     }
 }

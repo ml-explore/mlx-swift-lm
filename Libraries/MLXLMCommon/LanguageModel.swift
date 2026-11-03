@@ -261,6 +261,8 @@ public struct LMOutput {
     }
 
     /// Dictionary of typed ``Key`` to carry state between steps.
+    /// Values must remain unchanged after a step returns. Later steps must produce new values
+    /// so sessions and checkpoints can safely retain earlier state.
     public struct State {
         private var contents: [String: Any]
 

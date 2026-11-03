@@ -27,6 +27,18 @@ private struct VarianceNormalizedKVTile {
     var valueScales: MLXArray
     var valueBiases: MLXArray
     var valueColumnScales: MLXArray
+
+    func map(_ transform: (MLXArray) -> MLXArray) -> Self {
+        Self(
+            keyWeight: transform(keyWeight), keyScales: transform(keyScales),
+            keyBiases: transform(keyBiases), keyColumnScales: transform(keyColumnScales),
+            valueWeight: transform(valueWeight), valueScales: transform(valueScales),
+            valueBiases: transform(valueBiases), valueColumnScales: transform(valueColumnScales))
+    }
+
+    func sliced(_ range: Range<Int>) -> Self {
+        map { $0[0..., 0..., range, 0..., 0...] }
+    }
 }
 
 private struct VarianceNormalizedKVSlab {
@@ -566,18 +578,23 @@ public class VarianceNormalizedKVCache: BaseKVCache, KVCacheAttentionProtocol,
     private func contiguousRecords(
         _ records: VarianceNormalizedKVTile, range: Range<Int>
     ) -> VarianceNormalizedKVTile {
-        VarianceNormalizedKVTile(
-            keyWeight: contiguous(records.keyWeight[0..., 0..., range, 0..., 0...]),
-            keyScales: contiguous(records.keyScales[0..., 0..., range, 0..., 0...]),
-            keyBiases: contiguous(records.keyBiases[0..., 0..., range, 0..., 0...]),
-            keyColumnScales: contiguous(
-                records.keyColumnScales[0..., 0..., range, 0..., 0...]),
-            valueWeight: contiguous(records.valueWeight[0..., 0..., range, 0..., 0...]),
-            valueScales: contiguous(records.valueScales[0..., 0..., range, 0..., 0...]),
-            valueBiases: contiguous(records.valueBiases[0..., 0..., range, 0..., 0...]),
-            valueColumnScales: contiguous(
-                records.valueColumnScales[0..., 0..., range, 0..., 0...])
-        )
+        records.sliced(range).map { contiguous($0) }
+    }
+
+    /// Retains immutable prefix slabs without unpacking or recompressing their tiles.
+    private func retainTiles(_ count: Int) {
+        guard count < completedTileCount else { return }
+        var remaining = count
+        tileSlabs = tileSlabs.compactMap { slab in
+            let retained = min(remaining, slab.count)
+            remaining -= retained
+            guard retained > 0 else { return nil }
+            return retained == slab.count
+                ? slab
+                : VarianceNormalizedKVSlab(
+                    records: slab.records.sliced(0 ..< retained), count: retained)
+        }
+        pendingTiles = Array(pendingTiles.prefix(remaining))
     }
 
     private func allTiles() -> [VarianceNormalizedKVTile] {
@@ -1139,6 +1156,8 @@ public class VarianceNormalizedKVCache: BaseKVCache, KVCacheAttentionProtocol,
 
     public override var isTrimmable: Bool { true }
 
+    public override var maxTrimCount: Int { tailKeys?.dim(2) ?? 0 }
+
     public override func isTrimmable(after positions: Int) -> Bool {
         guard positions >= 0 else { return false }
         let tailLength = tailKeys?.dim(2) ?? 0
@@ -1146,7 +1165,57 @@ public class VarianceNormalizedKVCache: BaseKVCache, KVCacheAttentionProtocol,
         // Trimming back into that tile reconstructs them approximately, so it is not the exact
         // rollback required by KVCacheRound. Refuse that round and let generation fall back to
         // the non-speculative path; rounds wholly inside the raw tail remain exactly rewindable.
-        return tailLength + positions < tileSize
+        return positions < tileSize - tailLength
+    }
+
+    /// Only the incomplete tile is mutable; completed tiles remain in the live cache.
+    package struct Checkpoint: Evaluatable {
+        fileprivate let offset: Int
+        fileprivate let tileSize: Int
+        fileprivate let keyBits: Int
+        fileprivate let valueBits: Int
+        fileprivate let sinkhornIterations: Int
+        fileprivate let keyDType: DType?
+        fileprivate let valueDType: DType?
+        fileprivate let tailKeys: MLXArray?
+        fileprivate let tailValues: MLXArray?
+
+        package var retainedBytes: Int {
+            innerState().reduce(0) { $0 + $1.nbytes }
+        }
+
+        package func innerState() -> [MLXArray] {
+            [tailKeys, tailValues].compactMap { $0 }
+        }
+    }
+
+    package func checkpoint() -> Checkpoint {
+        let keys = tailKeys.map(materializedCacheState)
+        let values = tailValues.map(materializedCacheState)
+        return Checkpoint(
+            offset: offset, tileSize: tileSize, keyBits: keyBits, valueBits: valueBits,
+            sinkhornIterations: sinkhornIterations,
+            keyDType: keyDType, valueDType: valueDType,
+            tailKeys: keys, tailValues: values)
+    }
+
+    package func canRestore(_ checkpoint: Checkpoint) -> Bool {
+        checkpoint.offset <= offset && checkpoint.tileSize == tileSize
+            && checkpoint.keyBits == keyBits && checkpoint.valueBits == valueBits
+            && checkpoint.sinkhornIterations == sinkhornIterations
+            && checkpoint.offset / tileSize <= completedTileCount
+    }
+
+    package func restore(_ checkpoint: Checkpoint) {
+        precondition(canRestore(checkpoint), "cannot restore this tile-cache prefix")
+        retainTiles(checkpoint.offset / tileSize)
+        tailKeys = checkpoint.tailKeys?[.ellipsis]
+        tailValues = checkpoint.tailValues?[.ellipsis]
+        offset = checkpoint.offset
+        keyDType = checkpoint.keyDType
+        valueDType = checkpoint.valueDType
+        restoredTileCount = nil
+        restoredTailLength = nil
     }
 
     @discardableResult
@@ -1174,7 +1243,7 @@ public class VarianceNormalizedKVCache: BaseKVCache, KVCacheAttentionProtocol,
         }
 
         if retainedTileCount < completedTileCount {
-            installTiles(Array(allTiles().prefix(retainedTileCount)))
+            retainTiles(retainedTileCount)
         }
         restoredTileCount = nil
         restoredTailLength = nil

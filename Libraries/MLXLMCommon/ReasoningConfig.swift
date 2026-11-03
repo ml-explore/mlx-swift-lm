@@ -226,3 +226,53 @@ public struct ReasoningConfig: Sendable, Equatable {
         implicitEndDelimiters: ["<|tool_call>"],
         channel: .gemma4)
 }
+
+/// A reasoning block a chat template prefilled at the end of a prompt.
+struct PrefilledReasoningBlock: Equatable {
+    /// Tokens the block spans at the end of the prompt.
+    let tokenCount: Int
+    /// Whether the block is still open, so the reply continues inside it. A closed, empty
+    /// block turns reasoning off.
+    let isOpen: Bool
+}
+
+extension ReasoningConfig {
+    /// The shortest token tail covering an empty or open reasoning block at the prompt's end.
+    func prefilledBlock(endingPrompt promptTokens: [Int], tokenizer: any Tokenizer)
+        -> PrefilledReasoningBlock?
+    {
+        guard !startDelimiter.isEmpty, !promptTokens.isEmpty else { return nil }
+        func decode(_ count: Int) -> String {
+            tokenizer.decode(
+                tokenIds: Array(promptTokens.suffix(count)), skipSpecialTokens: false
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let longestBlock = startDelimiter.count + endDelimiter.count
+        var count = 1
+        var lower = 1
+        while true {
+            let tail = decode(count)
+            if let start = tail.range(of: startDelimiter, options: .backwards) {
+                let body = tail[start.upperBound...]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard body.isEmpty || body == endDelimiter else { return nil }
+                var upper = count
+                while lower < upper {
+                    let middle = lower + (upper - lower) / 2
+                    if decode(middle).contains(startDelimiter) {
+                        upper = middle
+                    } else {
+                        lower = middle + 1
+                    }
+                }
+                return PrefilledReasoningBlock(tokenCount: lower, isOpen: body.isEmpty)
+            }
+            if count == promptTokens.count || tail.count(where: { !$0.isWhitespace }) > longestBlock
+            {
+                return nil
+            }
+            lower = count + 1
+            count += min(count, promptTokens.count - count)
+        }
+    }
+}
