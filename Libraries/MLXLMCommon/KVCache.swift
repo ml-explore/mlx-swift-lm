@@ -1058,8 +1058,19 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 
             // Decide if we need an array mask
             if cappedOffset + n > actualWindowSize || returnArray {
-                return .array(
-                    createCausalMask(n: n, offset: cappedOffset, windowSize: actualWindowSize))
+                // A different attention window must not force the pinned prefix visible.
+                guard keep > 0, actualWindowSize == maxCacheSize else {
+                    return .array(
+                        createCausalMask(n: n, offset: cappedOffset, windowSize: actualWindowSize))
+                }
+                // The pinned prefix uses `keep` slots of the window; recent rows use the rest.
+                let rinds = MLXArray(Int32(0) ..< Int32(cappedOffset + n))[.newAxis]
+                let linds = MLXArray(Int32(cappedOffset) ..< Int32(cappedOffset + n))[
+                    0..., .newAxis]
+                let causal = linds .>= rinds
+                let pinned = rinds .< keep
+                let recent = linds .< rinds + (actualWindowSize - keep)
+                return .array(causal & (pinned | recent))
             }
             return .causal
         } else {
