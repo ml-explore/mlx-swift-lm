@@ -14,6 +14,20 @@ struct MessageContentPartsTests {
         .url(URL(fileURLWithPath: "/tmp/example.png"), label: label)
     }
 
+    @Test("GLM-OCR puts images before the recognition prompt")
+    func glmOcrImagesBeforeText() {
+        let message = GlmOcrMessageGenerator().generate(
+            message: .user("Text Recognition:", images: [image(nil), image(nil)]))
+        #expect(message["role"] as? String == "user")
+        #expect(
+            message["content"] as? [[String: String]]
+                == [
+                    ["type": "image"],
+                    ["type": "image"],
+                    ["type": "text", "text": "Text Recognition:"],
+                ])
+    }
+
     @Test("No images gives one text part")
     func noImages() {
         let message = Chat.Message.user("hello")
