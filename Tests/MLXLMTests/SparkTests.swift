@@ -3,6 +3,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import MLXNN
 import XCTest
 
 @testable import MLXLLM
@@ -39,6 +40,73 @@ final class SparkTests: XCTestCase {
         let incremental = concatenated(results, axis: 1)
         let error = MLX.max(MLX.abs(reference - incremental)).item(Float.self)
         XCTAssertLessThan(error, 0.0001)
+    }
+
+    // Spark-MLX-LLM 079a6a3, with deterministic float32 weights.
+    func testLogitsMatchSparkReferenceAcrossWindow() throws {
+        let model = SparkModel(try configuration())
+        let weights = Dictionary(
+            uniqueKeysWithValues: model.parameters().flattened().map { name, value in
+                let values = (0 ..< value.size).map { Float($0 % 17 - 8) * 0.05 }
+                return (name, MLXArray(values, value.shape))
+            })
+        try model.update(parameters: ModuleParameters.unflattened(weights), verify: .all)
+        let tokens = MLXArray([Int32(1), 2, 3, 4, 5, 6, 7]).reshaped(1, 7)
+        let expected: [Float] = [
+            0.3873586, 0.3319290, 0.0817104, -0.0460823, -0.1685149, -0.3181255,
+            -0.3532947, -0.3234146, -0.1604977, -0.0786889, -0.0371127, -0.0272825,
+            -0.0413007, 0.0452750, 0.1627202, 0.2397714, 0.3055498, 0.3873586,
+            0.3319290, 0.0817104, -0.0460823, -0.1685149, -0.3181255, -0.3532947,
+            -0.3234146, -0.1604977, -0.0786889, -0.0371127, -0.0272825, -0.0413007,
+            0.0452750, 0.1627202,
+        ]
+        let logits = model(tokens, cache: nil)[0, -1, 0...]
+        XCTAssertLessThan(MLX.max(MLX.abs(logits - MLXArray(expected))).item(Float.self), 1e-5)
+    }
+
+    func testSanitizeConvertedCheckpointNames() throws {
+        let model = SparkModel(try configuration())
+        let tensor = MLXArray([Float(1)])
+        let quantization = BaseConfiguration.Quantization(groupSize: 32, bits: 8)
+        let cleaned = try model.prepareCheckpoint(
+            ModelCheckpoint(
+                weights: [
+                    "model.embed_tokens.weight": tensor,
+                    "model.embed_tokens.scales": tensor,
+                    "model.layers.0.self_attn.rotary_emb.inv_freq": tensor,
+                    "lm_head.weight": tensor,
+                ],
+                perLayerQuantization: .init(perLayerQuantization: [
+                    "model.embed_tokens": .quantize(quantization)
+                ])))
+        XCTAssertEqual(
+            Set(cleaned.weights.keys), ["model.embedding.weight", "model.embedding.scales"])
+        XCTAssertEqual(
+            cleaned.perLayerQuantization?.quantization(layer: "model.embedding"), quantization)
+        XCTAssertThrowsError(
+            try model.prepareCheckpoint(
+                ModelCheckpoint(weights: [
+                    "model.embedding.weight": tensor, "model.embed_tokens.weight": tensor,
+                ])))
+    }
+
+    func testConvertedCheckpointLoadsThroughSharedLoader() throws {
+        let config = try configuration()
+        let source = SparkModel(config)
+        var weights = Dictionary(uniqueKeysWithValues: source.parameters().flattened())
+        weights["model.embed_tokens.weight"] = weights.removeValue(forKey: "model.embedding.weight")
+        weights["model.layers.0.self_attn.rotary_emb.inv_freq"] = MLXArray([Float(1)])
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try save(arrays: weights, url: directory.appendingPathComponent("model.safetensors"))
+
+        let loaded = SparkModel(config)
+        try loadWeights(modelDirectory: directory, model: loaded)
+        let tokens = MLXArray([Int32(1), 2, 3]).reshaped(1, 3)
+        let difference = MLX.max(MLX.abs(source(tokens, cache: nil) - loaded(tokens, cache: nil)))
+        XCTAssertLessThan(difference.item(Float.self), 1e-5)
     }
 
     func testChunkedCacheWithSmallerLimit() throws {

@@ -262,8 +262,19 @@ final class SparkModel: Module, LLMModel {
         let h = model(inputs, cache: cache)
         return lmHead.map { $0(h) } ?? model.embedding.asLinear(h)
     }
-    func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        filterLMHeadWeights(from: weights, tiedWordEmbeddings: config.tiedEmbeddings)
+    func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        try checkpoint.mapNames { name in
+            if name.contains("rotary_emb.inv_freq")
+                || (config.tiedEmbeddings && name.split(separator: ".").contains("lm_head"))
+            {
+                return nil
+            }
+            let prefix = "model.embed_tokens"
+            if name == prefix || name.hasPrefix(prefix + ".") {
+                return "model.embedding" + name.dropFirst(prefix.count)
+            }
+            return name
+        }
     }
     func newCache(parameters: GenerateParameters? = nil) throws -> [KVCache] {
         try config.layerTypes.map { type in

@@ -89,7 +89,8 @@ LLMRegistry.mellum2_1_12b_a2_5b_thinking_6bit  // mlx-community/Mellum2.1-12B-A2
 Both families use `model_type: "spark2_5"`. Load an MLX-compatible checkpoint
 by its Hugging Face ID or a local directory. The model uses sliding-window and
 full-attention layers and supports Spark's `<tool_call>` format.
-The chat template requires `tojson` separator support, available in swift-jinja 3.0.
+Spark-X2.6 tool-enabled chat requires `tojson` separator support, available in
+swift-jinja 3.0. Older template engines can fail while rendering tools or tool history.
 
 ### Other Supported LLM Types
 
