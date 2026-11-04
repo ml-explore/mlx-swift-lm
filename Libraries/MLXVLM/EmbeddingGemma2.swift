@@ -83,7 +83,7 @@ package struct EmbeddingGemma2ImageProcessor: Sendable {
                 format: .RGBAh, colorSpace: nil)
             embeddingImageContext.clearCaches()
         }
-        let pixels = MLXArray(data, [1, sourceHeight, sourceWidth, 4], type: Float16.self)[
+        let pixels = MLXArray(data, [1, sourceHeight, sourceWidth, 4], dtype: .float16)[
             0..., 0..., 0..., ..<3
         ].transposed(0, 3, 1, 2)
         guard sourceHeight != height || sourceWidth != width else {
