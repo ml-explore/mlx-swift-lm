@@ -67,8 +67,9 @@ Currently supported model types are:
 - NemotronH
 
 Spark-X2.6 tool-enabled chat requires a tokenizer that supports Jinja's `tojson`
-separators, such as swift-tokenizers using swift-jinja 3.0 or later. Older template
-engines can fail when rendering tool definitions or tool-call history.
+separators, such as [swift-tokenizers](https://github.com/aleroot/swift-tokenizers) using
+[swift-jinja](https://github.com/huggingface/swift-jinja) 3.0 or later. Older template engines
+can fail when rendering tool definitions or tool-call history.
 
 See [llm-tool](../../Tools/llm-tool)
 
