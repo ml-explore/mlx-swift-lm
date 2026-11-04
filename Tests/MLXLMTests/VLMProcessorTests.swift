@@ -75,6 +75,22 @@ private func smolProcessorConfigJSON(sequenceKey: String, sequenceLength: Int) -
         """.utf8)
 }
 
+private func glmOcrProcessorConfig() throws -> GlmOcrProcessorConfiguration {
+    try JSONDecoder().decode(
+        GlmOcrProcessorConfiguration.self,
+        from: Data(
+            """
+            {
+              "image_mean": [0.48145466, 0.4578275, 0.40821073],
+              "image_std": [0.26862954, 0.26130258, 0.27577711],
+              "merge_size": 2,
+              "patch_size": 14,
+              "temporal_patch_size": 2,
+              "size": {"shortest_edge": 12544, "longest_edge": 9633792}
+            }
+            """.utf8))
+}
+
 private func testImage(edge: CGFloat = 8) -> CIImage {
     CIImage(color: CIColor(red: 0.5, green: 0.25, blue: 0.75))
         .cropped(to: CGRect(x: 0, y: 0, width: edge, height: edge))
@@ -277,5 +293,58 @@ final class VLMProcessorTests: XCTestCase {
             }
             XCTAssertTrue(message.contains("at least one frame"))
         }
+    }
+
+    func testGlmOcrMessageGeneratorPutsImagesBeforeText() throws {
+        let input = UserInput(prompt: "Text Recognition:", images: [.ciImage(testImage())])
+
+        let message = try XCTUnwrap(GlmOcrMessageGenerator().generate(from: input).first)
+        let content = try XCTUnwrap(message["content"] as? [[String: any Sendable]])
+
+        XCTAssertEqual(content.count, 2)
+        XCTAssertEqual(content[0]["type"] as? String, "image")
+        XCTAssertEqual(content[1]["type"] as? String, "text")
+        XCTAssertEqual(content[1]["text"] as? String, "Text Recognition:")
+    }
+
+    func testGlmOcrProcessorScalesUpImagesWithASideUnderFactor() throws {
+        let config = try glmOcrProcessorConfig()
+        let processor = GlmOcrProcessor(config, tokenizer: FixedTokenizer())
+        let image = CIImage(color: CIColor(red: 0.5, green: 0.25, blue: 0.75))
+            .cropped(to: CGRect(x: 0, y: 0, width: 400, height: 27))
+
+        let (_, grid) = try processor.preprocess(images: [image], processing: nil)
+
+        let factor = config.patchSize * config.mergeSize
+        let height = grid.h * config.patchSize
+        let width = grid.w * config.patchSize
+        XCTAssertGreaterThanOrEqual(height, factor)
+        XCTAssertEqual(height % factor, 0)
+        XCTAssertEqual(width % factor, 0)
+    }
+
+    func testQwenVLTargetSizeScalesUpSmallSidesWhenAsked() throws {
+        let tall = try QwenVL.targetSize(
+            height: 27, width: 400, factor: 28,
+            minPixels: 112 * 112, maxPixels: 28 * 28 * 15000, scaleUpSmallSides: true)
+        XCTAssertEqual(tall.0, 56)
+        XCTAssertEqual(tall.1, 448)
+
+        let wide = try QwenVL.targetSize(
+            height: 400, width: 27, factor: 28,
+            minPixels: 112 * 112, maxPixels: 28 * 28 * 15000, scaleUpSmallSides: true)
+        XCTAssertEqual(wide.0, 448)
+        XCTAssertEqual(wide.1, 56)
+    }
+
+    func testQwenVLTargetSizeStillRejectsSidesUnderFactor() {
+        XCTAssertThrowsError(
+            try QwenVL.targetSize(
+                height: 27, width: 400, factor: 28,
+                minPixels: 56 * 56, maxPixels: 28 * 28 * 1280))
+        XCTAssertThrowsError(
+            try QwenVL.targetSize(
+                height: 400, width: 27, factor: 28,
+                minPixels: 56 * 56, maxPixels: 28 * 28 * 1280))
     }
 }
