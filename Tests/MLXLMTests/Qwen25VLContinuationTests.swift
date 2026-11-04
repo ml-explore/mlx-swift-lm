@@ -6,7 +6,7 @@
 // however a prompt reaches the KV cache — one shot, windowed chunks, or split
 // across a warm continuation — the next-token logits must match, because M-RoPE
 // positions must be anchored at the cache offset (plus the carried rope delta),
-// never restarted at zero.
+// never restarted at zero. Image prompts must also keep the cache in the model dtype.
 
 import Foundation
 import MLX
@@ -114,6 +114,32 @@ final class Qwen25VLContinuationTests: XCTestCase {
     private let continuation = ContinuationAssertions(
         imageTokenId: 500, visionStartTokenId: 502)
 
+    /// M-RoPE computes cos and sin in float32. Without a cast back, an image prompt caches
+    /// float32 keys, and every later layer runs and caches in float32 too.
+    private func assertImagePromptKeepsCacheDtype<M: LanguageModel>(
+        _ model: M, file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        model.apply { $0.dtype.isFloatingPoint ? $0.asType(.float16) : $0 }
+        try withRandomState(MLXRandom.RandomState(seed: 5)) {
+            let tokens = concatenated(
+                [continuation.textTokens(10), continuation.imageRun(), continuation.textTokens(8)],
+                axis: 1)
+            let cache = try model.newCache(parameters: nil)
+            let result = try model.prepare(
+                LMInput(text: .init(tokens: tokens), image: continuation.image()),
+                cache: cache, state: nil, prefill: PrefillParameters())
+            let (_, state) = try continuation.lastLogits(result)
+            let step = model(
+                LMInput.Text(tokens: continuation.textTokens(1)), cache: cache, state: state)
+            eval(step.logits)
+
+            for layer in cache {
+                XCTAssertEqual(
+                    layer.state.map(\.dtype), [.float16, .float16], file: file, line: line)
+            }
+        }
+    }
+
     // MARK: - Qwen2.5-VL
 
     func testQwen25VLWarmTextContinuationMatchesFullPrefill() throws {
@@ -150,6 +176,10 @@ final class Qwen25VLContinuationTests: XCTestCase {
             expectsIsolation: true)
     }
 
+    func testQwen25VLImagePromptKeepsCacheDtype() throws {
+        try assertImagePromptKeepsCacheDtype(makeTinyQwen25VL())
+    }
+
     // MARK: - Qwen2-VL
 
     func testQwen2VLWarmTextContinuationMatchesFullPrefill() throws {
@@ -170,6 +200,10 @@ final class Qwen25VLContinuationTests: XCTestCase {
 
     func testQwen2VLWindowedImagePrefillMatchesSingleShot() throws {
         try continuation.assertWindowedImagePrefill(makeTinyQwen2VL())
+    }
+
+    func testQwen2VLImagePromptKeepsCacheDtype() throws {
+        try assertImagePromptKeepsCacheDtype(makeTinyQwen2VL())
     }
 
     /// The counterexample the conformance rests on. `Qwen2VL` does not conform, so
