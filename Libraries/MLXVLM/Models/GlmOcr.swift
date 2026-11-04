@@ -1369,7 +1369,7 @@ public struct GlmOcrMessageGenerator: MessageGenerator {
     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
         var dictionary: MLXLMCommon.Message = [
             "role": message.role.rawValue,
-            "content": contentParts(for: message, layout: .textThenImages),
+            "content": contentParts(for: message, layout: .imagesThenText),
         ]
         addToolMetadata(to: &dictionary, for: message)
         return dictionary
