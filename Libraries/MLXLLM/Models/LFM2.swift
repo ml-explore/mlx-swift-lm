@@ -26,7 +26,8 @@ public struct LFM2Configuration: Codable, Sendable {
     private let _blockDim: Int?
     var blockDim: Int { _blockDim ?? hiddenSize }
     private let _blockFFDim: Int?
-    var blockFFDim: Int { _blockFFDim ?? hiddenSize }
+    private let _intermediateSize: Int?
+    var blockFFDim: Int { _blockFFDim ?? _intermediateSize ?? hiddenSize }
     let blockMultipleOf: Int
     let blockFFNDimMultiplier: Float
     let blockAutoAdjustFFDim: Bool
@@ -62,6 +63,7 @@ public struct LFM2Configuration: Codable, Sendable {
         case convLCache = "conv_L_cache"
         case _blockDim = "block_dim"
         case _blockFFDim = "block_ff_dim"
+        case _intermediateSize = "intermediate_size"
         case blockMultipleOf = "block_multiple_of"
         case blockFFNDimMultiplier = "block_ffn_dim_multiplier"
         case blockAutoAdjustFFDim = "block_auto_adjust_ff_dim"
@@ -88,6 +90,7 @@ public struct LFM2Configuration: Codable, Sendable {
         self.convLCache = try container.decodeIfPresent(Int.self, forKey: .convLCache) ?? 3
         self._blockDim = try container.decodeIfPresent(Int.self, forKey: ._blockDim)
         self._blockFFDim = try container.decodeIfPresent(Int.self, forKey: ._blockFFDim)
+        self._intermediateSize = try container.decodeIfPresent(Int.self, forKey: ._intermediateSize)
         self.blockMultipleOf =
             try container.decodeIfPresent(Int.self, forKey: .blockMultipleOf) ?? 256
         self.blockFFNDimMultiplier =
@@ -385,6 +388,11 @@ public class LFM2Model: Module, LLMModel, KVCacheDimensionProvider {
 
         for (name, param) in weights {
             var sanitizedParam = param
+            var name = name
+
+            if name.hasPrefix("language_model.") {
+                name = String(name.dropFirst("language_model.".count))
+            }
 
             if name.contains("conv.weight") {
                 if param.shape[param.shape.count - 1] > param.dim(1) {
