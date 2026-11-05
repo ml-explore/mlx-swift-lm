@@ -874,7 +874,14 @@ struct EmbeddingGemma2Tests {
             prepared, height: Int(upright.height), width: Int(upright.width))
         let expected = EmbeddingGemma2ImageProcessor.pixels(
             decoded, height: Int(upright.height), width: Int(upright.width))
-        #expect(actual.asArray(Float.self) == expected.asArray(Float.self))
+        let actualPixels = actual.asArray(Float.self)
+        let expectedPixels = expected.asArray(Float.self)
+        #expect(actualPixels.count == expectedPixels.count)
+        // Core Image can round equivalent orientation paths differently.
+        #expect(actualPixels.allSatisfy { $0.isFinite })
+        #expect(expectedPixels.allSatisfy { $0.isFinite })
+        let maxDifference = zip(actualPixels, expectedPixels).map { abs($0 - $1) }.max() ?? 0
+        #expect(maxDifference < 0.0001)
         #expect(try EmbeddingGemma2ImageProcessor.prepared(image).extent.size == image.extent.size)
     }
 
