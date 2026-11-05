@@ -18,9 +18,10 @@ import MLXNN
 // loader's own reads.
 
 /// One tensor's byte range in a safetensors file, from the file's own header.
-struct SafetensorSpan {
+struct SafetensorSpan: Sendable {
     let name: String
     let byteCount: Int64
+    let byteOffset: Int64
 }
 
 /// The tensors of the safetensors file at `url`, ordered by their position in the file.
@@ -54,14 +55,19 @@ func safetensorSpansInFileOrder(url: URL) throws -> [SafetensorSpan] {
             let offsets = entry["data_offsets"] as? [Any], offsets.count == 2,
             let begin = (offsets[0] as? NSNumber)?.int64Value,
             let end = (offsets[1] as? NSNumber)?.int64Value,
-            end >= begin
+            begin >= 0, end >= begin,
+            end <= Int64.max - Int64(headerLength) - 8
         else {
             throw Malformed()
         }
         spans.append((name, begin, end - begin))
     }
     spans.sort { $0.begin < $1.begin }
-    return spans.map { SafetensorSpan(name: $0.name, byteCount: $0.byteCount) }
+    return spans.map {
+        SafetensorSpan(
+            name: $0.name, byteCount: $0.byteCount,
+            byteOffset: Int64(headerLength) + 8 + $0.begin)
+    }
 }
 
 /// Contiguous index ranges of `byteCounts` whose byte totals are balanced around
@@ -163,15 +169,21 @@ func loadWeightArrays(urls: [URL]) throws -> (
 
 /// Tensors under `excludedNamespaces` are never read. A file that holds only excluded tensors
 /// still supplies its metadata.
-func loadModelCheckpoint(urls: [URL], excludedNamespaces: [String] = []) throws
+func loadModelCheckpoint(
+    urls: [URL], excludedNamespaces: [String] = [],
+    mappings: [String: CheckpointTensorStorage.Mapping] = [:]
+) throws
     -> ModelCheckpoint
 {
     let exclusions = CheckpointNameMapping(excludedNamespaces.map { .excludePrefix($0) })
-    return try loadModelCheckpoint(urls: urls) { exclusions.mapName($0) != nil }
+    return try loadModelCheckpoint(urls: urls, mappings: mappings) { exclusions.mapName($0) != nil }
 }
 
 /// Only tensors whose names pass `isRead` are read.
-func loadModelCheckpoint(urls: [URL], isRead: @escaping @Sendable (String) -> Bool) throws
+func loadModelCheckpoint(
+    urls: [URL], mappings: [String: CheckpointTensorStorage.Mapping] = [:],
+    isRead: @escaping @Sendable (String) -> Bool
+) throws
     -> ModelCheckpoint
 {
     struct WorkItem {
@@ -230,6 +242,12 @@ func loadModelCheckpoint(urls: [URL], isRead: @escaping @Sendable (String) -> Bo
                     }
                 } else {
                     selected = all.filter { isRead($0.key) }
+                }
+
+                for (name, mapping) in mappings {
+                    if let array = selected[name], let mapped = try? mapping.array(for: array) {
+                        selected[name] = mapped
+                    }
                 }
 
                 // force this range's I/O here, on this stream, in file-offset order
@@ -396,13 +414,19 @@ private func topLevelSafetensorURLs(in modelDirectory: URL) -> [URL] {
 /// needs them, unless `componentLoading` is ``ComponentLoading/immediate``. Tensors of components
 /// that do not load now and of the model's ``BaseLanguageModel/excludedCheckpointNamespaces`` are
 /// not read.
+///
+/// Supported frozen tables declared by ``InputOnlyEmbeddingsProviding`` use file-backed
+/// storage by default. Select ``EmbeddingStoragePolicy/resident`` to keep normal MLX storage.
+///
+/// - Important: Do not rewrite or truncate mapped checkpoint files while the model is in use.
 public func loadWeights(
     modelDirectory: URL, model: BaseLanguageModel,
     quantization: BaseConfiguration.Quantization? = nil,
     perLayerQuantization: BaseConfiguration.PerLayerQuantization? = nil,
     weightFileSelection: WeightFileSelection = .automatic,
     excludedComponents: Set<ModelComponent> = [],
-    componentLoading: ComponentLoading = .onFirstUse
+    componentLoading: ComponentLoading = .onFirstUse,
+    embeddingStorage: EmbeddingStoragePolicy = .automatic
 ) throws {
     let additionalFiles = (model as? any AdditionalWeightFilesProviding)?.additionalWeightFiles
     let weightURLs = try safetensorWeightURLs(
@@ -417,15 +441,26 @@ public func loadWeights(
             of: model, urls: weightURLs, excluded: excludedComponents,
             loading: componentLoading, perLayerQuantization: perLayerQuantization)
         + model.excludedCheckpointNamespaces
+    var checkpointStorage = CheckpointTensorStorage(
+        model: model, policy: embeddingStorage, urls: weightURLs,
+        quantization: perLayerQuantization)
     var checkpoint = try loadModelCheckpoint(
-        urls: weightURLs, excludedNamespaces: excludedNamespaces)
+        urls: weightURLs, excludedNamespaces: excludedNamespaces,
+        mappings: checkpointStorage?.mappings ?? [:])
+    checkpointStorage?.record(checkpoint.weights)
     checkpoint.perLayerQuantization = perLayerQuantization
     checkpoint = try model.prepareCheckpoint(checkpoint)
     try applyCheckpoint(checkpoint, to: model)
+    // The source arrays must be released before old embedding buffers can be reclaimed.
+    checkpoint.weights.removeAll()
+    let preparedEmbeddings = prepareEmbeddingStorage(
+        in: model, policy: embeddingStorage, checkpoint: checkpointStorage)
+    checkpointStorage = nil
 
     // Build derived inference-only state and realize the model while the loader
     // still has exclusive access. Forward passes must remain read-only.
     materializeModelForInference(model)
+    if preparedEmbeddings > 0 { Memory.clearCache() }
 }
 
 /// Quantize the layers `checkpoint` has scales for, then update `module` with strict validation.
@@ -441,7 +476,7 @@ func applyCheckpoint(_ checkpoint: ModelCheckpoint, to module: Module) throws {
 }
 
 /// Async variant of
-/// ``loadWeights(modelDirectory:model:quantization:perLayerQuantization:weightFileSelection:excludedComponents:componentLoading:)-858j8``.
+/// ``loadWeights(modelDirectory:model:quantization:perLayerQuantization:weightFileSelection:excludedComponents:componentLoading:embeddingStorage:)-1uqs8``.
 ///
 /// Loading blocks its thread on file I/O and fans out with `DispatchQueue.concurrentPerform`.
 /// Swift concurrency's cooperative threads must never block, so this overload runs the load
@@ -453,7 +488,8 @@ public func loadWeights(
     perLayerQuantization: BaseConfiguration.PerLayerQuantization? = nil,
     weightFileSelection: WeightFileSelection = .automatic,
     excludedComponents: Set<ModelComponent> = [],
-    componentLoading: ComponentLoading = .onFirstUse
+    componentLoading: ComponentLoading = .onFirstUse,
+    embeddingStorage: EmbeddingStoragePolicy = .automatic
 ) async throws {
     let model = SendableBox(model)
     try await withCheckedThrowingContinuation {
@@ -469,7 +505,7 @@ public func loadWeights(
                             perLayerQuantization: perLayerQuantization,
                             weightFileSelection: weightFileSelection,
                             excludedComponents: excludedComponents,
-                            componentLoading: componentLoading)
+                            componentLoading: componentLoading, embeddingStorage: embeddingStorage)
                     }
                 })
         }

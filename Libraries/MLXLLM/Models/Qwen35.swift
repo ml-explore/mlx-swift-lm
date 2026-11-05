@@ -1107,7 +1107,11 @@ public class Qwen35TextModelInner: Module {
     }
 }
 
-public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
+public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider,
+    InputOnlyEmbeddingsProviding
+{
+    public var inputOnlyEmbeddings: [Embedding] { lmHead == nil ? [] : [model.embedTokens] }
+
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
@@ -1297,7 +1301,9 @@ extension Qwen35TextModel: SpeculativeCacheRewindModel {
 
 // MARK: - Top-level Model
 
-public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
+public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider, InputOnlyEmbeddingsProviding {
+    public var inputOnlyEmbeddings: [Embedding] { languageModel.inputOnlyEmbeddings }
+
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
