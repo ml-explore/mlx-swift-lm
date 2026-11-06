@@ -1617,6 +1617,46 @@ struct BatchedHybridCacheTests {
         #expect((list[1] as? MambaCache)?.batchSize == 3)
     }
 
+    @Test(
+        "Extending a recurrent batch keeps the longest row's offset, as merge does",
+        arguments: [(3, 7), (7, 3)])
+    func recurrentExtensionKeepsLongestOffset(offsets: (Int, Int)) throws {
+        try Device.withDefaultDevice(.cpu) {
+            func row(_ offset: Int) -> ArraysCache {
+                let cache = ArraysCache(size: 2)
+                cache[0] = MLXArray([Float(offset)]).reshaped([1, 1])
+                cache.offset = offset
+                return cache
+            }
+            let active = row(offsets.0)
+            let joined = row(offsets.1)
+            try active.validateExtension(other: joined)
+            active.extend(other: joined)
+            #expect(active.batchSize == 2)
+            #expect(active.offset == 7)
+            #expect(joined.offset == offsets.1)
+
+            // Through the protocol, as admission extends an active layer.
+            let erased: any KVCache = row(offsets.0)
+            erased.extend(other: row(offsets.1))
+            #expect(erased.offset == 7)
+
+            // A side with no rows contributes no position.
+            func noRows() -> ArraysCache {
+                let cache = ArraysCache(size: 2)
+                cache.filter(batchIndices: MLXArray([Int32]()))
+                cache.offset = 9
+                return cache
+            }
+            let fromEmpty = noRows()
+            fromEmpty.extend(other: row(offsets.1))
+            #expect(fromEmpty.offset == offsets.1)
+            let withEmpty = row(offsets.0)
+            withEmpty.extend(other: noRows())
+            #expect(withEmpty.offset == offsets.0)
+        }
+    }
+
     @Test("A recurrent batch with zero rows stays empty until extended")
     func recurrentZeroRows() throws {
         let empty = MambaCache(leftPadding: [])
