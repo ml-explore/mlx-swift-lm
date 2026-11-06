@@ -72,6 +72,36 @@ struct BatchTokenIteratorTests {
         }
     }
 
+    @Test(
+        "Queued rows that cannot join each other fail before sampling or touching active rows",
+        arguments: [false, true])
+    func incompatibleQueuedRows(withActiveRows: Bool) throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = BatchTextOnlyModel(
+                preparation: .tokens, cacheFactory: { [RotatingKVCache(maxSize: 16)] })
+            let sampler = AdmissionCountingSampler()
+            var iterator = BatchTokenIterator(model: model, sampler: sampler, maxTokens: 6)
+            var active: [Int] = []
+            if withActiveRows {
+                active = iterator.insert(prompts: [[1, 3]])
+                _ = try iterator.next()
+            }
+            let calls = sampler.calls
+            // The first queued row matches the active rows; the second's window matches neither.
+            let queued = iterator.insert(
+                prompts: [[7], [9]],
+                caches: [[RotatingKVCache(maxSize: 16)], [RotatingKVCache(maxSize: 8)]])
+
+            #expect(throws: KVCacheError.self) { _ = try iterator.next() }
+            #expect(iterator.uids == active + queued)
+            #expect(sampler.calls == calls, "rejection must not draw from the shared random state")
+
+            iterator.remove([queued[1]])
+            let responses = try iterator.next()
+            #expect(responses.map(\.uid) == active + [queued[0]])
+        }
+    }
+
     @Test("Supplied cache copies cannot erase custom types, including nested children")
     func suppliedCacheCopyTypes() throws {
         try Device.withDefaultDevice(.cpu) {

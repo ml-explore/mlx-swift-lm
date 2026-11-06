@@ -250,34 +250,22 @@ public struct BatchTokenIterator {
             eval(logits)
             firstLogits.append(logits)
         }
-        // Validate views of individual rows before bulk merge can concatenate incompatible
-        // arrays. Compare every pair: an empty first row may not describe later rows' slots.
-        let rowBatches = try caches.map { row in
-            try row.map { try mergeCaches([$0]) }
-        }
-        for index in rowBatches.indices {
-            for layer in 0 ..< layerCount {
-                if !rows.isEmpty {
-                    try cache[layer].validateExtension(other: rowBatches[index][layer])
-                }
-                for previous in 0 ..< index {
-                    try rowBatches[previous][layer].validateExtension(
-                        other: rowBatches[index][layer])
-                }
+        // Join the new rows layer by layer, each row checked against the rows joined before
+        // it, so an empty first row cannot set the layout and a sparse recurrent slot is
+        // checked against the first row that populates it. The joined rows are then checked
+        // against the active batch. Nothing is sampled and the active batch is untouched
+        // until every layer has passed.
+        let merged = try (0 ..< layerCount).map { layer in
+            let joined = try mergeCaches([caches[0][layer]])
+            for row in caches.dropFirst() {
+                let next = try mergeCaches([row[layer]])
+                try joined.validateExtension(other: next)
+                joined.extend(other: next)
             }
-        }
-        let merged: [KVCache]
-        if rowBatches.count == 1 {
-            merged = rowBatches[0]
-        } else {
-            merged = try (0 ..< layerCount).map { layer in
-                try mergeCaches(caches.map { $0[layer] })
+            if !rows.isEmpty {
+                try cache[layer].validateExtension(other: joined)
             }
-        }
-        if !rows.isEmpty {
-            for layer in 0 ..< layerCount {
-                try cache[layer].validateExtension(other: merged[layer])
-            }
+            return joined
         }
 
         // The new rows sample their first tokens alone: the decoding rows' next tokens are
