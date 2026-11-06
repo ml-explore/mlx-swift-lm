@@ -36,9 +36,17 @@ starts.
 The standalone legacy ``maybeQuantizeKVCache(cache:kvBits:kvGroupSize:quantizedKVStart:kvScheme:)``
 hook leaves custom schemes unchanged; generation APIs reject them.
 
-Prefill is unaffected: the cache stores raw fp16 during prompt processing,
-compresses on the first decode step, and encodes each new token incrementally
-afterwards. Compressed caches round-trip through prompt-cache save/restore.
+When the model declares its head dimension (``KVCacheDimensionProvider/kvHeadDim``)
+and the strategy compresses from token 0, the cache starts compressed and
+encodes every prefill chunk as it lands, so the full-precision cache never
+exists. This moves compression earlier, not only allocation: each prefill chunk
+after the first attends over already-compressed history, where the dynamic path
+ran the whole first prompt at full precision before converting. Expect small
+logit differences between the two, growing with chunk count and shrinking with
+more bits. Models without the declaration, deferred compression starts, and
+TurboQuant keep the dynamic path: raw fp16 during prompt processing, one
+conversion on the first decode step, then incremental encoding. Compressed
+caches round-trip through prompt-cache save/restore either way.
 
 ## Capacity and compatibility
 

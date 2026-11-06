@@ -859,11 +859,57 @@ public class VarianceNormalizedKVCache: BaseKVCache, KVCacheAttentionProtocol,
         }
     }
 
+    /// Rotated keys and values of a slab or tile, laid out `[B, H, tokens, D]`.
+    private func dequantizedRotatedRecords(
+        _ records: VarianceNormalizedKVTile, dtype: DType
+    ) -> (MLXArray, MLXArray) {
+        let keys =
+            dequantized(
+                records.keyWeight, scales: records.keyScales, biases: records.keyBiases,
+                groupSize: tileSize, bits: keyBits, mode: .affine) * records.keyColumnScales
+        let valueHeadDim = records.valueColumnScales.dim(-1)
+        let values =
+            dequantized(
+                records.valueWeight, scales: records.valueScales, biases: records.valueBiases,
+                groupSize: validatedValueGroupSize(valueHeadDim), bits: valueBits,
+                mode: .affine) * records.valueColumnScales
+        let (batchSize, headCount) = (keys.dim(0), keys.dim(1))
+        return (
+            keys.swappedAxes(-1, -2).reshaped(batchSize, headCount, -1, keys.dim(-2))
+                .asType(dtype),
+            values.reshaped(batchSize, headCount, -1, valueHeadDim).asType(dtype)
+        )
+    }
+
+    private func fusedRotatedAttention(
+        queries: MLXArray,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray {
+        var parts =
+            tileSlabs.map { dequantizedRotatedRecords($0.records, dtype: queries.dtype) }
+            + pendingTiles.map { dequantizedRotatedRecords($0, dtype: queries.dtype) }
+        if let tailKeys, let tailValues {
+            parts.append((tailKeys.asType(queries.dtype), tailValues.asType(queries.dtype)))
+        }
+        let keys = parts.count == 1 ? parts[0].0 : concatenated(parts.map(\.0), axis: 2)
+        let values = parts.count == 1 ? parts[0].1 : concatenated(parts.map(\.1), axis: 2)
+        let output = MLXFast.scaledDotProductAttention(
+            queries: rotate(queries), keys: keys, values: values, scale: scale, mask: mask)
+        return inverseRotate(output).asType(queries.dtype)
+    }
+
     private func quantizedRotatedAttention(
         queries: MLXArray,
         scale: Float,
         mask: MLXFast.ScaledDotProductAttentionMaskMode
     ) -> MLXArray {
+        let valueHeadDim =
+            tailValues?.dim(-1) ?? (tileSlabs.first?.records ?? pendingTiles.first)?
+            .valueColumnScales.dim(-1) ?? queries.dim(-1)
+        if usesDequantizedPrefillAttention(queries: queries, valueHeadDim: valueHeadDim) {
+            return fusedRotatedAttention(queries: queries, scale: scale, mask: mask)
+        }
         let rotatedQueries = rotate(queries)
         var scoreParts = tileSlabs.map { slab in
             stackedTileScores(

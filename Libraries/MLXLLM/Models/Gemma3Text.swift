@@ -487,7 +487,8 @@ public class Gemma3TextModel: Module, LLMModel {
             if isGlobalLayer {
                 // Global (full-attention) layers honor maxKVSize. When unbounded,
                 // use a larger allocation step for long-context efficiency.
-                let cache = try makeAttentionKVCache(parameters: parameters)
+                let cache = try makeAttentionKVCache(
+                    parameters: parameters, headDim: config.headDim)
                 if let simple = cache as? StandardKVCache {
                     simple.step = 1024
                 }
