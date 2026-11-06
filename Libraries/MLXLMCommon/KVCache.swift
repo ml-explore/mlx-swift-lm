@@ -701,6 +701,9 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
 
     package var preservedPrefixTokens: Int { keep }
 
+    /// The number of positions the buffer grows by.
+    package var allocationStep: Int { step }
+
     public override var maxSize: Int? { maxCacheSize }
 
     public override var evictedTokenCount: Int {
@@ -1005,6 +1008,11 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
                 self.wrappedFlag = nil
             }
         }
+    }
+
+    /// ``merge(_:)-swift.type.method`` for rows typed as `KVCache`.
+    public override class func merge(_ caches: [any KVCache]) throws -> any KVCache {
+        try merge(try batchRows(caches, of: RotatingKVCache.self))
     }
 
     public override var isTrimmable: Bool {
