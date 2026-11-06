@@ -164,6 +164,44 @@ struct BatchKVCacheTests {
         #expect(maxAbsDifference(values, MLXArray.ones(values.shape) * 20) == 0)
     }
 
+    @Test("Filtering drops no more shared left padding than the buffer holds")
+    func filterBeforePaddingIsWritten() throws {
+        // A left-padded prompt fed in chunks: the first two positions are padding in both rows.
+        let cache = BatchKVCache(leftPadding: [3, 4])
+        let padding = makeKV(batchSize: 2, heads: 2, seqLen: 2, headDim: 4, value: 0)
+        _ = cache.update(keys: padding.0, values: padding.1)
+
+        cache.filter(batchIndices: batchRows(0, 1))
+        try #require(cache.offset == 0)
+        #expect(cache.leftPadding.asArray(Int32.self) == [1, 2])
+        #expect(cache.batchOffset.asArray(Int32.self) == [-1, -2])
+
+        let rest = makeDistinctKV(batchSize: 2, heads: 2, seqLen: 3, headDim: 4)
+        _ = cache.update(keys: rest.0, values: rest.1)
+        #expect(cache.batchOffset.asArray(Int32.self) == [2, 1])
+        let row = cache.extract(0)
+        #expect(row.offset == 2)
+        let keys = try #require(row.state.first)
+        #expect(maxAbsDifference(keys, rest.0[0 ..< 1, 0..., 1..., 0...]) == 0)
+    }
+
+    @Test("extract refuses a row index past the batch")
+    func extractOutOfRange() async throws {
+        let result = try await #require(
+            processExitsWith: .failure, observing: [\.standardErrorContent]
+        ) {
+            Device.withDefaultDevice(.cpu) {
+                let cache = BatchKVCache(leftPadding: [0, 1])
+                let kv = makeKV(batchSize: 2, heads: 1, seqLen: 3, headDim: 1)
+                _ = cache.update(keys: kv.0, values: kv.1)
+                _ = cache.extract(2)
+            }
+        }
+        #expect(
+            String(decoding: result.standardErrorContent, as: UTF8.self).contains(
+                "BatchKVCache row index out of range"))
+    }
+
     @Test("finalize keeps every row's tokens when the buffer has spare capacity")
     func finalizeWithSpareCapacity() throws {
         let cache = BatchKVCache(leftPadding: [0, 0])

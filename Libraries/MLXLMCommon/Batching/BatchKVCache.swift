@@ -5,7 +5,9 @@ import MLX
 
 /// A KV cache for a batch of left-padded sequences.
 ///
-/// Port of mlx-lm's `BatchKVCache`. Rows are left-padded so that sequences of
+/// Port of mlx-lm's `BatchKVCache`, with the fixes mlx-vlm's port of it carries
+/// (`mlx_vlm/models/cache.py` at mlx-vlm dcea787, noted where they apply). Rows are
+/// left-padded so that sequences of
 /// different lengths end at the same position. Prompts `[1, 3, 5]`, `[7]` and
 /// `[2, 6, 8, 9]` are stored as
 /// ```
@@ -225,10 +227,15 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
         values = values?[indices]
         setPositions(rows.map { positions[$0] })
         var padding = rows.map { leftPaddingValues[$0] }
+        // A ragged prefill's right padding goes with its rows, as in mlx-vlm:
+        // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1673-L1674
         setRightPadding(rightPaddingValues.map { values in rows.map { values[$0] } })
 
-        // Drop the left padding that every remaining row has.
-        let shared = padding.min() ?? 0
+        // Drop the left padding that every remaining row has, but no more than the buffer
+        // holds: a chunked prefill can be filtered before all of its padding is written.
+        // mlx-vlm bounds `min_left_pad` by `_idx` the same way:
+        // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1677
+        let shared = min(padding.min() ?? 0, Int32(offset))
         if shared > 0, keys != nil {
             keys = keys?[.ellipsis, Int(shared)..., 0...]
             values = values?[.ellipsis, Int(shared)..., 0...]
@@ -326,6 +333,10 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
 
     /// The row at `index` without its left padding, as a ``KVCacheSimple``.
     public override func extract(_ index: Int) -> any KVCache {
+        // mlx-vlm checks the row index first too:
+        // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1730-L1736
+        precondition(
+            leftPaddingValues.indices.contains(index), "BatchKVCache row index out of range")
         let cache = KVCacheSimple()
         let padding = Int(leftPaddingValues[index])
         if let keys, let values {
@@ -341,7 +352,9 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
     fileprivate convenience init(merging caches: [KVCacheSimple]) {
         let longest = caches.map(\.offset).max() ?? 0
         self.init(leftPadding: caches.map { longest - $0.offset })
-        // An all-empty merge is an empty batch; the first update sizes it.
+        // An all-empty merge is an empty batch; the first update sizes it. mlx-vlm returns
+        // an empty batch for it too:
+        // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1750-L1751
         guard let template = caches.first(where: { $0.keys != nil }),
             let templateKeys = template.keys, let templateValues = template.values
         else { return }
