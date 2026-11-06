@@ -5,9 +5,11 @@ import MLX
 
 /// A sliding-window KV cache for a batch of left-padded sequences.
 ///
-/// Port of mlx-lm's `BatchRotatingKVCache`: the left padding of ``BatchKVCache`` with
-/// the window of ``RotatingKVCache``. Every row keeps its last ``maxSize`` positions.
-/// Unlike ``RotatingKVCache`` it has no pinned prefix (`keep`) and no rewind reserve.
+/// Port of mlx-lm's `BatchRotatingKVCache`, with the fixes mlx-vlm's port carries
+/// (`mlx_vlm/models/cache.py` at mlx-vlm dcea787, noted where they apply): the left
+/// padding of ``BatchKVCache`` with the window of ``RotatingKVCache``. Every row keeps
+/// its last ``maxSize`` positions. Unlike ``RotatingKVCache`` it has no pinned prefix
+/// (`keep`) and no rewind reserve.
 public final class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
     /// Each row's left padding, shape `[B]`: the padding positions the buffer still holds.
     /// Writes consume the oldest positions first, so it falls to zero as the window fills
@@ -312,6 +314,8 @@ public final class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
         values = values?[indices]
         batchOffset = batchOffset[indices]
         leftPadding = leftPadding[indices]
+        // A ragged prefill's lengths go with their rows, as in mlx-vlm:
+        // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L2040-L2041
         lengths = lengths?[indices]
     }
 
@@ -410,6 +414,10 @@ public final class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
     /// The row at `index` in temporal order without its left padding, as a
     /// ``RotatingKVCache`` with this cache's window, step and capacity origin.
     public override func extract(_ index: Int) -> any KVCache {
+        // An array index past the rows would read another row's metadata; check it first, as
+        // mlx-vlm's BatchKVCache.extract does:
+        // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1730-L1736
+        precondition(index >= 0 && index < batchSize, "BatchRotatingKVCache row index out of range")
         let cache = RotatingKVCache(maxSize: window, step: step)
         let padding = Int(leftPadding[index].item(Int32.self))
         let rowOffset = max(0, Int(batchOffset[index].item(Int32.self)))
@@ -534,6 +542,8 @@ extension RotatingKVCache {
                     && $0.capacityOrigin == first.capacityOrigin
             })
         else {
+            // mlx-vlm refuses rows of different windows here too:
+            // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L2111-L2114
             throw KVCacheError(
                 message: "RotatingKVCache.merge needs rows that share one window, step and origin"
             )
@@ -547,7 +557,8 @@ extension RotatingKVCache {
         }
         let rows = try caches.map { try BatchRotatingKVCache(row: $0) }
         guard prefilled > 0 else {
-            // Empty rows have nothing to join; size the batch directly.
+            // Empty rows have nothing to join; size the batch directly, as mlx-vlm does:
+            // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L2120-L2121
             let batch = BatchRotatingKVCache(
                 maxSize: rows[0].maxSize ?? 0, leftPadding: Array(repeating: 0, count: rows.count))
             batch.step = rows[0].step
