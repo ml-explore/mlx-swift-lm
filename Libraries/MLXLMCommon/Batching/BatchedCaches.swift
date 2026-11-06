@@ -129,6 +129,8 @@ extension ArraysCache {
             }
             guard let template, isEmpty(row) else { return row }
             // An empty cache may already stand for several rows (its padding says how many).
+            // mlx-vlm zero-fills an empty row's slots the same way:
+            // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1306-L1317
             let rowCount = row.batchSize
             for slot in 0 ..< row.slotCount {
                 if let example = template[slot] {
@@ -143,7 +145,7 @@ extension ArraysCache {
             merged.extend(other: row)
         }
         // An all-empty merge has no arrays to count rows by, so it records how many it holds
-        // (mlx-lm gives every row zero padding; see `emptyRowCount`).
+        // (mlx-lm and mlx-vlm give every row zero padding; see `emptyRowCount`).
         if template == nil {
             merged.emptyRowCount = caches.reduce(0) { $0 + $1.batchSize }
         }
