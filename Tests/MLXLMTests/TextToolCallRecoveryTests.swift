@@ -215,6 +215,74 @@ struct TextToolCallRecoveryTests {
         #expect(processor.rejectedToolCalls.isEmpty)
     }
 
+    @Test("A reasoning span that opens directly on a native call dispatches it")
+    func blankReasoningSpanDispatchesNativeCall() throws {
+        // Qwen3 sometimes opens <think> and goes straight to the call, never
+        // closing the span. Nothing in the span is reasoning, so the call runs.
+        let call = #"<tool_call>{"name":"weather","arguments":{"city":"Paris"}}</tool_call>"#
+        for text in ["<think>\n" + call, "<think>" + call, "<think>\n\n" + call + "\n"] {
+            let processor = ToolCallProcessor(format: .json, tools: Self.tools)
+            _ = processor.processChunkOutputs(text)
+            _ = processor.processEOS(returnBufferedText: true)
+            let dispatched = try #require(processor.toolCalls.first, "text: \(text)")
+            #expect(processor.toolCalls.count == 1)
+            #expect(dispatched.function.name == "weather")
+            #expect(dispatched.function.arguments["city"] == .string("Paris"))
+            #expect(processor.rejectedToolCalls.isEmpty)
+        }
+    }
+
+    @Test("A blank reasoning span dispatches at every streaming boundary")
+    func blankReasoningSpanEveryStreamingBoundary() {
+        let text =
+            "<think>\n" + #"<tool_call>{"name":"weather","arguments":{"city":"Paris"}}</tool_call>"#
+        let characters = Array(text)
+        for split in 1 ..< characters.count {
+            let processor = ToolCallProcessor(format: .json, tools: Self.tools)
+            _ = processor.processChunk(String(characters[..<split]))
+            _ = processor.processChunk(String(characters[split...]))
+            _ = processor.processEOS(returnBufferedText: true)
+            #expect(processor.toolCalls.count == 1, "split: \(split)")
+        }
+    }
+
+    @Test("A closed reasoning span around a call stays inert at every streaming boundary")
+    func closedBlankReasoningSpanStaysInert() {
+        let text =
+            "<think>\n" + #"<tool_call>{"name":"weather","arguments":{"city":"Paris"}}</tool_call>"#
+            + "\n</think>\nIt is sunny."
+        let characters = Array(text)
+        for split in 1 ..< characters.count {
+            let processor = ToolCallProcessor(format: .json, tools: Self.tools)
+            _ = processor.processChunk(String(characters[..<split]))
+            _ = processor.processChunk(String(characters[split...]))
+            _ = processor.processEOS(returnBufferedText: true)
+            #expect(processor.toolCalls.isEmpty, "split: \(split)")
+        }
+    }
+
+    @Test("A call after any reasoning text in the span stays inert")
+    func reasoningBeforeCallStaysInert() {
+        // Unterminated, so EOS flushes it; the call follows reasoning prose.
+        let processor = ToolCallProcessor(format: .json, tools: Self.tools)
+        let text =
+            #"<think>I could call <tool_call>{"name":"weather","arguments":{"city":"Paris"}}</tool_call>"#
+        _ = processor.processChunkOutputs(text)
+        _ = processor.processEOS(returnBufferedText: true)
+        #expect(processor.toolCalls.isEmpty)
+        #expect(processor.rejectedToolCalls.isEmpty)
+    }
+
+    @Test("A blank reasoning span still enforces the declared-tool allowlist")
+    func blankReasoningSpanUndeclaredToolIsNotDispatched() {
+        let processor = ToolCallProcessor(format: .json, tools: Self.tools)
+        let text =
+            "<think>\n" + #"<tool_call>{"name":"rm_rf","arguments":{"path":"/"}}</tool_call>"#
+        _ = processor.processChunkOutputs(text)
+        _ = processor.processEOS(returnBufferedText: true)
+        #expect(processor.toolCalls.isEmpty)
+    }
+
     @Test("Malformed explicit candidates are rejected and never executable")
     func malformedCandidatesAreRejected() {
         let processor = ToolCallProcessor(format: .json, tools: Self.tools)
