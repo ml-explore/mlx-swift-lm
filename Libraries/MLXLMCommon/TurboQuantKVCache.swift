@@ -1175,8 +1175,9 @@ public class TurboQuantKVCache: BaseKVCache, SharedAttentionKVCache {
     /// Q×K scoring + online softmax + Attn×V aggregation. No intermediate score or weight
     /// arrays are materialized. This reduces 3 dispatches (score + softmax + value) to 1.
     ///
-    /// For L>1 (prefill chunks): falls back to separate score → softmax → value kernels
-    /// since causal masking across multiple query positions requires the full score matrix.
+    /// For L>1 (prefill chunks): chunks of `fusedAttentionMinimumLength` or more decode
+    /// the cache and run `MLXFast.scaledDotProductAttention` in the rotated basis. Shorter
+    /// chunks use the compressed-domain score, softmax and value kernels.
     ///
     /// In rawKeyMode: uses standard matmul for Q*K scoring (raw FP16 keys, no rotation),
     /// then compressed-domain Metal kernel for Attn*V (TurboQuant compressed values).
@@ -1292,6 +1293,28 @@ public class TurboQuantKVCache: BaseKVCache, SharedAttentionKVCache {
                 }
                 let out = rotated.reshaped([B, nQHeads, 1, headDim])
                 return out.dtype == queries.dtype ? out : out.asType(queries.dtype)
+            }
+
+            if L >= Self.fusedAttentionMinimumLength {
+                let keys: MLXArray
+                if affineKeyMode {
+                    guard let kw = affKeyW, let ks = affKeyScales, let kb = affKeyBiases else {
+                        return queries
+                    }
+                    keys = dequantized(
+                        kw[.ellipsis, ..<tokenCount, 0...],
+                        scales: ks[.ellipsis, ..<tokenCount, 0...],
+                        biases: kb[.ellipsis, ..<tokenCount, 0...],
+                        groupSize: keyGroupSize, bits: 8, mode: .affine)
+                } else {
+                    guard let rk = rawKeys else { return queries }
+                    keys = rk[.ellipsis, ..<tokenCount, 0...]
+                }
+                let rotatedOutput = MLXFast.scaledDotProductAttention(
+                    queries: queries, keys: keys.asType(queries.dtype),
+                    values: decodedRotatedValues(dtype: queries.dtype),
+                    scale: scale, mask: mask)
+                return matmul(rotatedOutput, valRotation).asType(queries.dtype)
             }
 
             var scores: MLXArray
@@ -1424,6 +1447,23 @@ public class TurboQuantKVCache: BaseKVCache, SharedAttentionKVCache {
                     keyBits: self.keyBits, valueBits: self.valueBits, dim: headDim,
                     valRotation: valRotation
                 ).reshaped([B, nQHeads, L, headDim])
+            } else if L >= Self.fusedAttentionMinimumLength {
+                // Scores are dot products in the rotated, calibrated key basis.
+                var keyQueries = keyMSECodec.prepareQueries(queries)
+                if let keyCalibScale {
+                    keyQueries = keyQueries * keyCalibScale
+                }
+                let rotatedKeys = keyMSECodec.decodeRotated(
+                    MSECodecState(
+                        norms: keyNorms![.ellipsis, ..<tokenCount],
+                        packedIndices: keyPackedMSE![.ellipsis, ..<tokenCount, 0...],
+                        tokenCount: tokenCount, dim: headDim, bits: keyBits))
+                let rotatedOutput = MLXFast.scaledDotProductAttention(
+                    queries: keyQueries.asType(queries.dtype),
+                    keys: rotatedKeys.asType(queries.dtype),
+                    values: decodedRotatedValues(dtype: queries.dtype),
+                    scale: scale, mask: mask)
+                output = matmul(rotatedOutput, valRotation)
             } else if case .causal = mask {
                 // Causal TurboFlashAttention path (prefill, L>1)
                 let queryOffset = tokenCount - L
@@ -1490,6 +1530,25 @@ public class TurboQuantKVCache: BaseKVCache, SharedAttentionKVCache {
         // does not promote the whole downstream stream (and every later
         // layer's KV cache) to f32.
         return output.dtype == queries.dtype ? output : output.asType(queries.dtype)
+    }
+
+    /// Shortest query chunk that decodes the cache and runs the fused SDPA kernel.
+    ///
+    /// Longer chunks would otherwise build the full score matrix. Shorter ones
+    /// (decode, speculative verify) stay on the compressed-domain kernels.
+    static let fusedAttentionMinimumLength = 16
+
+    /// Values decoded in the value codec's rotated basis, `[B, H, T, D]`.
+    private func decodedRotatedValues(dtype: DType) -> MLXArray {
+        guard let valueMSECodec, let valPackedMSE, let valNorms else {
+            preconditionFailure("TurboQuant values are not compressed")
+        }
+        return valueMSECodec.decodeRotated(
+            MSECodecState(
+                norms: valNorms[.ellipsis, ..<offset],
+                packedIndices: valPackedMSE[.ellipsis, ..<offset, 0...],
+                tokenCount: offset, dim: valueMSECodec.dim, bits: valueBits)
+        ).asType(dtype)
     }
 
     // MARK: - Memory Reporting

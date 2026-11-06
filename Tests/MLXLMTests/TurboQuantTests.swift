@@ -534,6 +534,58 @@ struct TurboQuantKVCacheTests {
             #expect(outValues.shape == [1, 2, 4, 32], "\(bits)-bit value shape wrong")
         }
     }
+
+    /// A long chunk over a compressed cache takes the fused SDPA route. Causal attention
+    /// does not depend on chunking, so short chunks on the compressed-domain kernels
+    /// must give the same output.
+    @Test(arguments: [(0, 4), (8, 4), (4, 4), (4, 2)])
+    func compressedPrefillChunkMatchesShortChunks(keyBits: Int, valueBits: Int) {
+        let (kvHeads, headDim, history, length) = (2, 128, 300, 32)
+        let scale = 1 / sqrt(Float(headDim))
+        let keys = MLXRandom.normal([1, kvHeads, history + length, headDim], key: MLXRandom.key(1))
+        let values = MLXRandom.normal(
+            [1, kvHeads, history + length, headDim], key: MLXRandom.key(2))
+        let queries = MLXRandom.normal([1, kvHeads * 2, length, headDim], key: MLXRandom.key(3))
+
+        func compressedCache() -> TurboQuantKVCache {
+            let cache = TurboQuantKVCache(
+                bits: max(keyBits, valueBits), keyBits: keyBits, valueBits: valueBits)
+            _ = cache.update(
+                keys: keys[.ellipsis, ..<(history - 1), 0...],
+                values: values[.ellipsis, ..<(history - 1), 0...])
+            _ = cache.compressedAttention(
+                queries: queries[.ellipsis, ..<1, 0...],
+                keys: keys[.ellipsis, (history - 1) ..< history, 0...],
+                values: values[.ellipsis, (history - 1) ..< history, 0...], scale: scale)
+            return cache
+        }
+        func chunk(_ array: MLXArray, _ range: Range<Int>) -> MLXArray {
+            array[.ellipsis, range, 0...]
+        }
+
+        let chunkLength = 8
+        #expect(length >= TurboQuantKVCache.fusedAttentionMinimumLength)
+        #expect(chunkLength < TurboQuantKVCache.fusedAttentionMinimumLength)
+
+        let fused = compressedCache().compressedAttention(
+            queries: queries, keys: chunk(keys, history ..< history + length),
+            values: chunk(values, history ..< history + length), scale: scale, mask: .causal)
+
+        let reference = compressedCache()
+        let chunked = concatenated(
+            stride(from: 0, to: length, by: chunkLength).map { start in
+                let range = start ..< start + chunkLength
+                return reference.compressedAttention(
+                    queries: chunk(queries, range),
+                    keys: chunk(keys, (history + start) ..< (history + start + chunkLength)),
+                    values: chunk(values, (history + start) ..< (history + start + chunkLength)),
+                    scale: scale, mask: .causal)
+            }, axis: 2)
+
+        let error = sqrt(square(fused - chunked).mean()) / sqrt(square(chunked).mean())
+        #expect(fused.shape == [1, kvHeads * 2, length, headDim])
+        #expect(error.item(Float.self) < 1e-4)
+    }
 }
 
 // MARK: - TurboFlashAttention Tests
