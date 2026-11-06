@@ -54,6 +54,10 @@ private func sharedBoundDrafter() async throws -> Rung4BoundDrafter {
 private let rung4DrafterModelId = "mlx-community/gemma-4-31B-it-assistant-bf16"
 private let rung4TargetModelId = "mlx-community/gemma-4-31b-it-8bit"
 
+private func gemma31BEnabled() -> Bool {
+    Memory.memoryLimit > 35 * 1024 * 1024 * 1024
+}
+
 /// Pinned checkpoint revisions matching the weights that were live when the
 /// `drafter_block` fixtures were generated. Pinning keeps the bit-exact
 /// parity assertions reproducible as the published checkpoints move.
@@ -104,13 +108,14 @@ private func loadRung4Drafter() async throws -> Rung4BoundDrafter {
 // argmax which is deterministic. Any divergence indicates a real semantic
 // drift between Swift and Python implementations.
 //
-// These tests load the drafter and call `draftBlock(...)` directly with
+// These tests load the drafter and cloaall `draftBlock(...)` directly with
 // fixture inputs. They do NOT go through the full
 // `MTPSpeculativeTokenIterator` — that is exercised by
 // `MTPAcceptanceRateTests` once both target and drafter are available.
 
 extension ModelLoadingSuite {
-    @Suite(.serialized) struct Rung4TokenParityTests {}
+    @Suite(.serialized, .enabled(if: gemma31BEnabled()))
+    struct Rung4TokenParityTests {}
 }
 
 extension ModelLoadingSuite.Rung4TokenParityTests {

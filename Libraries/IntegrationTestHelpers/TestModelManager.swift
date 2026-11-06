@@ -4,6 +4,8 @@ import Foundation
 import MLX
 import MLXLMCommon
 
+private let log = MLXLogger(label: "TestModelManager")
+
 /// Keeps at most one model in memory across all integration tests.
 ///
 /// Some integration models are tens of gigabytes, so two of them can't be
@@ -87,6 +89,16 @@ public actor TestModelManager {
         }
     }
 
+    private func logMemory(_ message: String) {
+        let snapshot = Memory.snapshot()
+        func scale(_ value: Int) -> String {
+            "\(value / 1024 / 1024)M"
+        }
+        log.info(
+            "\(message): limit \(scale(Memory.memoryLimit)) active \(scale(snapshot.activeMemory)) peak \(scale(snapshot.peakMemory))"
+        )
+    }
+
     private func loadBox(
         _ key: String,
         onUnload: (@Sendable () async -> Void)?,
@@ -104,21 +116,25 @@ public actor TestModelManager {
         Stream.gpu.synchronize()
         Memory.clearCache()
 
-        print("TestModelManager: loading \(key)")
+        log.info("loading \(key)")
         let box = try await loader()
+        logMemory("loaded \(key)")
         resident = Resident(key: key, box: box, onUnload: onUnload)
         return box
     }
 
     private func unloadResident() async {
         guard let key = resident?.key else { return }
-        print("TestModelManager: unloading \(key)")
+        logMemory("end \(key)")
+        log.info("unloading \(key)")
         let onUnload = resident?.onUnload
         // Drop the only reference here so ARC frees the weights before clearCache().
         resident = nil
         await onUnload?()
         Stream.gpu.synchronize()
         Memory.clearCache()
+        logMemory("unloaded \(key)")
+        Memory.peakMemory = 0
     }
 
     private func lock() async {

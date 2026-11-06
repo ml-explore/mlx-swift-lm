@@ -50,6 +50,10 @@ private struct EmissionLog: LogitProcessor {
 private let target31BModelId = "mlx-community/gemma-4-31b-it-8bit"
 private let drafter31BModelId = "mlx-community/gemma-4-31B-it-assistant-bf16"
 
+private func gemma31BEnabled() -> Bool {
+    Memory.memoryLimit > 35 * 1024 * 1024 * 1024
+}
+
 /// Pinned checkpoint revisions matching the weights that were live when the
 /// Rung 4 `drafter_block` fixtures were generated. Kept in sync with
 /// `MTPRung4TokenParityTests` so this diagnostic suite exercises the same
@@ -124,7 +128,8 @@ private func loadTargetAndDrafterUncached(
 // MARK: - 31B end-to-end iterator exercise
 
 extension ModelLoadingSuite {
-    @Suite(.serialized) struct MTPIteratorEndToEndDiagnosticTests {}
+    @Suite(.serialized, .enabled(if: gemma31BEnabled()))
+    struct MTPIteratorEndToEndDiagnosticTests {}
 }
 
 extension ModelLoadingSuite.MTPIteratorEndToEndDiagnosticTests {
