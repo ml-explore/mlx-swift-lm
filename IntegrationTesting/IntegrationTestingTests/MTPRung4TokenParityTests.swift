@@ -33,16 +33,8 @@ private func mtpFixturesDirOrSkip(name: String) async -> URL? {
 // Rung 4 requires the drafter to be paired with a real target so that the
 // target-derived constants (input embeddings, embed scale) flow through
 // `draftBlock(target:...)` per round. Loading the 31B 8-bit target is
-// expensive (~30–60s); the `@Suite(.serialized)` wrapper below ensures
-// the three Rung 4 case methods run sequentially, and this module-level
-// cache reuses one (drafter, target) pair across all three.
-//
-// `Gemma4AssistantDraftModel` is deliberately non-Sendable (see the
-// design note at Gemma4Assistant.swift:153–155 — Embedding is a
-// reference type and cross-domain access must go through
-// `MTPDrafterContainer.perform`). `nonisolated(unsafe)` is appropriate
-// here because the suite is serialized — only one test runs at a time,
-// and the cache becomes read-only after first population.
+// expensive (~30–60s), so `TestModelManager` keeps one (drafter, target)
+// pair resident across the three Rung 4 case methods.
 
 private struct Rung4BoundDrafter {
     let drafter: Gemma4AssistantDraftModel
@@ -51,27 +43,20 @@ private struct Rung4BoundDrafter {
     let target: Gemma4
 }
 
-nonisolated(unsafe) private var _rung4Cache: Result<Rung4BoundDrafter, Error>?
-
 private func sharedBoundDrafter() async throws -> Rung4BoundDrafter {
-    if let cached = _rung4Cache {
-        switch cached {
-        case .success(let value): return value
-        case .failure(let error): throw error
-        }
-    }
-    do {
-        let result = try await loadRung4Drafter()
-        _rung4Cache = .success(result)
-        return result
-    } catch {
-        _rung4Cache = .failure(error)
-        throw error
+    try await TestModelManager.shared.load(
+        "rung4-pair:\(rung4TargetModelId)@\(rung4TargetRevision)+\(rung4DrafterModelId)@\(rung4DrafterRevision)"
+    ) {
+        try await loadRung4Drafter()
     }
 }
 
 private let rung4DrafterModelId = "mlx-community/gemma-4-31B-it-assistant-bf16"
 private let rung4TargetModelId = "mlx-community/gemma-4-31b-it-8bit"
+
+private func gemma31BEnabled() -> Bool {
+    Memory.memoryLimit > 35 * 1024 * 1024 * 1024
+}
 
 /// Pinned checkpoint revisions matching the weights that were live when the
 /// `drafter_block` fixtures were generated. Pinning keeps the bit-exact
@@ -123,13 +108,17 @@ private func loadRung4Drafter() async throws -> Rung4BoundDrafter {
 // argmax which is deterministic. Any divergence indicates a real semantic
 // drift between Swift and Python implementations.
 //
-// These tests load the drafter and call `draftBlock(...)` directly with
+// These tests load the drafter and cloaall `draftBlock(...)` directly with
 // fixture inputs. They do NOT go through the full
 // `MTPSpeculativeTokenIterator` — that is exercised by
 // `MTPAcceptanceRateTests` once both target and drafter are available.
 
-@Suite(.serialized)
-struct Rung4TokenParityTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .enabled(if: gemma31BEnabled()))
+    struct Rung4TokenParityTests {}
+}
+
+extension ModelLoadingSuite.Rung4TokenParityTests {
     @Test
     func testRung4DraftBlockGreedyMatchesFixture31BCase01Block2() async throws {
         try await assertDraftBlockMatchesFixture(name: "case_01_block2")

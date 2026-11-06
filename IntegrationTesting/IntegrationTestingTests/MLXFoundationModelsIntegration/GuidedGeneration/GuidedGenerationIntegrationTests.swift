@@ -30,8 +30,11 @@ private struct ContactForm {
 ///
 /// These tests verify that schemas are properly threaded through the
 /// Executor -> ResponseStream -> GuidedGenerationLoop pipeline.
-@Suite(.serialized, .timeLimit(.minutes(5)))
-struct GuidedGenerationIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(5))) struct GuidedGenerationIntegrationTests {}
+}
+
+extension ModelLoadingSuite.GuidedGenerationIntegrationTests {
 
     // MARK: - Schema Presence Tests
 

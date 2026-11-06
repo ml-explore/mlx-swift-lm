@@ -53,8 +53,11 @@ import MLXLMCommon
 @testable import MLXFoundationModels
 @testable import MLXGuidedGeneration
 
-@Suite(.serialized)
-struct XGrammarBridgeTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct XGrammarBridgeTests {}
+}
+
+extension ModelLoadingSuite.XGrammarBridgeTests {
 
     // MARK: - GrammarTokenizer construction
 

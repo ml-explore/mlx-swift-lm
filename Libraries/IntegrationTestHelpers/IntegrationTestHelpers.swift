@@ -252,100 +252,71 @@ public enum IntegrationTestModelIDs {
 
 // MARK: - Model Loading
 
-/// Shared model cache that loads each model at most once per test run.
-public actor IntegrationTestModels {
+// TODO dkoski -- do we still need this?
+
+/// Loads models for integration tests through ``TestModelManager``, which
+/// keeps one model in memory at a time.
+public struct IntegrationTestModels: Sendable {
     private let downloader: any Downloader
     private let tokenizerLoader: any TokenizerLoader
-
-    private var llmTasksByName: [String: Task<LLModelContainer, Error>] = [:]
-    private var vlmTasksByName: [String: Task<LLModelContainer, Error>] = [:]
-    private var embeddingTask: Task<EmbeddingModelContainer, Error>?
 
     public init(downloader: any Downloader, tokenizerLoader: any TokenizerLoader) {
         self.downloader = downloader
         self.tokenizerLoader = tokenizerLoader
     }
 
-    /// Load an arbitrary LLM container, cached by `configuration.name` so the same
-    /// model is only loaded once per `IntegrationTestModels` instance.
+    /// Load an LLM container, or return it if it is the resident model.
     public func llmContainer(for configuration: ModelConfiguration) async throws
         -> LLModelContainer
     {
-        let key = configuration.name
-        if let task = llmTasksByName[key] {
-            return try await task.value
-        }
         let downloader = self.downloader
         let tokenizerLoader = self.tokenizerLoader
-        let task = Task {
-            print("Loading LLM: \(key)")
-            let container = try await withNetworkRetry(key) {
+        let name = configuration.name
+        return try await TestModelManager.shared.load(
+            TestModelManager.key("llm", configuration)
+        ) {
+            try await withNetworkRetry(name) {
                 try await LLMModelFactory.shared.loadContainer(
                     from: downloader, using: tokenizerLoader,
                     configuration: configuration,
-                    progressHandler: logProgress(key)
+                    progressHandler: logProgress(name)
                 )
             }
-            print("Loaded LLM: \(key)")
-            return container
         }
-        llmTasksByName[key] = task
-        return try await task.value
     }
 
-    /// Drop the cached container for `configuration` so ARC can free its
-    /// GPU-resident weights between tests. Pair with `Memory.clearCache()` at the
-    /// call site to release the freed buffers back to the system — without this,
-    /// loading many large models in one serialized run accumulates weights until
-    /// the process is jetsammed (Metal compiler XPC failures / crashes).
-    public func evictLLM(_ configuration: ModelConfiguration) {
-        llmTasksByName[configuration.name] = nil
-    }
-
-    /// Load an arbitrary VLM container, cached by `configuration.name` so the same
-    /// model is only loaded once per `IntegrationTestModels` instance.
+    /// Load a VLM container, or return it if it is the resident model.
     public func vlmContainer(for configuration: ModelConfiguration) async throws
         -> LLModelContainer
     {
-        let key = configuration.name
-        if let task = vlmTasksByName[key] {
-            return try await task.value
-        }
         let downloader = self.downloader
         let tokenizerLoader = self.tokenizerLoader
-        let task = Task {
-            print("Loading VLM: \(key)")
-            let container = try await VLMModelFactory.shared.loadContainer(
+        let name = configuration.name
+        return try await TestModelManager.shared.load(
+            TestModelManager.key("vlm", configuration)
+        ) {
+            try await VLMModelFactory.shared.loadContainer(
                 from: downloader, using: tokenizerLoader,
                 configuration: configuration,
-                progressHandler: logProgress(key)
+                progressHandler: logProgress(name)
             )
-            print("Loaded VLM: \(key)")
-            return container
         }
-        vlmTasksByName[key] = task
-        return try await task.value
     }
 
+    /// Load the nomic embedding container, or return it if it is the resident model.
     public func embeddingContainer() async throws -> EmbeddingModelContainer {
-        if let task = embeddingTask {
-            return try await task.value
-        }
         let downloader = self.downloader
         let tokenizerLoader = self.tokenizerLoader
-        let id = "nomic_text_v1_5"
-        let task = Task {
-            print("Loading embedding model: \(id)")
-            let container = try await EmbedderModelFactory.shared.loadContainer(
+        let configuration = EmbedderRegistry.nomic_text_v1_5
+        return try await TestModelManager.shared.load(
+            TestModelManager.key("embedder", configuration)
+        ) {
+            try await EmbedderModelFactory.shared.loadContainer(
                 from: downloader, using: tokenizerLoader,
-                configuration: EmbedderRegistry.nomic_text_v1_5,
-                progressHandler: logProgress(id)
+                configuration: configuration,
+                progressHandler: logProgress(configuration.name)
             )
-            print("Loaded embedding model: \(id)")
-            return container
         }
-        embeddingTask = task
-        return try await task.value
     }
 }
 
@@ -647,11 +618,16 @@ public enum EmbedderTests {
     ) async throws {
         let modelId = "mlx-community/gemma-3-1b-it-qat-4bit"
         print("Loading Gemma 3 embedding model: \(modelId)")
-        let modelContainer = try await EmbedderModelFactory.shared.loadContainer(
-            from: downloader, using: tokenizerLoader,
-            configuration: ModelConfiguration(id: modelId),
-            progressHandler: logProgress(modelId)
-        )
+        let configuration = ModelConfiguration(id: modelId)
+        let modelContainer = try await TestModelManager.shared.load(
+            TestModelManager.key("embedder", configuration)
+        ) {
+            try await EmbedderModelFactory.shared.loadContainer(
+                from: downloader, using: tokenizerLoader,
+                configuration: configuration,
+                progressHandler: logProgress(modelId)
+            )
+        }
         print("Loaded Gemma 3 embedding model: \(modelId)")
 
         let inputs = [
@@ -790,18 +766,30 @@ public enum EmbedderTests {
 /// These checks download large model weights and belong in the separate IntegrationTesting
 /// project rather than the package test suite.
 public enum RerankerIntegrationTests {
+    private static func loadReranker(
+        _ configuration: ModelConfiguration,
+        downloader: any Downloader,
+        tokenizerLoader: any TokenizerLoader
+    ) async throws -> RerankerContainer {
+        try await TestModelManager.shared.load(TestModelManager.key("reranker", configuration)) {
+            try await RerankerModelFactory.shared.loadContainer(
+                from: downloader, using: tokenizerLoader,
+                configuration: configuration,
+                progressHandler: logProgress(configuration.name))
+        }
+    }
+
     /// Validate BGE v2 M3 logits against the values published in its model card.
     public static func bgeV2M3(
         downloader: any Downloader,
         tokenizerLoader: any TokenizerLoader
     ) async throws {
         let modelID = "BAAI/bge-reranker-v2-m3"
-        let reranker = try await RerankerModelFactory.shared.loadContainer(
-            from: downloader, using: tokenizerLoader,
-            configuration: ModelConfiguration(
+        let reranker = try await loadReranker(
+            ModelConfiguration(
                 id: modelID,
                 revision: "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"),
-            progressHandler: logProgress(modelID))
+            downloader: downloader, tokenizerLoader: tokenizerLoader)
         let response = try await reranker.scores(
             query: "what is panda?",
             documents: [
@@ -830,12 +818,11 @@ public enum RerankerIntegrationTests {
         tokenizerLoader: any TokenizerLoader
     ) async throws {
         let modelID = "Qwen/Qwen3-Reranker-0.6B"
-        let reranker = try await RerankerModelFactory.shared.loadContainer(
-            from: downloader, using: tokenizerLoader,
-            configuration: ModelConfiguration(
+        let reranker = try await loadReranker(
+            ModelConfiguration(
                 id: modelID,
                 revision: "e61197ed45024b0ed8a2d74b80b4d909f1255473"),
-            progressHandler: logProgress(modelID))
+            downloader: downloader, tokenizerLoader: tokenizerLoader)
         let response = try await reranker.scores(
             query: "What is the capital of China?",
             documents: [
@@ -908,10 +895,9 @@ public enum RerankerIntegrationTests {
         downloader: any Downloader,
         tokenizerLoader: any TokenizerLoader
     ) async throws {
-        let reranker = try await RerankerModelFactory.shared.loadContainer(
-            from: downloader, using: tokenizerLoader,
-            configuration: ModelConfiguration(id: modelID, revision: revision),
-            progressHandler: logProgress(modelID))
+        let reranker = try await loadReranker(
+            ModelConfiguration(id: modelID, revision: revision),
+            downloader: downloader, tokenizerLoader: tokenizerLoader)
         let response = try await reranker.scores(
             query: "What is the capital of China?",
             documents: [

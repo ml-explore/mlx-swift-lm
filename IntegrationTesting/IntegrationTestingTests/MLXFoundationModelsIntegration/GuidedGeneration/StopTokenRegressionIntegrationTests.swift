@@ -22,8 +22,11 @@ import MLXLMCommon
 /// the only source that includes the chat turn-ender. Without it,
 /// Gemma-family models spew tokens past `<end_of_turn>` and never trigger
 /// the stop check.
-@Suite(.serialized)
-struct StopTokenRegressionIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct StopTokenRegressionIntegrationTests {}
+}
+
+extension ModelLoadingSuite.StopTokenRegressionIntegrationTests {
 
     /// Gemma 3 270M's tokenizer resolves `eosTokenId` to `<eos>` (id 1), but
     /// the chat turn ender is `<end_of_turn>` (id 106). Only

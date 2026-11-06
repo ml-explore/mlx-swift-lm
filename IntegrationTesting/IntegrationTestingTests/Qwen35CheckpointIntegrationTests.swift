@@ -2,6 +2,7 @@
 
 import Foundation
 import HuggingFace
+import IntegrationTestHelpers
 import MLX
 import MLXHuggingFace
 import MLXLLM
@@ -28,11 +29,14 @@ private let qwenMTPReferences = [
         revision: "222dfd2c23fc9518d7b817e4f8e0cb0571787489", bits: 4),
 ]
 
-@Suite(.serialized)
-struct Qwen35CheckpointIntegrationTests {
-    private let downloader = #hubDownloader()
-    private let tokenizerLoader = #huggingFaceTokenizerLoader()
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct Qwen35CheckpointIntegrationTests {
+        private let downloader = #hubDownloader()
+        private let tokenizerLoader = #huggingFaceTokenizerLoader()
+    }
+}
 
+extension ModelLoadingSuite.Qwen35CheckpointIntegrationTests {
     @Test(arguments: qwenMTPReferences)
     func publishedStandaloneHeadsLoad(reference: QwenMTPReference) async throws {
         let drafter = try await loadDrafter(reference)
@@ -44,12 +48,18 @@ struct Qwen35CheckpointIntegrationTests {
 
     @Test
     func standaloneHeadProducesAcceptedDraftsAndMatchesGreedyTarget() async throws {
-        let target = try await LLMModelFactory.shared.load(
-            from: downloader, using: tokenizerLoader,
-            configuration: .init(
-                id: "mlx-community/Qwen3.5-4B-4bit",
-                revision: "0e7ffd5c629ef7719d4cbc04069232580bfa9d9c"))
-        let drafter = try await loadDrafter(qwenMTPReferences[0])
+        let targetConfiguration = ModelConfiguration(
+            id: "mlx-community/Qwen3.5-4B-4bit",
+            revision: "0e7ffd5c629ef7719d4cbc04069232580bfa9d9c")
+        let reference = qwenMTPReferences[0]
+        // Load the pair as one entry so the manager doesn't unload the target.
+        let (target, drafter) = try await TestModelManager.shared.load(
+            TestModelManager.key("llm-context", targetConfiguration) + "+\(reference.id)"
+        ) {
+            let target = try await LLMModelFactory.shared.load(
+                from: downloader, using: tokenizerLoader, configuration: targetConfiguration)
+            return (target, try await loadDrafterUncached(reference))
+        }
         let input = try await target.processor.prepare(
             input: UserInput(chat: [
                 .user("Why is the sky blue? Explain briefly.")
@@ -70,6 +80,16 @@ struct Qwen35CheckpointIntegrationTests {
     }
 
     private func loadDrafter(_ reference: QwenMTPReference) async throws -> MTPDrafterContext {
+        try await TestModelManager.shared.load(
+            "mtp-drafter-context:\(reference.id)@\(reference.revision)"
+        ) {
+            try await loadDrafterUncached(reference)
+        }
+    }
+
+    private func loadDrafterUncached(_ reference: QwenMTPReference) async throws
+        -> MTPDrafterContext
+    {
         await Qwen35TextMTPRegistration.register()
         return try await MTPDrafterModelFactory.shared.load(
             from: downloader, using: tokenizerLoader,

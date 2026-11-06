@@ -17,8 +17,11 @@ import MLXLMCommon
 ///
 /// Model ids are the smallest published quants of each family; confirm they
 /// resolve on the device run (HF availability) before locking the suite.
-@Suite(.serialized, .timeLimit(.minutes(15)))
-struct ReasoningIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(15))) struct ReasoningIntegrationTests {}
+}
+
+extension ModelLoadingSuite.ReasoningIntegrationTests {
 
     enum ReasoningModels {
         static let qwen3 = "mlx-community/Qwen3-1.7B-4bit"

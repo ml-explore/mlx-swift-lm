@@ -9,8 +9,11 @@ import FoundationModels
 
 /// Verifies that guided generation streams multiple text delta events
 /// rather than buffering the entire output into a single emission.
-@Suite(.serialized, .timeLimit(.minutes(15)))
-struct StreamingDeltaTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(15))) struct StreamingDeltaTests {}
+}
+
+extension ModelLoadingSuite.StreamingDeltaTests {
 
     static let modelID = "mlx-community/Qwen2.5-3B-Instruct-4bit"
 

@@ -59,8 +59,29 @@ private func drafter31BDirectory() async throws -> URL {
     )
 }
 
-@Suite(.serialized)
-struct Gemma4AssistantIntegrationTests {
+/// Loads the 31B drafter through `TestModelManager`, so the tests share one copy.
+private func loadDrafter31B() async throws -> Gemma4AssistantDraftModel {
+    try await TestModelManager.shared.load(
+        "gemma4-assistant-drafter:\(drafter31BModelId)@\(drafter31BRevision)"
+    ) {
+        let drafterDir = try await drafter31BDirectory()
+        let configURL = drafterDir.appendingPathComponent("config.json")
+        let cfg = try JSONDecoder().decode(
+            Gemma4AssistantConfiguration.self, from: Data(contentsOf: configURL))
+        let model = Gemma4AssistantDraftModel(cfg)
+        // loadWeights enumerates *.safetensors in the directory, sanitizes via
+        // the model's sanitize hook, and applies via update(parameters:verify:).
+        // If any keys are missing or unexpected, update(verify: [.all]) throws.
+        try await loadWeights(modelDirectory: drafterDir, model: model)
+        return model
+    }
+}
+
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct Gemma4AssistantIntegrationTests {}
+}
+
+extension ModelLoadingSuite.Gemma4AssistantIntegrationTests {
 
     @Test
     func testGemma4AssistantConfigurationDecodesRealCheckpoint() async throws {
@@ -85,15 +106,7 @@ struct Gemma4AssistantIntegrationTests {
 
     @Test
     func testRung1WeightsLoadFrom31BCheckpoint() async throws {
-        let drafterDir = try await drafter31BDirectory()
-        let configURL = drafterDir.appendingPathComponent("config.json")
-        let cfg = try JSONDecoder().decode(
-            Gemma4AssistantConfiguration.self, from: Data(contentsOf: configURL))
-        let model = Gemma4AssistantDraftModel(cfg)
-        // loadWeights enumerates *.safetensors in the directory, sanitizes via
-        // the model's sanitize hook, and applies via update(parameters:verify:).
-        // If any keys are missing or unexpected, update(verify: [.all]) throws.
-        try await loadWeights(modelDirectory: drafterDir, model: model)
+        _ = try await loadDrafter31B()
     }
 
     @Test
@@ -101,13 +114,7 @@ struct Gemma4AssistantIntegrationTests {
         guard let fixturesDir = await drafterForwardFixturesOrSkip(name: "case_01") else {
             return
         }
-        let drafterDir = try await drafter31BDirectory()
-
-        let configURL = drafterDir.appendingPathComponent("config.json")
-        let cfg = try JSONDecoder().decode(
-            Gemma4AssistantConfiguration.self, from: Data(contentsOf: configURL))
-        let model = Gemma4AssistantDraftModel(cfg)
-        try await loadWeights(modelDirectory: drafterDir, model: model)
+        let model = try await loadDrafter31B()
 
         let fixtureURL =
             fixturesDir
