@@ -1819,6 +1819,11 @@ public class ArraysCache: BaseKVCache {
         }
         leftPadding = concatenate(leftPadding, other.leftPadding)
         lengths = concatenate(lengths, other.lengths)
+        // One position counter for the batch, the longest row's, as `merge` keeps it. A side
+        // with no rows has no position to contribute.
+        if bBatch > 0 {
+            offset = aBatch > 0 ? max(offset, other.offset) : other.offset
+        }
     }
 
     public override func prepare(lengths: [Int]?) {
