@@ -10,6 +10,8 @@ struct KVCacheLeaf {
         case simple(KVCacheSimple)
         /// Full-precision rows of a batch; never rewritten to a compressed form.
         case batched(BatchKVCache)
+        /// Full-precision rows of a batch, each a sliding window.
+        case batchedRotating(BatchRotatingKVCache)
         case affine(QuantizedKVCache)
         case turboQuant(TurboQuantKVCache)
         case varianceNormalized(VarianceNormalizedKVCache)
@@ -28,6 +30,7 @@ struct KVCacheLeaf {
         case let cache as QuantizedKVCache: .affine(cache)
         case let cache as KVCacheSimple: .simple(cache)
         case let cache as BatchKVCache: .batched(cache)
+        case let cache as BatchRotatingKVCache: .batchedRotating(cache)
         default: .unsupported
         }
     }
@@ -63,7 +66,8 @@ struct KVCacheLeaf {
     var participatesInTurboQuantBoundaryProtection: Bool {
         switch kind {
         case .simple, .affine, .turboQuant: true
-        case .recurrent, .rotating, .batched, .varianceNormalized, .unsupported: false
+        case .recurrent, .rotating, .batched, .batchedRotating, .varianceNormalized, .unsupported:
+            false
         }
     }
 
@@ -77,7 +81,7 @@ struct KVCacheLeaf {
         switch kind {
         case .recurrent:
             return nil
-        case .rotating, .batched, .unsupported:
+        case .rotating, .batched, .batchedRotating, .unsupported:
             return strategy == .fullPrecision
         case .simple(let simple):
             let state = simple.innerState()
