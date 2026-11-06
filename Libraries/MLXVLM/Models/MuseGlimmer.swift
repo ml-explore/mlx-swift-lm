@@ -1130,11 +1130,7 @@ public class MuseGlimmer: Module, VLMModel, KVCacheDimensionProvider {
     public var vocabularySize: Int { config.vocabularySize }
     public var kvHeads: [Int] { languageModel.kvHeads }
     public var toolCallFormat: ToolCallFormat? { .atem }
-    public var reasoningConfig: ReasoningConfig? {
-        ReasoningConfig(
-            startDelimiter: "to=self<|message|>", endDelimiter: "<|eom|>",
-            promptStrategy: .none, isSpecialToken: true)
-    }
+    public var reasoningConfig: ReasoningConfig? { OnyxReasoningProtocol.glimmer }
 
     public init(_ config: MuseGlimmerConfiguration) {
         self.config = config
