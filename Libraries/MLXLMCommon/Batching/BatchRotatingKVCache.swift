@@ -239,7 +239,11 @@ public final class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
     /// see a window without the positions it saw. A merged row can hold less than a window
     /// and still have evicted, so `written` alone does not say.
     public override func isTrimmable(after positions: Int) -> Bool {
-        written + positions < window && evictedTokenCount == 0
+        guard positions >= 0, written + positions < window, evictedTokenCount == 0 else {
+            return false
+        }
+        // A round cannot discard writes into padding that a row has not consumed yet.
+        return positions == 0 || (batchSize > 0 && batchOffset.min().item(Int32.self) >= 0)
     }
 
     /// What ``trim(_:)`` removes, while the window has not filled.
