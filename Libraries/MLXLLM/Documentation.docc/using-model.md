@@ -81,6 +81,37 @@ The returned `LoRAModelMetadata.defaultKeys` come from the registered model arch
 not from safetensors names. This accounts for models that rename or reshape checkpoint weights
 while loading.
 
+### DFlash2 speculative decoding
+
+A DFlash2 drafter proposes a block of tokens from a Qwen 3.5 or Qwen 3.8 target's hidden
+states, and the target checks the block in one pass. Register the drafter type, load the
+target and a drafter trained for it, then use the DFlash2 generation overload:
+
+```swift
+await DFlash2Registration.register()
+
+let target = try await LLMModelFactory.shared.load(
+    from: targetDirectory,
+    using: tokenizerLoader
+)
+let drafter = try await DFlash2DrafterModelFactory.shared.load(
+    from: drafterDirectory,
+    using: tokenizerLoader
+)
+let input = try await target.processor.prepare(input: UserInput(prompt: prompt))
+
+let stream = try generate(
+    input: input,
+    parameters: GenerateParameters(maxTokens: 256, temperature: 0),
+    context: target,
+    dflash2Drafter: drafter.model
+)
+```
+
+`DFlash2DrafterRegistry.qwen38_27B_dflash2` names the Qwen3.8-27B drafter. Greedy and
+sampled decoding both work. Quantized or bounded KV caches are not supported, and a drafter
+trained for a target of another shape fails before prefill.
+
 ## Evaluation Flow
 
 - Load the Model
