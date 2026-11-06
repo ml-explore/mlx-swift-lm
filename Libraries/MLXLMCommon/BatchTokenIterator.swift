@@ -6,10 +6,12 @@ import MLXNN
 
 /// Tokens for a batch of prompts, decoded together, with rows joining and leaving at any step.
 ///
-/// The batched form of ``TokenIterator``: port of mlx-vlm's `BatchGenerator`
-/// (`mlx_vlm/generate/ar.py`) and mlx-lm's (`mlx_lm/generate.py`), without their prompt
-/// scheduling. Prompts queued with ``insert(prompts:maxTokens:caches:samplers:processors:)``
-/// are prefilled on the next call to ``next()``, one at a time through the model's own
+/// The batched form of ``TokenIterator``: port of mlx-vlm's `BatchGenerator` and
+/// `GenerationBatch` (`mlx_vlm/generate/ar.py` at mlx-vlm dcea787,
+/// https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/generate/ar.py#L1089) and
+/// mlx-lm's (`mlx_lm/generate.py`), without their prompt scheduling. Prompts queued with
+/// ``insert(prompts:maxTokens:caches:samplers:processors:)`` are prefilled on the next
+/// call to ``next()``, one at a time through the model's own
 /// prefill, then their caches are merged into the decoding batch. Every ``next()`` decodes
 /// one token for every row; a row leaves when it emits a stop token or reaches its limit, or
 /// when it is removed.
@@ -213,7 +215,9 @@ public struct BatchTokenIterator {
 
         // Each prompt goes into its own cache first, as TokenIterator feeds it: the model's
         // prefill (chunked) and then the remainder it leaves, whose last position's logits
-        // give the row's first sample. The rows merge after, every one prefilled, so a
+        // give the row's first sample. mlx-vlm's chunked prefill likewise stops short of the
+        // last token and feeds it in the step that samples:
+        // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/generate/ar.py#L2358-L2364 The rows merge after, every one prefilled, so a
         // one-token prompt joins a longer one on any cache type. Rows are not prefilled
         // together right-padded: the recurrent models' scans do not honour the prepared
         // lengths yet.
