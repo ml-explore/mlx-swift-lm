@@ -426,15 +426,22 @@ public struct TopPSampler: LogitSampler {
     }
 
     public func sample(logits: MLXArray) -> MLXArray {
+        sample(logProbabilities: Self.normalizedLogProbabilities(logits))
+    }
+
+    /// Use the same precision for standalone and batched nucleus boundaries.
+    static func normalizedLogProbabilities(_ logits: MLXArray) -> MLXArray {
         var logits = logits
         if logits.dtype == .bfloat16 {
             logits = logits.asType(.float32)
         }
 
-        return sample(logProbabilities: logSoftmax(logits))
+        return logSoftmax(logits)
     }
 
-    fileprivate func sample(logProbabilities: MLXArray) -> MLXArray {
+    /// Samples from log-probabilities that are normalized already, in any leading shape:
+    /// `[V]` or `[B, V]` gives `[]` or `[B]` tokens.
+    public func sample(logProbabilities: MLXArray) -> MLXArray {
         withRandomState(randomState) {
             var logprobs = logProbabilities
 
@@ -462,7 +469,13 @@ public struct TopPSampler: LogitSampler {
         let cumulativeProbs = cumsum(sortedProbs, axis: -1)
 
         // Mask low-probability tail in sorted order, scatter back to original vocab order.
-        let filtered = MLX.where(cumulativeProbs .> (1 - topP), sortedLogprobs, negInf)
+        // The top token always stays: a threshold that rounds to one would drop every token.
+        // It is the last in sorted order, where the cumulative sum reaches its total; no
+        // earlier entry does, since the probabilities ahead of it are at least as large.
+        // (A host-built index array here cost more than the rest of the draw.)
+        let total = cumulativeProbs[.ellipsis, (cumulativeProbs.dim(-1) - 1)...]
+        let kept = (cumulativeProbs .> (1 - topP)) .|| (cumulativeProbs .>= total)
+        let filtered = MLX.where(kept, sortedLogprobs, negInf)
         return putAlong(logprobs, sortedIndices, values: filtered, axis: -1)
     }
 
@@ -482,7 +495,7 @@ public struct TopPSampler: LogitSampler {
         guard topK < vocabularySize else { return logprobs }
         // O(V) partition on negated logprobs so top-k land at [0, topK).
         // Indices at [topK, V) are the tokens to mask out.
-        let maskIndices = argPartition(-logprobs, kth: topK - 1, axis: -1)[0..., topK...]
+        let maskIndices = argPartition(-logprobs, kth: topK - 1, axis: -1)[.ellipsis, topK...]
         return putAlong(logprobs, maskIndices, values: negInf, axis: -1)
     }
 }
