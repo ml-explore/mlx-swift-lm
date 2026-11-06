@@ -299,6 +299,98 @@ struct BatchKVCacheTests {
         #expect(cache.trim(1) == 1)
     }
 
+    @Test(
+        "Staged rounds refuse writes that cannot rewind every row's padding",
+        arguments: [0, 2], [1, 2, 5])
+    func paddedRoundIsRefused(written: Int, width: Int) throws {
+        try Device.withDefaultDevice(.cpu) {
+            let cache = BatchKVCache(leftPadding: [3, 0])
+            if written > 0 {
+                let kv = makePositionKV(
+                    positions: 0 ..< written, heads: 1, headDim: 1, batchSize: 2, rowStride: 10)
+                _ = cache.update(keys: kv.0, values: kv.1)
+            }
+            let state = cache.state.map { $0.asArray(Int32.self) }
+            let storage = KVCacheStorage([cache], plan: .disabled)
+            #expect(cache.isTrimmable)
+            #expect(!cache.isTrimmable(after: width))
+            let refused = storage.beginRound(maximumPositions: width)
+            #expect(refused == nil)
+            // Old code admits the round. Keep the negative regression safe by writing nothing.
+            if let refused { storage.rollback(refused) }
+            #expect(cache.offset == written)
+            #expect(cache.state.map { $0.asArray(Int32.self) } == state)
+            #expect(storage.processedTokenCount == written)
+            #expect(storage.nativeAttentionOffsetsAreAligned)
+
+            #expect(cache.isTrimmable(after: 0))
+            let empty = try #require(storage.beginRound(maximumPositions: 0))
+            storage.rollback(empty)
+            #expect(cache.state.map { $0.asArray(Int32.self) } == state)
+            #expect(storage.nativeAttentionOffsetsAreAligned)
+        }
+    }
+
+    @Test("A zero-row batch refuses positive staged rounds", arguments: [false, true])
+    func zeroRowRoundIsRefused(filtered: Bool) throws {
+        try Device.withDefaultDevice(.cpu) {
+            let cache = BatchKVCache(leftPadding: filtered ? [0] : [])
+            if filtered {
+                let kv = makeKV(batchSize: 1, heads: 1, seqLen: 3, headDim: 1)
+                _ = cache.update(keys: kv.0, values: kv.1)
+                cache.filter(batchIndices: batchRows())
+            }
+            let storage = KVCacheStorage([cache], plan: .disabled)
+            #expect(!cache.isTrimmable(after: 2))
+            let refused = storage.beginRound(maximumPositions: 2)
+            #expect(refused == nil)
+            if let refused { storage.rollback(refused) }
+            #expect(cache.batchSize == 0)
+            #expect(cache.offset == 0)
+            #expect(storage.processedTokenCount == 0)
+            #expect(storage.nativeAttentionOffsetsAreAligned)
+
+            #expect(cache.isTrimmable(after: 0))
+            let empty = try #require(storage.beginRound(maximumPositions: 0))
+            storage.rollback(empty)
+            #expect(cache.offset == 0)
+            #expect(storage.nativeAttentionOffsetsAreAligned)
+        }
+    }
+
+    @Test(
+        "A staged round rewinds exactly after every row has consumed its padding",
+        arguments: [0, 1])
+    func roundAfterPaddingCommitsExactly(retaining: Int) throws {
+        try Device.withDefaultDevice(.cpu) {
+            let cache = BatchKVCache(leftPadding: [3, 0])
+            let prefix = makePositionKV(
+                positions: 0 ..< 3, heads: 1, headDim: 1, batchSize: 2, rowStride: 10)
+            _ = cache.update(keys: prefix.0, values: prefix.1)
+            let storage = KVCacheStorage([cache], plan: .disabled)
+            #expect(cache.isTrimmable(after: 2))
+            #expect(!cache.isTrimmable(after: -1))
+            let round = try #require(storage.beginRound(maximumPositions: 2))
+            let proposed = makePositionKV(
+                positions: 3 ..< 5, heads: 1, headDim: 1, batchSize: 2, rowStride: 10)
+            _ = round.caches[0].update(keys: proposed.0, values: proposed.1)
+            let result = storage.commit(round, retaining: retaining)
+
+            #expect(result.committedPositions == retaining)
+            #expect(result.discardedPositions == 2 - retaining)
+            #expect(cache.offset == 3 + retaining)
+            #expect(
+                cache.batchOffset.asArray(Int32.self) == [Int32(retaining), Int32(3 + retaining)])
+            #expect(storage.processedTokenCount == 3 + retaining)
+            #expect(storage.nativeAttentionOffsetsAreAligned)
+            let expected = makePositionKV(
+                positions: 0 ..< 3 + retaining, heads: 1, headDim: 1, batchSize: 2, rowStride: 10)
+            let state = cache.state
+            #expect(maxAbsDifference(state[0], expected.0) == 0)
+            #expect(maxAbsDifference(state[1], expected.1) == 0)
+        }
+    }
+
     @Test("Empty rows join empty rows, and the batch fills on its first update")
     func extendEmptyRows() throws {
         let cache = BatchKVCache(leftPadding: [0])
