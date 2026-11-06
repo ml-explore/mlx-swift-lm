@@ -100,5 +100,11 @@ extension LFM3Model: LoRAModel {
 // MARK: - Chat conventions
 
 extension LFM3Model {
-    public var reasoningConfig: ReasoningConfig? { .alwaysOnThinking }
+    /// LFM3's template writes calls as `<tool_call><function=name><parameter=key>`.
+    public var toolCallFormat: ToolCallFormat? { .xmlFunction }
+
+    /// `<think>` tags toggled by `enable_thinking` (default on). With thinking off
+    /// the template prefills an empty `<think></think>`. A tool call can also end
+    /// the thinking block.
+    public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.tagged }
 }

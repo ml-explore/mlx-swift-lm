@@ -187,8 +187,31 @@ final class LFM3Tests: XCTestCase {
         XCTAssertTrue(model is LFM3Model)
     }
 
-    func testDeclaresAlwaysOnThinking() throws {
-        XCTAssertEqual(LFM3Model(try tinyConfiguration()).reasoningConfig, .alwaysOnThinking)
+    func testDeclaresChatConventions() throws {
+        let model = LFM3Model(try tinyConfiguration())
+        XCTAssertEqual(model.toolCallFormat, .xmlFunction)
+        let config = try XCTUnwrap(model.reasoningConfig)
+        XCTAssertEqual(config, QwenReasoningProtocol.tagged)
+        XCTAssertEqual(config.implicitEndDelimiters, ["<tool_call>"])
+        XCTAssertNil(config.budgetTransition)
+    }
+
+    /// The template opens `<think>` when thinking is on and prefills an empty
+    /// `<think></think>` when it is off.
+    func testEnableThinkingControlsGenerationPrompt() throws {
+        let config = try XCTUnwrap(LFM3Model(try tinyConfiguration()).reasoningConfig)
+
+        let off = try XCTUnwrap(config.promptStrategy.additionalContext(forThinkingEnabled: false))
+        XCTAssertEqual(off["enable_thinking"] as? Bool, false)
+        let unset = try XCTUnwrap(config.promptStrategy.additionalContext(forThinkingEnabled: nil))
+        XCTAssertEqual(unset["enable_thinking"] as? Bool, true)
+
+        XCTAssertTrue(
+            ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail: "<|im_start|>assistant\n<think>", config: config))
+        XCTAssertFalse(
+            ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail: "<|im_start|>assistant\n<think></think>", config: config))
     }
 
     // MARK: - Model
