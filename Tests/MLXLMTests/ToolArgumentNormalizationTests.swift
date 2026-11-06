@@ -167,4 +167,19 @@ struct ToolArgumentNormalizationTests {
         #expect(tryParsePythonLiteral("['SF',") == nil)
         #expect(tryParsePythonLiteral("[f()]") == nil)
     }
+
+    @Test("Python string escapes decode as Python does")
+    func pythonStringEscapes() {
+        for (literal, value) in [
+            (#"'\x41\101\0'"#, "AA\0"),
+            (#"'\a\v'"#, "\u{7}\u{b}"),
+            ("'line\\\nnext'", "linenext"),
+            (#"'\ud83d\ude00'"#, "\u{1F600}"),
+            (#"'\d'"#, #"\d"#),
+        ] {
+            #expect(tryParsePythonLiteral(literal) as? String == value)
+        }
+        #expect(tryParsePythonLiteral(#"'\ud83d'"#) == nil)
+        #expect(tryParsePythonLiteral(#"'\x4'"#) == nil)
+    }
 }
