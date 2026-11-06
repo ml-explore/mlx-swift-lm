@@ -78,6 +78,35 @@ change, a session with a structured transcript rebuilds automatically on the
 next response. A restored raw cache has no transcript to replay and rejects an
 incompatible request; clear it or create a new session.
 
+## Planning cache memory
+
+``ModelContainer/estimator(parameters:)`` estimates what generation will need
+before it starts. Its ``GenerationEstimator/cache`` follows the model's layer
+types, sliding windows, recurrent state, the requested capacity and rewind
+reserve, and the compression strategy:
+
+```swift
+let estimator = try await container.estimator(parameters: parameters)
+let bytes = estimator.cache.bytes(tokens: 32_768)
+let maxTokens = estimator.cache.maxTokens(fittingIn: budgetBytes)
+```
+
+``KVCacheStatus/memoryBytes`` is the measured counterpart: the bytes a cache
+holds now. Each ``GenerationEstimator/Cache/Layer`` has its bytes per token,
+fixed bytes, and capacity. Combine layers from several models, such as a target
+and its drafter, with ``GenerationEstimator/Cache/init(layers:)``.
+
+Its ``GenerationEstimator/decode`` reports what one decoded token reads: the
+model's weights and the cache it attends to. The weights belong to the model, so
+pass the bytes they contribute to a token:
+
+```swift
+let perToken = estimator.decode.bytes(tokens: 32_768, weightBytes: weightBytes)
+```
+
+The memory bandwidth of the machine divided by that number projects a decode
+speed.
+
 ## Reusing divergent prefixes
 
 Rotating caches normally discard history beyond their attention window. To reuse

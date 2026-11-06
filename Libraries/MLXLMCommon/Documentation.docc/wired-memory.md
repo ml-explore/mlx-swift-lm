@@ -126,8 +126,18 @@ memory.
 ## Estimating KV cache and attention workspace
 
 Inference tickets are typically driven by **KV cache** (persistent) plus **prefill workspace**
-(transient). Dense models are straightforward; MoE and hybrid models (like Qwen3-Next with
-full-attention + linear/SSM layers) need a layer-by-layer sum using config values.
+(transient). The cache is the model's own: `container.estimator(parameters:)` measures what the
+model's caches will hold, layer by layer, so the ticket can follow sliding windows, recurrent
+state, and cache quantization instead of a hand-written formula.
+
+```swift
+let estimator = try await container.estimator(parameters: parameters)
+let kvBytes = estimator.cache.bytes(tokens: contextLength)
+```
+
+Dense, hybrid, and mixture-of-experts models need different sums per layer, which is what the
+estimator accounts for. The formulas below remain useful to size the transient part, and to
+cross-check an estimate.
 
 ### Dense full-attention KV cache
 
