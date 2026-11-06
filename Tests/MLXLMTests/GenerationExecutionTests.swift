@@ -292,6 +292,7 @@ final class GenerationExecutionTests: XCTestCase {
         for await event in stream {
             switch event {
             case .info(let info): completion = info
+            case .steering: XCTFail("Unexpected steering event")
             case .chunk, .reasoning, .toolCall, .rejectedToolCall: break
             }
         }
