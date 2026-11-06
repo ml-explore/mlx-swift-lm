@@ -90,10 +90,9 @@ private final class RowOffsetCache: KVCacheSimple, BatchPositionedKVCache {
     override func makeMask(
         n: Int, windowSize: Int?, returnArray: Bool
     ) -> MLXFast.ScaledDotProductAttentionMaskMode {
-        let causal = createCausalMask(n: n, offset: offset, windowSize: windowSize)
-        let positions = MLXArray(Int32(0) ..< Int32(offset + n))
-        let padding = MLXArray(leftPadding)[0..., .newAxis, .newAxis, .newAxis]
-        return .array(causal & (positions .>= padding))
+        .array(
+            createCausalMask(
+                n: n, offset: offset, windowSize: windowSize, leftPadding: MLXArray(leftPadding)))
     }
 }
 
