@@ -156,6 +156,13 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
 
     public override var isTrimmable: Bool { true }
 
+    public override func isTrimmable(after positions: Int) -> Bool {
+        // A round can discard its whole write only after every row has consumed its padding.
+        positions >= 0
+            && (positions == 0
+                || (!self.positions.isEmpty && self.positions.allSatisfy { $0 >= 0 }))
+    }
+
     /// No row can lose more tokens than the shortest row holds.
     public override var maxTrimCount: Int {
         let shortest = Int(positions.min() ?? 0)
