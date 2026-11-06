@@ -186,6 +186,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     ) throws {
         try drafter.validateCompatibility(with: mainModel)
 
+        guard !mainModel.capabilities.contains(.blockDiffusion) else {
+            throw GenerateError.unsupportedSpeculativeDecoding(
+                String(describing: type(of: mainModel)))
+        }
+
         guard blockSize >= 2 else {
             throw KVCacheError(
                 message:
