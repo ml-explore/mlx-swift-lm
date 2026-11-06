@@ -178,6 +178,277 @@ struct VLMRowPositionTests {
             try expectRowsMatchSingles(model, inputs: inputs, positions: [6, 3])
         }
     }
+
+    @Test("Gemma 4 positions each row, also on its KV-shared layers")
+    func gemma4() throws {
+        try expectTextRows(seed: 503) {
+            Gemma4(
+                try JSONDecoder().decode(
+                    Gemma4Configuration.self,
+                    from: Data(
+                        """
+                        {
+                          "text_config": {
+                            "hidden_size": 64, "num_hidden_layers": 4, "intermediate_size": 128,
+                            "num_attention_heads": 2, "num_key_value_heads": 1,
+                            "head_dim": 16, "global_head_dim": 32,
+                            "vocab_size": 64, "vocab_size_per_layer_input": 64,
+                            "num_kv_shared_layers": 2, "hidden_size_per_layer_input": 8,
+                            "sliding_window": 64, "sliding_window_pattern": 2,
+                            "max_position_embeddings": 512
+                          },
+                          "vision_config": {
+                            "num_hidden_layers": 1, "hidden_size": 16, "intermediate_size": 32,
+                            "num_attention_heads": 2, "head_dim": 8, "position_embedding_size": 64
+                          }
+                        }
+                        """.utf8)))
+        }
+    }
+
+    @Test("Idefics3 positions each row of a batch at its own offset")
+    func idefics3() throws {
+        try expectTextRows(seed: 504) {
+            Idefics3(
+                try JSONDecoder().decode(
+                    Idefics3Configuration.self,
+                    from: Data(
+                        """
+                        {
+                          "model_type": "idefics3", "vocab_size": 64, "image_token_id": 63,
+                          "scale_factor": 2,
+                          "text_config": {
+                            "model_type": "llama", "hidden_size": 32, "num_hidden_layers": 2,
+                            "intermediate_size": 64, "num_attention_heads": 4,
+                            "num_key_value_heads": 2, "rms_norm_eps": 1e-5, "vocab_size": 64,
+                            "rope_theta": 10000.0
+                          },
+                          "vision_config": {
+                            "model_type": "idefics3_vision", "hidden_size": 16,
+                            "num_hidden_layers": 1, "intermediate_size": 32,
+                            "num_attention_heads": 2, "patch_size": 4, "image_size": 16
+                          }
+                        }
+                        """.utf8)))
+        }
+    }
+
+    @Test("LFM2-VL positions each row of a batch at its own offset")
+    func lfm2VL() throws {
+        try expectTextRows(seed: 505) {
+            LFM2VL(
+                try JSONDecoder().decode(
+                    LFM2VLConfiguration.self,
+                    from: Data(
+                        """
+                        {
+                          "model_type": "lfm2_vl", "image_token_id": 63,
+                          "downsample_factor": 2, "projector_hidden_size": 16,
+                          "projector_use_layernorm": false,
+                          "text_config": {
+                            "model_type": "lfm2", "vocab_size": 64, "hidden_size": 32,
+                            "num_hidden_layers": 2, "num_attention_heads": 4,
+                            "num_key_value_heads": 2, "intermediate_size": 64, "block_dim": 32,
+                            "block_multiple_of": 8, "block_auto_adjust_ff_dim": false,
+                            "layer_types": ["full_attention", "full_attention"]
+                          },
+                          "vision_config": {
+                            "model_type": "siglip2_vision_model", "hidden_size": 16,
+                            "intermediate_size": 32, "num_hidden_layers": 1,
+                            "num_attention_heads": 2, "num_channels": 3,
+                            "num_patches": 16, "patch_size": 2, "layer_norm_eps": 1e-6
+                          }
+                        }
+                        """.utf8)))
+        }
+    }
+
+    @Test("Mistral 3 positions and Llama 4-scales each row of a batch at its own offset")
+    func mistral3() throws {
+        try expectTextRows(seed: 506) {
+            Mistral3VLM(
+                try JSONDecoder().decode(
+                    Mistral3VLMConfiguration.self,
+                    from: Data(
+                        """
+                        {
+                          "model_type": "mistral3", "image_token_index": 63,
+                          "spatial_merge_size": 1, "vision_feature_layer": -1,
+                          "text_config": {
+                            "model_type": "mistral", "hidden_size": 32, "num_hidden_layers": 2,
+                            "intermediate_size": 64, "num_attention_heads": 2,
+                            "num_key_value_heads": 1, "head_dim": 16, "rms_norm_eps": 1e-5,
+                            "vocab_size": 64, "max_position_embeddings": 512,
+                            "rope_parameters": {
+                              "rope_theta": 10000.0, "llama_4_scaling_beta": 0.5,
+                              "original_max_position_embeddings": 4
+                            }
+                          },
+                          "vision_config": {
+                            "model_type": "pixtral", "hidden_size": 32, "num_hidden_layers": 1,
+                            "num_attention_heads": 2, "intermediate_size": 64,
+                            "patch_size": 8, "image_size": 32
+                          }
+                        }
+                        """.utf8)))
+        }
+    }
+
+    @Test("MuseGlimmer positions each row of a batch at its own offset")
+    func museGlimmer() throws {
+        // The tiny model's window is eight: these rows stay inside it while they decode.
+        try expectTextRows(seed: 507, prompts: [[1, 2], [1, 2, 3, 4, 5]]) {
+            try MuseGlimmerForwardTests.model()
+        }
+    }
+
+    @Test("Pixtral positions each row of a batch at its own offset")
+    func pixtral() throws {
+        try expectTextRows(seed: 508) {
+            PixtralVLM(
+                try JSONDecoder().decode(
+                    PixtralConfiguration.self,
+                    from: Data(
+                        """
+                        {
+                          "model_type": "pixtral", "vocab_size": 64, "image_token_index": 63,
+                          "text_config": {
+                            "model_type": "mistral", "hidden_size": 32, "num_hidden_layers": 2,
+                            "intermediate_size": 64, "num_attention_heads": 4,
+                            "num_key_value_heads": 2, "head_dim": 8, "rms_norm_eps": 1e-5,
+                            "vocab_size": 64, "rope_theta": 10000.0, "use_qk_norm": true
+                          },
+                          "vision_config": {
+                            "model_type": "pixtral", "hidden_size": 16, "num_hidden_layers": 1,
+                            "num_attention_heads": 2, "intermediate_size": 32,
+                            "patch_size": 4, "image_size": 8
+                          }
+                        }
+                        """.utf8)))
+        }
+    }
+
+    @Test(
+        "Qwen 2 and 2.5 VL position each text row of a batch at its own offset",
+        arguments: QwenVLTextFamily.allCases)
+    func qwenVL(family: QwenVLTextFamily) throws {
+        try Device.withDefaultDevice(.cpu) {
+            try expectTextRowsMatchSingles(try tinyQwenVLText(family))
+        }
+    }
+}
+
+/// Text models whose Llama 4 query scaling follows each row's position.
+@Suite(.serialized)
+struct LLMRowPositionTests {
+
+    /// Positions 3 and 9 fall in different Llama 4 scaling buckets of four positions.
+    private static let llama4Scaling = """
+        "rope_parameters": {
+          "rope_theta": 10000.0, "llama_4_scaling_beta": 0.5,
+          "original_max_position_embeddings": 4
+        }
+        """
+
+    @Test("Mistral 3 text Llama 4-scales each row of a batch at its own position")
+    func mistral3Text() throws {
+        try expectTextRows(seed: 509) {
+            Mistral3TextModel(
+                try JSONDecoder().decode(
+                    Mistral3TextConfiguration.self,
+                    from: Data(
+                        """
+                        {
+                          "model_type": "ministral3", "hidden_size": 16, "num_hidden_layers": 2,
+                          "intermediate_size": 32, "num_attention_heads": 2, "rms_norm_eps": 1e-6,
+                          "vocab_size": 32, "num_key_value_heads": 1, "head_dim": 8,
+                          "tie_word_embeddings": true,
+                          "layer_types": ["full_attention", "full_attention"],
+                          \(Self.llama4Scaling)
+                        }
+                        """.utf8)))
+        }
+    }
+
+    @Test("Nemotron Labs Diffusion Llama 4-scales each row of a batch at its own position")
+    func nemotronLabsDiffusion() throws {
+        try expectTextRows(seed: 510) {
+            NemotronLabsDiffusionModel(
+                try JSONDecoder().decode(
+                    NemotronLabsDiffusionConfiguration.self,
+                    from: Data(
+                        """
+                        {
+                          "hidden_size": 16, "num_hidden_layers": 2, "intermediate_size": 32,
+                          "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 8,
+                          "rms_norm_eps": 1e-6, "vocab_size": 32,
+                          \(Self.llama4Scaling)
+                        }
+                        """.utf8)))
+        }
+    }
+}
+
+/// Builds a seeded tiny model on the CPU and checks its text rows decoded as one batch.
+private func expectTextRows(
+    seed: UInt64, prompts: [[Int32]] = [[1, 2, 3], [1, 2, 3, 4, 5, 6, 7, 8, 9]],
+    _ makeModel: () throws -> any LanguageModel
+) throws {
+    try Device.withDefaultDevice(.cpu) {
+        let model = try withRandomState(MLXRandom.RandomState(seed: seed)) {
+            let model = try makeModel()
+            eval(model)
+            return model
+        }
+        try expectTextRowsMatchSingles(model, prompts: prompts)
+    }
+}
+
+enum QwenVLTextFamily: String, CaseIterable, Sendable {
+    case qwen2 = "qwen2_vl"
+    case qwen25 = "qwen2_5_vl"
+}
+
+func tinyQwenVLText(_ family: QwenVLTextFamily) throws -> any LanguageModel {
+    var configuration: [String: Any] = [
+        "model_type": family.rawValue, "hidden_size": 64, "num_hidden_layers": 2,
+        "intermediate_size": 128, "num_attention_heads": 4, "num_key_value_heads": 2,
+        "rms_norm_eps": 1e-6, "vocab_size": 64, "max_position_embeddings": 4096,
+        "rope_theta": 1000000.0, "rope_traditional": false, "tie_word_embeddings": false,
+        "image_token_id": 60, "video_token_id": 61, "vision_start_token_id": 62,
+        "vision_end_token_id": 63, "vision_token_id": 59,
+        "rope_scaling": ["type": "mrope", "mrope_section": [2, 3, 3]],
+    ]
+    if family == .qwen2 {
+        configuration["vision_config"] = [
+            "depth": 1, "embed_dim": 32, "hidden_size": 64, "num_heads": 2,
+            "patch_size": 16, "mlp_ratio": 2.0, "spatial_patch_size": 16,
+            "spatial_merge_size": 2, "temporal_patch_size": 2, "in_channels": 3,
+        ]
+    } else {
+        configuration["sliding_window"] = 32768
+        configuration["use_sliding_window"] = false
+        configuration["max_window_layers"] = 2
+        configuration["vision_config"] = [
+            "depth": 1, "hidden_size": 32, "intermediate_size": 64, "out_hidden_size": 64,
+            "num_heads": 2, "patch_size": 16, "spatial_patch_size": 16,
+            "spatial_merge_size": 2, "temporal_patch_size": 2, "window_size": 64,
+            "fullatt_block_indexes": [0], "tokens_per_second": 2, "in_chans": 3,
+        ]
+    }
+    let data = try JSONSerialization.data(withJSONObject: configuration)
+    let model: any LanguageModel
+    switch family {
+    case .qwen2:
+        let config = try JSONDecoder().decode(Qwen2VLConfiguration.self, from: data)
+        model = withRandomState(MLXRandom.RandomState(seed: 917)) { Qwen2VL(config) }
+    case .qwen25:
+        let config = try JSONDecoder().decode(Qwen25VLConfiguration.self, from: data)
+        model = withRandomState(MLXRandom.RandomState(seed: 918)) { Qwen25VL(config) }
+    }
+    model.train(false)
+    eval(model)
+    return model
 }
 
 /// Prefills each input alone, joins the caches as one batch and decodes three tokens,
@@ -195,7 +466,30 @@ private func expectRowsMatchSingles(
         return cache
     }
 
-    let singles = try inputs.map(prefill)
+    try expectBatchDecodeMatchesSingles(
+        model, singles: try inputs.map(prefill), positions: positions)
+}
+
+/// Prefills each prompt alone through the model's forward pass, then decodes the rows as one
+/// batch as `expectRowsMatchSingles` does.
+private func expectTextRowsMatchSingles(
+    _ model: any LanguageModel,
+    prompts: [[Int32]] = [[1, 2, 3], [1, 2, 3, 4, 5, 6, 7, 8, 9]]
+) throws {
+    let singles = try prompts.map { prompt in
+        let cache = try model.newCache(parameters: nil)
+        eval(forward(model, MLXArray(prompt).reshaped([1, prompt.count]), cache: cache))
+        eval(cache)
+        return cache
+    }
+    try expectBatchDecodeMatchesSingles(model, singles: singles, positions: prompts.map(\.count))
+}
+
+/// Joins prefilled single-row caches as one batch and decodes three tokens, comparing every
+/// row's logits with the same sequence continued alone.
+private func expectBatchDecodeMatchesSingles(
+    _ model: any LanguageModel, singles: [[any KVCache]], positions: [Int]
+) throws {
     #expect(singles.map { $0[0].offset } == positions)
     let batch = singles[0].indices.map { layer in
         RowOffsetCache(rows: singles.map { $0[layer] }) as KVCache
@@ -204,14 +498,21 @@ private func expectRowsMatchSingles(
 
     for step in 0 ..< 3 {
         let token = Int32(4 + step)
-        let output = model(MLXArray([token, token]).reshaped([2, 1]), cache: batch)
+        let output = forward(model, MLXArray([token, token]).reshaped([2, 1]), cache: batch)
         for row in 0 ..< 2 {
-            let expected = model(MLXArray([token]).reshaped([1, 1]), cache: singles[row])
+            let expected = forward(model, MLXArray([token]).reshaped([1, 1]), cache: singles[row])
             #expect(
                 maxAbsDifference(output[row ..< row + 1], expected) < 1e-4,
                 "row \(row), step \(step)")
         }
     }
+}
+
+/// The logits of a stateless text step, through the entry point every model implements.
+private func forward(_ model: any LanguageModel, _ tokens: MLXArray, cache: [any KVCache])
+    -> MLXArray
+{
+    model.nextTokenLogits(.init(tokens: tokens), cache: cache, state: nil).logits
 }
 
 func maxAbsDifference(_ lhs: MLXArray, _ rhs: MLXArray) -> Float {
