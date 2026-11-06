@@ -94,6 +94,32 @@ struct BatchTokenIteratorTests {
         }
     }
 
+    @Test("A row with a longer recurrent prefix joining a running batch moves its offset")
+    func recurrentAdmissionIntoRunningBatch() throws {
+        try Device.withDefaultDevice(.cpu) {
+            func prefix(_ offset: Int) -> ArraysCache {
+                let cache = ArraysCache(size: 2)
+                cache.offset = offset
+                cache[0] = MLXArray([Float(offset)]).reshaped([1, 1])
+                return cache
+            }
+            let model = BatchLegacyOffsetModel()
+            var iterator = BatchTokenIterator(model: model, maxTokens: 4)
+            let running = iterator.insert(prompts: [[1]], caches: [[prefix(3)]])
+            let first = try iterator.next()
+            let joining = iterator.insert(prompts: [[2]], caches: [[prefix(7)]])
+            let second = try iterator.next()
+            let third = try iterator.next()
+
+            #expect(first.map(\.uid) == running)
+            #expect(second.map(\.uid) == running + joining)
+            #expect(second.map(\.token) == [3, 0])
+            #expect(third.map(\.token) == [7, 7])
+            // The batch decodes at the longest row's offset once the longer row joins.
+            #expect(model.decodeOffsets == [3, 7, 7])
+        }
+    }
+
     @Test(
         "Incompatible admission preserves active caches, queued uids and the seeded stream",
         arguments: CacheAdmissionMismatch.allCases)
