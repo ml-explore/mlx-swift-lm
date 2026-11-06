@@ -246,12 +246,27 @@ public enum Qwen35Language {
     final class RotaryEmbedding {
         private let invFreq: MLXArray
         private let mropeIndices: MLXArray
+        let attentionScaling: Float
 
-        init(dim: Int, base: Float, mropeSection: [Int]) {
+        init(
+            dim: Int, base: Float, mropeSection: [Int],
+            ropeParameters: [String: StringOrNumber]? = nil, maxPositionEmbeddings: Int = 131_072
+        ) {
             let safeDim = max(1, dim)
             var freq = MLXArray(stride(from: 0, to: safeDim, by: 2)).asType(.float32)
             freq = freq / Float(safeDim)
-            self.invFreq = 1.0 / pow(MLXArray(base), freq)
+
+            let ropeType = ropeParameters?["type"] ?? ropeParameters?["rope_type"]
+            if let ropeParameters, case .string("yarn") = ropeType {
+                let yarn = Qwen35Language.yarnParameters(
+                    dim: safeDim, base: base, maxPositionEmbeddings: maxPositionEmbeddings,
+                    ropeParameters)
+                self.invFreq = MLXArray(yarn.invFreq)
+                self.attentionScaling = yarn.attentionFactor
+            } else {
+                self.invFreq = 1.0 / pow(MLXArray(base), freq)
+                self.attentionScaling = 1
+            }
 
             let sections = mropeSection.count >= 3 ? mropeSection : [11, 11, 10]
             var indices = [Int32](repeating: 0, count: freq.dim(0))
@@ -283,8 +298,69 @@ public enum Qwen35Language {
             freqs = applyInterleavedMRope(freqs)
 
             let emb = concatenated([freqs, freqs], axis: -1)
-            return (cos(emb).asType(x.dtype), sin(emb).asType(x.dtype))
+            var cosEmb = cos(emb)
+            var sinEmb = sin(emb)
+            // YaRN scales only the rotary slice of q and k, as in HF.
+            if attentionScaling != 1 {
+                cosEmb = cosEmb * attentionScaling
+                sinEmb = sinEmb * attentionScaling
+            }
+            return (cosEmb.asType(x.dtype), sinEmb.asType(x.dtype))
         }
+    }
+
+    /// HF `_compute_yarn_parameters`: blended inverse frequencies and the attention factor.
+    static func yarnParameters(
+        dim: Int, base: Float, maxPositionEmbeddings: Int,
+        _ ropeParameters: [String: StringOrNumber]
+    ) -> (invFreq: [Float], attentionFactor: Float) {
+        let base = Double(base)
+        let factor = Double(ropeParameters["factor"]?.asFloat() ?? 1)
+        let originalMax = Double(
+            ropeParameters["original_max_position_embeddings"]?.asFloat()
+                ?? Float(maxPositionEmbeddings))
+        let betaFast = Double(ropeParameters["beta_fast"]?.asFloat() ?? 32)
+        let betaSlow = Double(ropeParameters["beta_slow"]?.asFloat() ?? 1)
+
+        func mscale(_ scale: Double, _ mscale: Double = 1) -> Double {
+            scale <= 1 ? 1 : 0.1 * mscale * Foundation.log(scale) + 1
+        }
+
+        let attentionFactor: Double
+        if let value = ropeParameters["attention_factor"]?.asFloat() {
+            attentionFactor = Double(value)
+        } else if let m = ropeParameters["mscale"]?.asFloat(),
+            let mAll = ropeParameters["mscale_all_dim"]?.asFloat(), m != 0, mAll != 0
+        {
+            attentionFactor = mscale(factor, Double(m)) / mscale(factor, Double(mAll))
+        } else {
+            attentionFactor = mscale(factor)
+        }
+
+        func correctionDim(_ rotations: Double) -> Double {
+            Double(dim) * Foundation.log(originalMax / (rotations * 2 * .pi))
+                / (2 * Foundation.log(base))
+        }
+        var low = correctionDim(betaFast)
+        var high = correctionDim(betaSlow)
+        if case .bool(false) = ropeParameters["truncate"] {
+            // HF keeps the fractional correction range when truncate is false.
+        } else {
+            low = low.rounded(.down)
+            high = high.rounded(.up)
+        }
+        low = max(low, 0)
+        high = min(high, Double(dim - 1))
+        if low == high { high += 0.001 }
+
+        let invFreq = (0 ..< dim / 2).map { i -> Float in
+            let posFreq = Foundation.pow(base, Double(2 * i) / Double(dim))
+            let ramp = min(max((Double(i) - low) / (high - low), 0), 1)
+            let extrapolation = 1 - ramp
+            return Float(
+                (1 / (factor * posFreq)) * (1 - extrapolation) + (1 / posFreq) * extrapolation)
+        }
+        return (invFreq, Float(attentionFactor))
     }
 
     static func applyMultimodalRotaryPosEmb(
@@ -379,7 +455,9 @@ public enum Qwen35Language {
             let mrope = args.ropeParameters?["mrope_section"]?.asInts() ?? [11, 11, 10]
             let rotaryDim = Int(Float(headDim) * args.partialRotaryFactor)
             self.rotaryEmbedding = RotaryEmbedding(
-                dim: rotaryDim, base: args.ropeTheta, mropeSection: mrope)
+                dim: rotaryDim, base: args.ropeTheta, mropeSection: mrope,
+                ropeParameters: args.ropeParameters,
+                maxPositionEmbeddings: args.maxPositionEmbeddings)
             super.init()
         }
 
