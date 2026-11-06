@@ -16,7 +16,7 @@ public class LFM3Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
 
-    package let model: LFM3ModelInner
+    public let model: LFM3ModelInner
     let configuration: LFM3Configuration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
@@ -101,20 +101,6 @@ public class LFM3Model: Module, LLMModel, KVCacheDimensionProvider {
     }
 }
 
-private enum LFM3TokenizerError: LocalizedError {
-    case incompatible
-
-    var errorDescription: String? {
-        "LFM3 requires a tokenizer that honors BPE ignore_merges and splits regexes by code point. "
-            + "Use a tokenizer containing swift-transformers fixes #397 and #398, or a compatible TokenizerLoader."
-    }
-}
-
-extension LFM3Model {
-    public var toolCallFormat: ToolCallFormat? { .xmlFunction }
-    public var reasoningConfig: ReasoningConfig? { .thinkTagsWithEnableThinking }
-}
-
 extension LFM3Model: HiddenStateLanguageModel {
     /// Final normed hidden states `[B, L, hidden]` for token ids `[B, L]`.
     package func hiddenStates(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
@@ -130,5 +116,26 @@ extension LFM3Model: HiddenStateLanguageModel {
 extension LFM3Model: LoRAModel {
     public var loraLayers: [Module] {
         model.layers
+    }
+}
+
+// MARK: - Chat conventions
+
+extension LFM3Model {
+    /// LFM3's template writes calls as `<tool_call><function=name><parameter=key>`.
+    public var toolCallFormat: ToolCallFormat? { .xmlFunction }
+
+    /// `<think>` tags toggled by `enable_thinking` (default on). With thinking off
+    /// the template prefills an empty `<think></think>`. A tool call can also end
+    /// the thinking block.
+    public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.tagged }
+}
+
+private enum LFM3TokenizerError: LocalizedError {
+    case incompatible
+
+    var errorDescription: String? {
+        "LFM3 requires a tokenizer that honors BPE ignore_merges and splits regexes by code point. "
+            + "Use a tokenizer containing swift-transformers fixes #397 and #398, or a compatible TokenizerLoader."
     }
 }

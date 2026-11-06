@@ -88,6 +88,7 @@ public struct LFM3Configuration: Codable, Sendable {
         case ropeParameters = "rope_parameters"
     }
 
+    /// The reference reads the LFM2 spelling `tie_embedding` before `tie_word_embeddings`.
     private enum AltCodingKeys: String, CodingKey {
         case tieEmbedding = "tie_embedding"
     }
@@ -408,10 +409,9 @@ package class LFM3DecoderLayer: Module {
 ///
 /// A `nil` entry uses the default: causal for full attention, and causal within the
 /// sliding window for sliding attention, both sized by the first cache of that type.
-/// To disable masking, spell out `MLXFast.ScaledDotProductAttentionMaskMode.none`;
-/// a bare `.none` means `nil` and keeps the default.
-/// Build cached sliding array masks with `makeAttentionMask(n:cache:windowSize:returnArray:)`
-/// so their key dimension matches the truncated cache.
+/// For no mask, write `MLXFast.ScaledDotProductAttentionMaskMode.none`: a bare `.none` is `nil`.
+/// An `.array` mask must match the keys the cache returns. A sliding cache drops keys outside
+/// the window, so build that mask with `makeAttentionMask(n:cache:windowSize:returnArray:)`.
 package struct LFM3AttentionMasks {
     package var fullAttention: MLXFast.ScaledDotProductAttentionMaskMode?
     package var slidingAttention: MLXFast.ScaledDotProductAttentionMaskMode?
@@ -429,7 +429,7 @@ package struct LFM3AttentionMasks {
 ///
 /// The caller owns the caches, one per layer from `newCache(parameters:)`. Positions come
 /// from the caches, so a sequence can be fed in chunks of token ids or embeddings.
-package class LFM3ModelInner: Module {
+public class LFM3ModelInner: Module {
     let args: LFM3Configuration
     let firstFullAttentionIdx: Int?
     let firstSlidingAttentionIdx: Int?

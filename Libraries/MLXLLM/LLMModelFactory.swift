@@ -475,11 +475,6 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         toolCallFormat: .lfm2
     )
 
-    static public let lfm3_1_7b_4bit = ModelConfiguration(
-        id: "LiquidAI/LFM3-1.7B-MLX-4bit",
-        defaultPrompt: "Why is the sky blue?"
-    )
-
     /// Official LiquidAI LFM2.5 reasoning model. LiquidAI publishes all
     /// precision variants in one repository, so this scopes resolution to the
     /// recommended 4-bit MLX checkpoint instead of downloading every variant.
@@ -520,6 +515,11 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         reasoningConfig: .alwaysOnThinking,
         generationConfig: .init(
             temperature: 0.2, topK: 80, repetitionPenalty: 1.05)
+    )
+
+    static public let lfm3_1_7b_4bit = ModelConfiguration(
+        id: "LiquidAI/LFM3-1.7B-MLX-4bit",
+        defaultPrompt: "Why is the sky blue?"
     )
 
     static public let exaone_4_0_1_2b_4bit = ModelConfiguration(
@@ -639,10 +639,10 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             smollm3_3b_4bit,
             ernie_45_0_3BPT_bf16_ft,
             lfm2_1_2b_4bit,
-            lfm3_1_7b_4bit,
             lfm25_2_6b_4bit,
             lfm25_8b_a1b_4bit,
             lfm25_8b_a1b_8bit,
+            lfm3_1_7b_4bit,
             baichuan_m1_14b_instruct_4bit,
             exaone_4_0_1_2b_4bit,
             lille_130m_bf16,

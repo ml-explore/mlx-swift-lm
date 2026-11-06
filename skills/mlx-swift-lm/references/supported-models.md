@@ -100,7 +100,7 @@ LLMRegistry.mellum2_1_12b_a2_5b_thinking_6bit  // mlx-community/Mellum2.1-12B-A2
 | `smollm3` | SmolLM 3 |
 | `ernie4_5` | ERNIE 4.5 |
 | `lfm2`, `lfm2_moe` | LFM 2 |
-| `lfm3` | LFM 3 text backbone (no vision, audio, or Omni wrapper) |
+| `lfm3` | LFM 3 |
 | `exaone4` | EXAONE 4 |
 | `olmo2`, `olmo3`, `olmoe` | OLMo |
 | `falcon_h1` | Falcon H1 |
@@ -126,19 +126,6 @@ using that release or another compatible implementation. The model rejects known
 incompatible tokenization through the generic `LLMModel.validate(tokenizer:)` hook
 at load time. The core package does not depend on Swift Transformers.
 
-The official text checkpoint uses XML function calls (`.xmlFunction`), with
-`<tool_call>` and `<function=...>` framing. It does not use the LFM2 format.
-Reasoning uses `.thinkTagsWithEnableThinking`, matching the official template's
-`enable_thinking` flag and default-on behavior. LiquidAI documents that disabling
-thinking traces can be inconsistent, especially on reasoning-heavy tasks; see the
-[model card](https://huggingface.co/LiquidAI/LFM3-1.7B#inference).
-
-The decoder also honors the reference's `tie_embedding` alias, which takes
-precedence over `tie_word_embeddings`. Backbone and hidden-state helpers stay
-inside the package. Ordinary generation uses `nextTokenLogits` to avoid projecting
-unused prompt rows when the quantized projection supports it; full forwards retain
-all positions.
-
 Unit tests generate deterministic weights in memory and compare every operator,
 layer, and logit against FP32 reference values embedded in Swift. Regenerate those
 values with `python tools/lfm3-reference.py`, which pins LiquidAI's source revision.
@@ -147,8 +134,8 @@ For a downloaded official 4-bit checkpoint, `tools/lfm3-checkpoint-reference.py`
 exports matching FP32 logits from the original Hugging Face implementation.
 `IntegrationTesting/IntegrationTestingTests/LFM3CheckpointTests.swift` reads
 `MLX_LFM3_CHECKPOINT` and `MLX_LFM3_REFERENCE_FILE`; set `MLX_ENABLE_TF32=0` in the
-test process for that parity check. The same integration class covers temporary
-mixed-precision checkpoints and factory rejection of incompatible tokenizers.
+test process for that parity check. The same integration class checks
+factory rejection of incompatible tokenizers.
 `MLX_LFM3_LONG_CONTEXT=1` enables the synthetic 4K/16K/32K cache tests.
 The integration project's tokenizer goldens are opt-in with
 `MLX_RUN_LFM3_TOKENIZER=1`; `MLX_LFM3_TOKENIZER_DIRECTORY` selects local tokenizer
