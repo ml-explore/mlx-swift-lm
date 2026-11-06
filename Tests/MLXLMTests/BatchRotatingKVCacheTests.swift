@@ -715,6 +715,23 @@ struct BatchRotatingKVCacheTests {
                 "requires matching maxSize, step and capacityOrigin"))
     }
 
+    @Test("extract refuses a row index past the batch")
+    func extractOutOfRange() async throws {
+        let result = try await #require(
+            processExitsWith: .failure, observing: [\.standardErrorContent]
+        ) {
+            Device.withDefaultDevice(.cpu) {
+                let cache = BatchRotatingKVCache(maxSize: 8, leftPadding: [0, 1])
+                let kv = MLXArray.ones([2, 1, 3, 1])
+                _ = cache.update(keys: kv, values: kv)
+                _ = cache.extract(2)
+            }
+        }
+        #expect(
+            String(decoding: result.standardErrorContent, as: UTF8.self).contains(
+                "BatchRotatingKVCache row index out of range"))
+    }
+
     @Test("A batched rotating cache cannot be saved as a prompt cache")
     func savePromptCacheRefuses() {
         let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [0, 1])
