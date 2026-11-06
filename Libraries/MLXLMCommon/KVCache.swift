@@ -1616,9 +1616,11 @@ public class ArraysCache: BaseKVCache {
     internal var leftPadding: MLXArray?
     internal var lengths: MLXArray?
     /// The rows an empty cache stands for when no array records them, as after a merge of
-    /// empty rows. mlx-lm records them as zero left padding; here padding takes precedence
-    /// over lengths in ``makeMask(N:)``, so it would hide the lengths of a later ragged
-    /// prefill.
+    /// empty rows. mlx-lm and mlx-vlm record them as zero left padding
+    /// (https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1301-L1304);
+    /// here, as in mlx-vlm's `make_mask` (#L1285-L1293), padding takes precedence over
+    /// lengths in ``makeMask(N:)``, so zero padding would hide the lengths of a later ragged
+    /// prefill. Kept in memory only; see ``metaState``.
     internal var emptyRowCount: Int?
 
     public init(size: Int, leftPadding: [Int]? = nil) {
@@ -1735,7 +1737,9 @@ public class ArraysCache: BaseKVCache {
     public func extend(other: ArraysCache) {
         let aBatch = batchSize
         let bBatch = other.batchSize
-        // Record rows even when neither side has arrays or masking metadata yet.
+        // Record rows even when neither side has arrays or masking metadata yet. A side
+        // without a slot's array gets zeros, as mlx-vlm's `cat` gives it:
+        // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1244-L1261
         emptyRowCount = aBatch + bBatch
 
         func concatenate(_ a: MLXArray?, _ b: MLXArray?) -> MLXArray? {
@@ -1814,8 +1818,12 @@ public class ArraysCache: BaseKVCache {
 
     // MARK: - Serialization
 
-    /// metaState format: [slotCount, presentSlots, leftPadding?, lengths?, emptyRowCount?]
+    /// metaState format: [slotCount, presentSlots, leftPadding?, lengths?]
     /// Legacy format (BaseKVCache default): [""]
+    ///
+    /// The row count is not saved: the state arrays, padding or lengths carry it. A batch of
+    /// several rows with none of them (its row count kept in memory only) is refused by
+    /// ``savePromptCache(url:cache:metadata:state:)``.
     public override var metaState: [String] {
         get {
             let leftPaddingState = Self.serializeMetadata(leftPadding)
@@ -1832,11 +1840,6 @@ public class ArraysCache: BaseKVCache {
             if let lengthsState {
                 result.append(lengthsState)
             }
-            if cache.allSatisfy({ $0 == nil }), leftPadding == nil, lengths == nil, batchSize != 1 {
-                // Keep absent mask fields empty: zero padding would hide prepared lengths.
-                while result.count < 4 { result.append("") }
-                result.append(String(batchSize))
-            }
             return result
         }
         set {
@@ -1848,16 +1851,9 @@ public class ArraysCache: BaseKVCache {
 
     /// Restore from saved metaState + state arrays. Handles both new (slot-aware) and legacy formats.
     internal func restoreFromMetaState(state: [MLXArray], savedMetaState: [String]) throws {
-        let savedRowCount: Int?
-        if savedMetaState.count >= 5 {
-            guard savedMetaState.count == 5, let count = Int(savedMetaState[4]), count > 0,
-                let slotCount = Int(savedMetaState[0]), slotCount >= 0
-            else {
-                throw KVCacheError(message: "Corrupt recurrent cache row-count metadata")
-            }
-            savedRowCount = count
-        } else {
-            savedRowCount = nil
+        // No format has more than four fields.
+        guard savedMetaState.count <= 4 else {
+            throw KVCacheError(message: "Unrecognized recurrent cache metadata")
         }
         // Detect new format: first element parses as int (slotCount), second element is present slots
         if savedMetaState.count >= 2, let slotCount = Int(savedMetaState[0]) {
@@ -1867,24 +1863,6 @@ public class ArraysCache: BaseKVCache {
             let presentSlots =
                 savedMetaState[1].isEmpty
                 ? [] : savedMetaState[1].split(separator: ",").compactMap { Int($0) }
-            if let savedRowCount {
-                func metadataMatchesRowCount(_ value: String) -> Bool {
-                    guard !value.isEmpty else { return true }
-                    let fields = value.split(separator: ",", omittingEmptySubsequences: false)
-                    return fields.count == savedRowCount && fields.allSatisfy { Int($0) != nil }
-                }
-                let slotFields = savedMetaState[1].split(
-                    separator: ",", omittingEmptySubsequences: false)
-                guard savedMetaState[1].isEmpty || presentSlots.count == slotFields.count,
-                    presentSlots.count == state.count,
-                    Set(presentSlots).count == presentSlots.count,
-                    presentSlots.allSatisfy({ $0 >= 0 && $0 < slotCount }),
-                    state.allSatisfy({ $0.ndim > 0 && $0.dim(0) == savedRowCount }),
-                    savedMetaState[2 ... 3].allSatisfy(metadataMatchesRowCount)
-                else {
-                    throw KVCacheError(message: "Corrupt recurrent cache row count or state layout")
-                }
-            }
 
             self.cache = Array(repeating: nil, count: slotCount)
             for (arrayIdx, slotIdx) in presentSlots.enumerated()
@@ -1893,7 +1871,6 @@ public class ArraysCache: BaseKVCache {
             }
             self.leftPadding = Self.metadataArray(savedMetaState, at: 2)
             self.lengths = Self.metadataArray(savedMetaState, at: 3)
-            self.emptyRowCount = savedRowCount
         } else {
             // Legacy: best-effort, state is compacted
             self.cache = state.map { $0 as MLXArray? }
@@ -2408,11 +2385,26 @@ public struct PromptCacheSnapshot {
     }
 }
 
-/// Whether `cache` is, or holds, a recurrent cache with zero rows.
-private func holdsZeroRows(_ cache: KVCache) -> Bool {
-    if let arrays = cache as? ArraysCache { return arrays.batchSize == 0 }
-    if let list = cache as? CacheList { return list.children.contains(where: holdsZeroRows) }
-    return false
+/// Why `cache`, or a recurrent cache inside it, cannot be saved: zero rows, or several rows
+/// that neither state arrays nor padding or lengths record (a merge of empty rows), so a
+/// load would restore one row. `nil` when it can be saved.
+private func unsaveableRecurrentRows(_ cache: KVCache) -> String? {
+    if let arrays = cache as? ArraysCache {
+        if arrays.batchSize == 0 {
+            // It holds arrays no input can continue from.
+            return "A cache filtered to zero rows cannot be saved"
+        }
+        if arrays.batchSize > 1, arrays.state.isEmpty, arrays.leftPadding == nil,
+            arrays.lengths == nil
+        {
+            return "A recurrent batch of several rows cannot be saved before it holds state"
+        }
+        return nil
+    }
+    if let list = cache as? CacheList {
+        return list.children.lazy.compactMap(unsaveableRecurrentRows).first
+    }
+    return nil
 }
 
 /// Save a pre-computed prompt cache to a file.
@@ -2432,9 +2424,8 @@ public func savePromptCache(
     guard stateArrays.isEmpty || !cache.isEmpty else {
         throw KVCacheError(message: "Model state requires at least one prompt cache")
     }
-    // A recurrent cache filtered to zero rows holds arrays no input can continue from.
-    guard !cache.contains(where: holdsZeroRows) else {
-        throw KVCacheError(message: "A cache filtered to zero rows cannot be saved")
+    if let reason = cache.lazy.compactMap(unsaveableRecurrentRows).first {
+        throw KVCacheError(message: reason)
     }
 
     let cacheClasses = try cache.map {

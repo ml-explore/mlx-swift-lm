@@ -1315,9 +1315,77 @@ struct BatchedHybridCacheTests {
     }
 
     @Test(
-        "Empty recurrent batches retain every row through save/load and later joins",
+        "Saving refuses only a recurrent batch whose rows nothing records, also in a list",
+        arguments: [false, true])
+    func unrecordedRecurrentRowsAreRefused(mamba: Bool) throws {
+        try Device.withDefaultDevice(.cpu) {
+            func row(leftPadding: [Int]? = nil) -> ArraysCache {
+                mamba
+                    ? MambaCache(leftPadding: leftPadding)
+                    : ArraysCache(size: 2, leftPadding: leftPadding)
+            }
+            func roundTrip(_ cache: KVCache) throws -> KVCache? {
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("recurrent-rows-\(UUID().uuidString).safetensors")
+                defer { try? FileManager.default.removeItem(at: url) }
+                try savePromptCache(url: url, cache: [cache])
+                return try loadPromptCache(url: url).0.first
+            }
+
+            // Two empty rows: no array, padding or length in the file would record the second.
+            let empty = ArraysCache.merge([row(), row()])
+            #expect(empty.batchSize == 2)
+            let holders: [KVCache] = [
+                empty, CacheList(KVCacheSimple(), empty), CacheList(CacheList(empty)),
+            ]
+            for cache in holders {
+                #expect(throws: KVCacheError.self) { _ = try roundTrip(cache) }
+            }
+
+            // Padding records the rows of a batch without state.
+            let padded = try #require(try roundTrip(row(leftPadding: [0, 1])) as? ArraysCache)
+            #expect(padded.batchSize == 2)
+            #expect(padded.leftPadding?.asArray(Int.self) == [0, 1])
+
+            // State arrays record the rows of a populated batch.
+            let populated = row()
+            populated[0] = MLXArray(0 ..< 8).asType(.float32).reshaped([2, 4])
+            let restored = try #require(try roundTrip(populated) as? ArraysCache)
+            #expect(type(of: restored) == type(of: populated))
+            #expect(restored.batchSize == 2)
+            #expect(restored[0]?.asArray(Float.self) == (0 ..< 8).map(Float.init))
+        }
+    }
+
+    @Test("A file with four-field recurrent metadata loads", arguments: [false, true])
+    func fourFieldRecurrentMetadataLoads(mamba: Bool) throws {
+        try Device.withDefaultDevice(.cpu) {
+            let cache: ArraysCache =
+                mamba
+                ? MambaCache(leftPadding: [1, 0]) : ArraysCache(size: 2, leftPadding: [1, 0])
+            cache[1] = MLXArray(0 ..< 8).asType(.float32).reshaped([2, 4])
+            cache.prepare(lengths: [2, 3])
+            // [slotCount, presentSlots, leftPadding, lengths], the format `main` writes.
+            #expect(cache.metaState == ["2", "1", "1,0", "2,3"])
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("four-field-\(UUID().uuidString).safetensors")
+            defer { try? FileManager.default.removeItem(at: url) }
+            try savePromptCache(url: url, cache: [cache])
+            let restored = try #require(try loadPromptCache(url: url).0.first as? ArraysCache)
+            #expect(type(of: restored) == type(of: cache))
+            #expect(restored.metaState == cache.metaState)
+            #expect(restored.batchSize == 2)
+            #expect(restored[0] == nil)
+            #expect(restored[1]?.asArray(Float.self) == (0 ..< 8).map(Float.init))
+            #expect(restored.leftPadding?.asArray(Int.self) == [1, 0])
+            #expect(restored.lengthsValues == [2, 3])
+        }
+    }
+
+    @Test(
+        "Empty recurrent batches keep every row through later joins, and refuse to save",
         arguments: [false, true], [2, 3])
-    func emptyBatchRowsSurvivePromptCacheRoundTrip(mamba: Bool, rowCount: Int) throws {
+    func emptyBatchRowsSurviveJoinsButNotSaving(mamba: Bool, rowCount: Int) throws {
         try Device.withDefaultDevice(.cpu) {
             func emptyRow() -> ArraysCache { mamba ? MambaCache() : ArraysCache(size: 2) }
             for finalized in [false, true] {
@@ -1326,33 +1394,34 @@ struct BatchedHybridCacheTests {
                     batch.prepare(lengths: Array(1 ... rowCount))
                     batch.finalize()
                 }
-                #expect(batch.metaState == ["2", "", "", "", String(rowCount)])
+                // No array, padding or length records the rows, so no file could restore them.
+                #expect(batch.metaState == ["2", ""])
                 let url = FileManager.default.temporaryDirectory
                     .appendingPathComponent("empty-batch-\(UUID().uuidString).safetensors")
                 defer { try? FileManager.default.removeItem(at: url) }
-                try savePromptCache(url: url, cache: [batch])
-                let loaded = try loadPromptCache(url: url)
-                let restored = try #require(loaded.0.first as? ArraysCache)
-                #expect(type(of: restored) == type(of: batch))
-                #expect(restored.batchSize == rowCount)
-                #expect(restored.slotCount == 2)
-                #expect(restored.state.isEmpty)
-                #expect(restored.leftPadding == nil)
-                #expect(restored.lengths == nil)
+                #expect(throws: KVCacheError.self) {
+                    try savePromptCache(url: url, cache: [batch])
+                }
+                #expect(FileManager.default.fileExists(atPath: url.path) == false)
+                #expect(batch.batchSize == rowCount)
+                #expect(batch.slotCount == 2)
+                #expect(batch.state.isEmpty)
+                #expect(batch.leftPadding == nil)
+                #expect(batch.lengths == nil)
 
                 let populated = emptyRow()
                 populated[0] = MLXArray.ones([1, 4])
-                let joined = try #require(try mergeCaches([restored, populated]) as? ArraysCache)
+                let joined = try #require(try mergeCaches([batch, populated]) as? ArraysCache)
                 #expect(joined[0]?.shape == [rowCount + 1, 4])
                 #expect(
                     joined[0]?.asArray(Float.self)
                         == Array(repeating: Float(0), count: rowCount * 4)
                         + Array(repeating: 1, count: 4))
-                restored.extend(other: emptyRow())
-                #expect(restored.batchSize == rowCount + 1)
-                restored.prepare(lengths: Array(1 ... rowCount + 1))
-                #expect(restored.leftPadding == nil)
-                let mask = try #require(restored.makeMask(N: rowCount + 1))
+                batch.extend(other: emptyRow())
+                #expect(batch.batchSize == rowCount + 1)
+                batch.prepare(lengths: Array(1 ... rowCount + 1))
+                #expect(batch.leftPadding == nil)
+                let mask = try #require(batch.makeMask(N: rowCount + 1))
                 #expect(mask.shape == [rowCount + 1, rowCount + 1])
                 #expect(
                     mask.asArray(Bool.self)
@@ -1363,8 +1432,10 @@ struct BatchedHybridCacheTests {
         }
     }
 
-    @Test("Nested lists retain empty recurrent rows through save/load", arguments: [2, 3])
-    func nestedEmptyRecurrentRowsSurvivePromptCacheRoundTrip(rowCount: Int) throws {
+    @Test(
+        "Nested lists keep empty recurrent rows through joins, and refuse to save",
+        arguments: [2, 3])
+    func nestedEmptyRecurrentRowsSurviveJoinsButNotSaving(rowCount: Int) throws {
         try Device.withDefaultDevice(.cpu) {
             func emptyRow() -> CacheList {
                 CacheList(ArraysCache(size: 3), CacheList(MambaCache()))
@@ -1373,11 +1444,12 @@ struct BatchedHybridCacheTests {
             let url = FileManager.default.temporaryDirectory
                 .appendingPathComponent("nested-empty-batch-\(UUID().uuidString).safetensors")
             defer { try? FileManager.default.removeItem(at: url) }
-            try savePromptCache(url: url, cache: [batch])
-            let loaded = try loadPromptCache(url: url)
-            let restored = try #require(loaded.0.first as? CacheList)
-            let arrays = try #require(restored[0] as? ArraysCache)
-            let nested = try #require(restored[1] as? CacheList)
+            #expect(throws: KVCacheError.self) {
+                try savePromptCache(url: url, cache: [batch])
+            }
+            #expect(FileManager.default.fileExists(atPath: url.path) == false)
+            let arrays = try #require(batch[0] as? ArraysCache)
+            let nested = try #require(batch[1] as? CacheList)
             let mamba = try #require(nested[0] as? MambaCache)
             #expect(arrays.batchSize == rowCount)
             #expect(arrays.slotCount == 3)
@@ -1390,13 +1462,13 @@ struct BatchedHybridCacheTests {
             let populatedMamba = try #require(populatedNested[0] as? MambaCache)
             populatedArrays[1] = MLXArray.ones([1, 4])
             populatedMamba[0] = MLXArray.ones([1, 8])
-            let joined = try CacheList.merge([restored, populated])
+            let joined = try CacheList.merge([batch, populated])
             let joinedArrays = try #require(joined[0] as? ArraysCache)
             let joinedNested = try #require(joined[1] as? CacheList)
             let joinedMamba = try #require(joinedNested[0] as? MambaCache)
             #expect(joinedArrays[1]?.shape == [rowCount + 1, 4])
             #expect(joinedMamba[0]?.shape == [rowCount + 1, 8])
-            restored.extend(other: emptyRow())
+            batch.extend(other: emptyRow())
             #expect(arrays.batchSize == rowCount + 1)
             #expect(mamba.batchSize == rowCount + 1)
         }
@@ -1427,7 +1499,7 @@ struct BatchedHybridCacheTests {
             #expect(populated.metaState == ["2", "0"])
             #expect(populated.batchSize == 2)
             let lengthsOnly = try #require(
-                try cacheType.restore(state: [], metaState: ["2", "", "", "-1,2", "2"])
+                try cacheType.restore(state: [], metaState: ["2", "", "", "-1,2"])
                     as? ArraysCache)
             #expect(lengthsOnly.leftPadding == nil)
             #expect(lengthsOnly.lengthsValues == [-1, 2])
@@ -1436,11 +1508,13 @@ struct BatchedHybridCacheTests {
                     false, false, false, true, true, false,
                 ])
             lengthsOnly.finalize()
-            #expect(lengthsOnly.metaState == ["2", "", "", "", "2"])
+            // Finalized, the rows are kept in memory but no saved field records them.
+            #expect(lengthsOnly.metaState == ["2", ""])
+            #expect(lengthsOnly.batchSize == 2)
             let withPadding = try #require(
                 try cacheType.restore(
                     state: [MLXArray.ones([2, 4])],
-                    metaState: ["2", "0", "-1,1", "-1,2", "2"]) as? ArraysCache)
+                    metaState: ["2", "0", "-1,1", "-1,2"]) as? ArraysCache)
             #expect(
                 withPadding.makeMask(N: 3)?.asArray(Bool.self) == [
                     true, true, true, false, true, true,
