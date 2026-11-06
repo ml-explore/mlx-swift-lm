@@ -576,6 +576,48 @@ struct BatchedDecodeParityTests {
             try expectMergedRowsMatchSingles(model)
         }
     }
+
+    @Test("Rows at one position behind a wider buffer decode at that position, not the buffer's")
+    func logicalPositionBehindPadding() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = tinyLlama()
+            let prompts: [[Int32]] = [[1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12]]
+            let singles = try prompts.map { prompt in
+                let cache = try model.newCache(parameters: nil)
+                eval(model(MLXArray(prompt).reshaped([1, prompt.count]), cache: cache))
+                return cache
+            }
+            // Two positions of left padding in both rows: the buffer is eight wide, the rows six.
+            let widths: [IntOrPair] = [0, 0, .init((2, 0)), 0]
+            let batch = singles[0].indices.map { layer in
+                let cache = BatchKVCache(leftPadding: [2, 2])
+                let rows = singles.map { $0[layer].state }
+                _ = cache.update(
+                    keys: concatenated(rows.map { MLX.padded($0[0], widths: widths) }),
+                    values: concatenated(rows.map { MLX.padded($0[1], widths: widths) }))
+                return cache
+            }
+            #expect(batch[0].offset == 8)
+            #expect(batch[0].batchOffset.asArray(Int32.self) == [6, 6])
+            guard case .scalar(let position) = batch[0].ropeOffset else {
+                Issue.record("rows at one position must use the scalar offset")
+                return
+            }
+            #expect(position == 6)
+
+            for step in 0 ..< 3 {
+                let token = Int32(13 + step)
+                let output = model(MLXArray([token, token]).reshaped([2, 1]), cache: batch)
+                for row in prompts.indices {
+                    let single = model(MLXArray([token]).reshaped([1, 1]), cache: singles[row])
+                    #expect(
+                        maxAbsDifference(output[row ..< row + 1], single) < 1e-4,
+                        "step \(step), row \(row)")
+                }
+            }
+            #expect(batch[0].batchOffset.asArray(Int32.self) == [9, 9])
+        }
+    }
 }
 
 private func tinyMistral3Text(beta: Float?) -> Mistral3TextModel {
