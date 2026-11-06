@@ -105,6 +105,10 @@ print(try await session.respond(to: "How about a great place to eat?"))
 
 For alternative integration approaches (custom downloaders, alternative tokenizer packages, local-only weights), see the [using documentation](Libraries/MLXLMCommon/Documentation.docc/using.md).
 
+For local models, [swift-tokenizers](https://github.com/aleroot/swift-tokenizers) is an
+alternative tokenizer with fast loading and support for additional chat templates. See its
+[MLX integration guide](https://github.com/aleroot/swift-tokenizers/blob/main/Sources/Tokenizers/Documentation.docc/UsingWithMLX.md).
+
 ## `FoundationModels` integration
 
 `MLXFoundationModels` is a bridge between MLX models and Apple's `FoundationModels` framework: build an `MLXLanguageModel`, pass it to `LanguageModelSession`, and generate through the standard `FoundationModels` API. Requires the macOS/iOS/visionOS 27.0 SDK.

@@ -192,6 +192,22 @@ print(try await session.respond(to: "How about a great place to eat?"))
 `#hubDownloader()` provides an integration just like what is shown in <doc:#Implementing-Protocols> and `#huggingFaceTokenizerLoader()`
 provides something similar to load the tokenizers.
 
+For local models, [swift-tokenizers](https://github.com/aleroot/swift-tokenizers) is an
+alternative `Tokenizers` implementation with fast loading and support for additional chat
+templates, including Spark-X2.6's tool template. Replace the swift-transformers `Tokenizers`
+dependency with:
+
+```swift
+.package(url: "https://github.com/aleroot/swift-tokenizers", from: "1.1.1"),
+.product(name: "Tokenizers", package: "swift-tokenizers"),
+```
+
+The `#huggingFaceTokenizerLoader()` and `#adaptHuggingFaceTokenizer` macros work with either
+package. swift-tokenizers loads tokenizer files from a local directory; use a separate
+``Downloader`` when needed. See its
+[MLX integration guide](https://github.com/aleroot/swift-tokenizers/blob/main/Sources/Tokenizers/Documentation.docc/UsingWithMLX.md)
+for a local model example.
+
 See <doc:upgrade> for more information on upgrading from a 2.x release.
 
 ## Xcode projects

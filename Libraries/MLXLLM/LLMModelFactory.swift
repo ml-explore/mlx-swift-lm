@@ -49,6 +49,9 @@ public enum LLMTypeRegistry {
 
     /// Shared instance with default model types.
     public static let shared: ModelTypeRegistry<LanguageModel> = .init(creators: [
+        "spark2_5": { data in
+            SparkModel(try JSONDecoder.json5().decode(SparkConfiguration.self, from: data))
+        },
         "mistral": create(LlamaConfiguration.self, LlamaModel.init),
         "mixtral": create(MixtralConfiguration.self, MixtralModel.init),
         "llama": create(LlamaConfiguration.self, LlamaModel.init),
