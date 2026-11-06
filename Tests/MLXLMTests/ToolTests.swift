@@ -886,6 +886,20 @@ struct ToolTests {
                 ]))
     }
 
+    @Test("Pythonic string values decode surrogate pairs and Python escapes")
+    func testPythonicParserStringEscapes() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content = #"""
+            <|tool_call_start|>[send(text='Hi \ud83d\ude00', options={'separator': '\x2c'})]<|tool_call_end|>
+            """#
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.arguments["text"] == .string("Hi \u{1F600}"))
+        #expect(toolCall.function.arguments["options"] == .object(["separator": .string(",")]))
+    }
+
     @Test("Pythonic scalars are inferred without a schema")
     func testPythonicParserUnschematizedScalars() throws {
         let parser = PythonicToolCallParser(
