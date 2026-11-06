@@ -16,6 +16,56 @@ struct BatchTokenIteratorTests {
     static let prompts: [[Int]] = [[1, 2, 3], [4, 5, 6, 7, 8], [9]]
 
     @Test(
+        "Admission drains prepare and remainder autoreleases before next returns",
+        arguments: BatchTextOnlyPreparation.allCases)
+    func admissionAutoreleases(preparation: BatchTextOnlyPreparation) throws {
+        try Device.withDefaultDevice(.cpu) {
+            try autoreleasepool {
+                let log = BatchAdmissionAutoreleaseLog()
+                let model = BatchTextOnlyModel(
+                    preparation: preparation,
+                    prepareObserver: { _ in log.enqueue("prepare") },
+                    forwardObserver: { log.enqueue("forward") })
+                var iterator = BatchTokenIterator(model: model, maxTokens: 2)
+                let uids = iterator.insert(prompts: [[1], [3]])
+
+                let responses = try iterator.next()
+                #expect(responses.map(\.uid) == uids)
+                #expect(responses.map(\.token) == [2, 4])
+                #expect(log.created.filter { $0 == "prepare" }.count == 2)
+                #expect(log.created.filter { $0 == "forward" }.count == 3)
+                #expect(log.released.sorted() == log.created.sorted())
+            }
+        }
+    }
+
+    @Test("Throwing admission drains its autoreleases while leaving the request queued")
+    func rejectedAdmissionAutoreleases() throws {
+        try Device.withDefaultDevice(.cpu) {
+            try autoreleasepool {
+                let log = BatchAdmissionAutoreleaseLog()
+                let model = BatchTextOnlyModel(
+                    preparation: .tokens,
+                    prepareObserver: { _ in
+                        log.enqueue("prepare")
+                        throw BatchAdmissionProbeError.rejected
+                    })
+                var iterator = BatchTokenIterator(model: model)
+                let uids = iterator.insert(prompts: [[1]])
+
+                do {
+                    _ = try iterator.next()
+                    Issue.record("Expected prompt preparation to throw")
+                } catch BatchAdmissionProbeError.rejected {
+                }
+                #expect(iterator.uids == uids)
+                #expect(log.created == ["prepare"])
+                #expect(log.released == log.created)
+            }
+        }
+    }
+
+    @Test(
         "Recurrent admission preserves the longest legacy prefix regardless of row order",
         arguments: [[3, 7], [7, 3]])
     func recurrentAdmissionLegacyOffsets(offsets: [Int]) throws {
@@ -763,6 +813,32 @@ private final class BatchUniformLogitModel: Module, LanguageModel {
     func newCache(parameters: GenerateParameters?) -> [KVCache] { [KVCacheSimple()] }
 }
 
+private enum BatchAdmissionProbeError: Error {
+    case rejected
+}
+
+private final class BatchAdmissionAutoreleaseLog {
+    var created: [String] = []
+    var released: [String] = []
+
+    func enqueue(_ stage: String) {
+        created.append(stage)
+        let probe = BatchAdmissionAutoreleaseProbe { self.released.append(stage) }
+        _ = Unmanaged.passRetained(probe).autorelease()
+    }
+}
+
+private final class BatchAdmissionAutoreleaseProbe: NSObject {
+    private let onRelease: () -> Void
+
+    init(onRelease: @escaping () -> Void) {
+        self.onRelease = onRelease
+        super.init()
+    }
+
+    deinit { onRelease() }
+}
+
 enum BatchTextOnlyPreparation: Sendable, CaseIterable {
     case tokens
     case logits
@@ -821,6 +897,7 @@ private final class BatchTextOnlyModel: Module, LanguageModel {
     private let emitsBatchState: Bool
     private let cacheFactory: (() -> [KVCache])?
     private let prepareObserver: (([KVCache]) throws -> Void)?
+    private let forwardObserver: (() -> Void)?
     private(set) var nextTokenCalls = 0
     private(set) var prepareCacheOffsets: [Int] = []
     private(set) var lastCache: [KVCache] = []
@@ -828,13 +905,15 @@ private final class BatchTextOnlyModel: Module, LanguageModel {
     init(
         preparation: BatchTextOnlyPreparation, stateful: Bool = false,
         emitsBatchState: Bool = false, cacheFactory: (() -> [KVCache])? = nil,
-        prepareObserver: (([KVCache]) throws -> Void)? = nil
+        prepareObserver: (([KVCache]) throws -> Void)? = nil,
+        forwardObserver: (() -> Void)? = nil
     ) {
         self.preparation = preparation
         self.stateful = stateful
         self.emitsBatchState = emitsBatchState
         self.cacheFactory = cacheFactory
         self.prepareObserver = prepareObserver
+        self.forwardObserver = forwardObserver
         super.init()
     }
 
@@ -856,6 +935,7 @@ private final class BatchTextOnlyModel: Module, LanguageModel {
     func callAsFunction(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
+        forwardObserver?()
         let tokens = input.tokens
         let keys = tokens.asType(.float32).reshaped([tokens.dim(0), 1, tokens.dim(1), 1])
         func update(_ cache: KVCache) {

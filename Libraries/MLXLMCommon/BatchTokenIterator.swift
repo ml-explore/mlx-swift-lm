@@ -160,30 +160,32 @@ public struct BatchTokenIterator {
     ///   multiple rows need model-owned state. An error after a batched forward invalidates
     ///   the batch because its cache writes cannot be undone; remove all rows before resuming.
     public mutating func next() throws -> [Response] {
-        guard !invalidatedByModelState else { throw StateError.invalidatedByModelState }
-        if !pending.isEmpty {
-            try admit()
-        }
-        guard !rows.isEmpty else { return [] }
-
-        // Drain the forward's autoreleased temporaries every step, as TokenIterator does.
-        let tokens = try autoreleasepool { try step() }
-        var responses: [Response] = []
-        var keep: [Int] = []
-        for (index, token) in tokens.enumerated() {
-            rows[index].generated += 1
-            let reason: FinishReason? =
-                stopTokens.contains(token)
-                ? .stop : rows[index].generated >= rows[index].maxTokens ? .length : nil
-            responses.append(Response(uid: rows[index].uid, token: token, finishReason: reason))
-            if reason == nil {
-                keep.append(index)
+        // Drain admission and decode temporaries, including rejected admissions.
+        try autoreleasepool {
+            guard !invalidatedByModelState else { throw StateError.invalidatedByModelState }
+            if !pending.isEmpty {
+                try admit()
             }
+            guard !rows.isEmpty else { return [] }
+
+            let tokens = try step()
+            var responses: [Response] = []
+            var keep: [Int] = []
+            for (index, token) in tokens.enumerated() {
+                rows[index].generated += 1
+                let reason: FinishReason? =
+                    stopTokens.contains(token)
+                    ? .stop : rows[index].generated >= rows[index].maxTokens ? .length : nil
+                responses.append(Response(uid: rows[index].uid, token: token, finishReason: reason))
+                if reason == nil {
+                    keep.append(index)
+                }
+            }
+            if keep.count < rows.count {
+                filter(keeping: keep)
+            }
+            return responses
         }
-        if keep.count < rows.count {
-            filter(keeping: keep)
-        }
-        return responses
     }
 
     /// Prefills the queued prompts separately and joins them to the rows.
