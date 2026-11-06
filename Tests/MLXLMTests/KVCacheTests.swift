@@ -14,6 +14,90 @@ private let cacheCreators: [@Sendable () -> any KVCache] = [
     { MambaCache() },
 ]
 
+@Test func testRewindableConvolutionCacheRoundTripsPromptCacheState() throws {
+    let cache = RewindableConvolutionCache(stateLength: 2, rollbackCapacity: 8)
+    let initial = MLXArray.zeros([1, 2, 4])
+    let input = MLXArray((0 ..< 20).map(Float.init)).reshaped(1, 5, 4)
+    cache.record(
+        input: input, initialState: initial,
+        currentState: input[0..., (-2)..., 0...])
+
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    try savePromptCache(url: url, cache: [cache], metadata: [:])
+    let (loaded, _) = try loadPromptCache(url: url)
+    let restored = try #require(loaded.first as? RewindableConvolutionCache)
+
+    #expect(restored.offset == 5)
+    #expect(restored.stateLength == 2)
+    #expect(restored.rollbackCapacity == 8)
+    assertArraysClose(restored.state, cache.state)
+    #expect(restored.trim(2) == 2)
+    #expect(restored.offset == 3)
+}
+
+@Test func testRewindableConvolutionCacheCopyPreservesPreparedBatchMetadata() throws {
+    let cache = RewindableConvolutionCache(stateLength: 2, rollbackCapacity: 8)
+    cache.prepare(lengths: [5, 3])
+    let copy = try #require(cache.copy() as? RewindableConvolutionCache)
+
+    #expect(copy.currentLengths?.asArray(Int.self) == [5, 3])
+    #expect(copy.stateLength == 2)
+    #expect(copy.rollbackCapacity == 8)
+}
+
+@Test func testHybridConvolutionTrimFailsWithoutPartiallyTrimmingAttention() {
+    for convolutionFirst in [false, true] {
+        let convolution = RewindableConvolutionCache(stateLength: 2, rollbackCapacity: 8)
+        let input = MLXArray.ones([1, 12, 4])
+        convolution.record(
+            input: input, initialState: MLXArray.zeros([1, 2, 4]),
+            currentState: input[0..., (-2)..., 0...])
+        let attention = KVCacheSimple()
+        let kv = MLXArray.ones([1, 1, 12, 4])
+        _ = attention.update(keys: kv, values: kv)
+        let caches: [KVCache] =
+            convolutionFirst
+            ? [convolution, attention] : [attention, convolution]
+        #expect(trimPromptCache(caches, numTokens: 9) == 0)
+        #expect(convolution.offset == 12)
+        #expect(attention.offset == 12)
+        #expect(CacheList(caches[0], caches[1]).trim(9) == 0)
+        #expect(convolution.offset == 12)
+        #expect(attention.offset == 12)
+        #expect(trimPromptCache(caches, numTokens: 8) == 8)
+        #expect(convolution.offset == 4)
+        #expect(attention.offset == 4)
+        #expect(trimPromptCache(caches, numTokens: 1) == 0)
+        #expect(convolution.offset == 4)
+        #expect(attention.offset == 4)
+    }
+}
+
+@Test(arguments: [7, 8, 12], [false, true])
+func testNativeHybridRewindChecksTheWrittenWindow(length: Int, convolutionFirst: Bool) {
+    let convolution = RewindableConvolutionCache(stateLength: 2, rollbackCapacity: 8)
+    let input = MLXArray((0 ..< length).map(Float.init)).reshaped(1, length, 1)
+    convolution.record(
+        input: input, initialState: MLXArray.zeros([1, 2, 1]),
+        currentState: input[0..., (-2)..., 0...])
+    let attention = RotatingKVCache(maxSize: 8, keep: 0)
+    let kv = input.reshaped(1, 1, length, 1)
+    _ = attention.update(keys: kv, values: kv)
+    let caches: [KVCache] =
+        convolutionFirst ? [convolution, attention] : [attention, convolution]
+    #expect(!attention.isTrimmable(after: 3))
+
+    let expectedTrim = length == 7 ? 3 : 0
+    #expect(rewindSpeculativePromptCache(caches, numTokens: 3) == expectedTrim)
+    #expect(convolution.offset == length - expectedTrim)
+    #expect(attention.offset == length - expectedTrim)
+    if expectedTrim > 0 {
+        #expect(convolution[0]?.asArray(Float.self) == [2, 3])
+        #expect(attention.state[0].asArray(Float.self) == [0, 1, 2, 3])
+    }
+}
+
 // MARK: - Helper
 
 private func tempURL() -> URL {

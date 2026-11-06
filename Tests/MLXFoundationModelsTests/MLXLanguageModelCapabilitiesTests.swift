@@ -21,10 +21,10 @@ struct MLXLanguageModelCapabilitiesTests {
         capabilities: [LanguageModelCapabilities.Capability],
         resolver: (any ModelConfigurationResolver)? = nil
     ) -> MLXLanguageModel {
-        let load: MLXLanguageModel.ContainerLoader = { configuration, progress in
+        let load: MLXLanguageModel.ProgressContainerLoader = { configuration, progress in
             try await loadModelContainer(
                 from: CapabilitiesStubDownloader(), using: CapabilitiesStubTokenizerLoader(),
-                configuration: configuration, progressHandler: progress)
+                configuration: configuration, progress: progress)
         }
         if let resolver {
             return MLXLanguageModel(

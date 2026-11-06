@@ -198,7 +198,7 @@ private class Mistral3PatchMerger: Module {
 
         let tokensPerImage = patchSizes.map { $0.0 * $0.1 }
         let d = imageFeatures.dim(-1)
-        var features = imageFeatures.asType(.bfloat16)
+        var features = imageFeatures
 
         // Split the image features into chunks based on tokens per image
         var splitIndices: [Int] = []

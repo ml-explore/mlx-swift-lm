@@ -35,8 +35,10 @@ Observation-only events return `nil` from ``GenerationProviding/generation``.
 ``TextGenerationTransformer`` passes through the standard handler and parameters.
 
 Wrap the supplied ``TextToolTokenLoopHandler`` and forward each base event exactly
-once, in order. Preserve its stop-token properties, dispositions, final output,
-and completion metadata. The session uses those events to update its transcript
+once, in order. Preserve its stop-token properties,
+``TokenLoopHandler/canEndForSteering``, dispositions, final output, and completion
+metadata. ``GenerationProviding/init(generation:)`` wraps events the session emits
+itself, such as steering outcomes. The session uses those events to update its transcript
 and cache and dispatch tools. Automatically dispatched tool-call events are
 consumed by the session; other transformed events reach the caller unchanged.
 Cached-prompt counts are attached before the transformer sees completion events.
