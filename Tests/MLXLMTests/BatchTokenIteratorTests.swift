@@ -16,6 +16,35 @@ struct BatchTokenIteratorTests {
     static let prompts: [[Int]] = [[1, 2, 3], [4, 5, 6, 7, 8], [9]]
 
     @Test(
+        "Recurrent admission preserves the longest legacy prefix regardless of row order",
+        arguments: [[3, 7], [7, 3]])
+    func recurrentAdmissionLegacyOffsets(offsets: [Int]) throws {
+        try Device.withDefaultDevice(.cpu) {
+            let prefixes = offsets.map { offset in
+                let cache = ArraysCache(size: 2)
+                cache.offset = offset
+                cache[0] = MLXArray([Float(offset)]).reshaped([1, 1])
+                return cache
+            }
+            let model = BatchLegacyOffsetModel()
+            var iterator = BatchTokenIterator(model: model, maxTokens: 2)
+            let uids = iterator.insert(prompts: [[1], [2]], caches: prefixes.map { [$0] })
+
+            let first = try iterator.next()
+            let second = try iterator.next()
+            #expect(first.map(\.uid) == uids)
+            #expect(first.map(\.token) == [0, 0])
+            #expect(second.map(\.token) == [7, 7])
+            #expect(model.decodeOffsets == [7, 7])
+            #expect(prefixes.map(\.offset) == offsets)
+            for (prefix, offset) in zip(prefixes, offsets) {
+                #expect(try #require(prefix[0]).asArray(Float.self) == [Float(offset)])
+                #expect(prefix[1] == nil)
+            }
+        }
+    }
+
+    @Test(
         "Incompatible admission preserves active caches, queued uids and the seeded stream",
         arguments: CacheAdmissionMismatch.allCases)
     func incompatibleAdmission(mismatch: CacheAdmissionMismatch) throws {
@@ -683,6 +712,28 @@ struct BatchTokenIteratorTests {
 
 private func boundarySampler(_ row: Int) -> TopPSampler {
     TopPSampler(temperature: 1, topP: 0.3334, seed: UInt64(41 + row))
+}
+
+private final class BatchLegacyOffsetModel: Module, LanguageModel {
+    private(set) var decodeOffsets: [Int] = []
+
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
+        .logits(LMOutput(logits: zeros([1, 1, 16])))
+    }
+
+    func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        let offset = cache?.first?.offset ?? 0
+        decodeOffsets.append(offset)
+        let logits = MLX.where(
+            MLXArray.arange(16) .== offset, MLXArray(Float(5)), MLXArray(Float(-5)))
+        return LMOutput(logits: broadcast(logits, to: [input.tokens.dim(0), 1, 16]))
+    }
+
+    func newCache(parameters: GenerateParameters?) -> [KVCache] { [ArraysCache(size: 2)] }
 }
 
 /// A rounding-sensitive nucleus without model or attention noise.

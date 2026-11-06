@@ -250,18 +250,18 @@ public struct BatchTokenIterator {
             eval(logits)
             firstLogits.append(logits)
         }
-        // Join the new rows layer by layer, each row checked against the rows joined before
-        // it, so an empty first row cannot set the layout and a sparse recurrent slot is
-        // checked against the first row that populates it. The joined rows are then checked
-        // against the active batch. Nothing is sampled and the active batch is untouched
-        // until every layer has passed.
+        // Validate every pair before one bulk merge; extending each prefix repeatedly
+        // copies KV buffers. No sampling or active-cache changes happen until all layers pass.
         let merged = try (0 ..< layerCount).map { layer in
-            let joined = try mergeCaches([caches[0][layer]])
-            for row in caches.dropFirst() {
-                let next = try mergeCaches([row[layer]])
-                try joined.validateExtension(other: next)
-                joined.extend(other: next)
+            let layerCaches = caches.map { $0[layer] }
+            let rowBatches = try layerCaches.map { try mergeCaches([$0]) }
+            for index in rowBatches.indices {
+                for previous in 0 ..< index {
+                    try rowBatches[previous].validateExtension(other: rowBatches[index])
+                }
             }
+            let joined =
+                rowBatches.count == 1 ? rowBatches[0] : try mergeCaches(layerCaches)
             if !rows.isEmpty {
                 try cache[layer].validateExtension(other: joined)
             }
