@@ -27,12 +27,12 @@ final class LanguageModelMacroTests: XCTestCase {
                         }
                         return cache.repoDirectory(repo: repo, kind: .model)
                     },
-                    load: { configuration, progressHandler in
+                    load: { configuration, progress in
                         try await loadModelContainer(
                             from: #hubDownloader(),
                             using: #huggingFaceTokenizerLoader(),
                             configuration: configuration,
-                            progressHandler: progressHandler)
+                            progress: progress)
                     })
                 """,
             macros: testMacros)
@@ -56,12 +56,12 @@ final class LanguageModelMacroTests: XCTestCase {
                         }
                         return cache.repoDirectory(repo: repo, kind: .model)
                     },
-                    load: { configuration, progressHandler in
+                    load: { configuration, progress in
                         try await loadModelContainer(
                             from: #hubDownloader(),
                             using: #huggingFaceTokenizerLoader(),
                             configuration: configuration,
-                            progressHandler: progressHandler)
+                            progress: progress)
                     })
                 """,
             macros: testMacros)
@@ -85,12 +85,12 @@ final class LanguageModelMacroTests: XCTestCase {
                         }
                         return cache.repoDirectory(repo: repo, kind: .model)
                     },
-                    load: { configuration, progressHandler in
+                    load: { configuration, progress in
                         try await loadModelContainer(
                             from: #hubDownloader(),
                             using: #huggingFaceTokenizerLoader(),
                             configuration: configuration,
-                            progressHandler: progressHandler)
+                            progress: progress)
                     })
                 """,
             macros: testMacros)
@@ -115,12 +115,41 @@ final class LanguageModelMacroTests: XCTestCase {
                         }
                         return cache.repoDirectory(repo: repo, kind: .model)
                     },
-                    load: { configuration, progressHandler in
+                    load: { configuration, progress in
                         try await loadModelContainer(
                             from: #hubDownloader(),
                             using: #huggingFaceTokenizerLoader(),
                             configuration: configuration,
-                            progressHandler: progressHandler)
+                            progress: progress)
+                    })
+                """,
+            macros: testMacros)
+    }
+
+    func testExplicitLoadProgress() {
+        assertMacroExpansion(
+            "let model = #huggingFaceLanguageModel(configuration: config, progress: handlers)",
+            expandedSource: """
+                let model = MLXLanguageModel(
+                    configuration: config,
+                    weightsLocation: { id in
+                        let cache = HuggingFace.HubCache.default
+                        guard let repo = HuggingFace.Repo.ID(rawValue: id) else {
+                            return cache.cacheDirectory
+                        }
+                        if let commit = cache.resolveRevision(repo: repo, kind: .model, ref: "main"),
+                            let snapshot = try? cache.snapshotPath(repo: repo, kind: .model, commitHash: commit) {
+                            return snapshot
+                        }
+                        return cache.repoDirectory(repo: repo, kind: .model)
+                    },
+                    progress: handlers,
+                    load: { configuration, progress in
+                        try await loadModelContainer(
+                            from: #hubDownloader(),
+                            using: #huggingFaceTokenizerLoader(),
+                            configuration: configuration,
+                            progress: progress)
                     })
                 """,
             macros: testMacros)

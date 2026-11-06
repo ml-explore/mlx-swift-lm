@@ -27,9 +27,27 @@ struct MLXLanguageModelInitTests {
             load: { configuration, progress in
                 try await loadModelContainer(
                     from: StubDownloader(), using: StubTokenizerLoader(),
-                    configuration: configuration, progressHandler: progress)
+                    configuration: configuration, progress: progress)
             }
         )
+        #expect(model.modelID == "mlx-community/Qwen3-4B-4bit")
+    }
+
+    @Test("progress-aware loader initializer remains constructible")
+    func progressAwareLoader() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+
+        let model = MLXLanguageModel(
+            configuration: ModelConfiguration(id: "mlx-community/Qwen3-4B-4bit"),
+            weightsLocation: { _ in URL(fileURLWithPath: "/tmp") },
+            progress: .weights { _ in },
+            load: { configuration, progress in
+                try await loadModelContainer(
+                    from: StubDownloader(), using: StubTokenizerLoader(),
+                    configuration: configuration, progress: progress)
+            }
+        )
+
         #expect(model.modelID == "mlx-community/Qwen3-4B-4bit")
     }
 }
