@@ -211,7 +211,7 @@ public struct GenerateParameters: Sendable {
     /// Per-token log-probability reporting. `nil` disables reporting; `0` reports
     /// the selected token only, and a positive value also reports that many top tokens.
     /// Use ``LogProbabilityTokenLoopHandler`` to emit these values through a custom generation loop.
-    /// Only ``TokenIterator`` reports them; speculative iterators ignore this setting.
+    /// Speculative iterators report the verifier's values for each emitted token.
     public var logProbabilities: Int?
 
     /// Optional seed for reproducible sampling. When set, the sampler's RNG
@@ -844,6 +844,46 @@ public struct DeferredTokenLogProbabilities {
             .asType(.float32)
     }
 
+    private init(
+        token: MLXArray, chosenLogProbability: MLXArray,
+        topTokenIDs: MLXArray?, topLogProbabilities: MLXArray?
+    ) {
+        self.token = token
+        self.chosenLogProbability = chosenLogProbability
+        self.topTokenIDs = topTokenIDs
+        self.topLogProbabilities = topLogProbabilities
+    }
+
+    /// Records the log probabilities of tokens sampled from the rows of processed logits.
+    ///
+    /// One batch serves every row and evaluates in the background, so a speculative round
+    /// pays one normalization for the tokens it emits, outside its accept loop.
+    ///
+    /// - Parameters:
+    ///   - tokens: The sampled tokens, in emission order, one or more per array.
+    ///   - logits: The processed logits each token was sampled from, one row per token.
+    ///   - topK: The candidates to report per token; `nil` records nothing.
+    /// - Returns: One value per token, or none when `topK` is `nil`.
+    static func recording(
+        _ tokens: [MLXArray], sampledFrom logits: [MLXArray], topK: Int?
+    ) -> [DeferredTokenLogProbabilities] {
+        guard let topK, !tokens.isEmpty else { return [] }
+        let tokens = concatenated(tokens.map { $0.flattened() })
+        let batch = LogProbabilityDistribution(
+            logits: concatenated(logits.map { $0.reshaped(-1, $0.dim(-1)) })
+        ).recording(token: tokens, topK: topK)
+        let rows = (0 ..< tokens.dim(0)).map { row in
+            DeferredTokenLogProbabilities(
+                token: batch.token[row ..< row + 1],
+                chosenLogProbability: batch.chosenLogProbability[row ..< row + 1],
+                topTokenIDs: batch.topTokenIDs?[row ..< row + 1],
+                topLogProbabilities: batch.topLogProbabilities?[row ..< row + 1])
+        }
+        // Evaluate the row views too: each unevaluated view read later is a GPU sync.
+        asyncEval(rows.flatMap { [$0.token] + $0.arrays })
+        return rows
+    }
+
     var arrays: [MLXArray] {
         [chosenLogProbability, topTokenIDs, topLogProbabilities].compactMap { $0 }
     }
@@ -1259,6 +1299,10 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
     var processor: LogitProcessor?
     let sampler: LogitSampler
+    let logProbabilityTopK: Int?
+
+    /// Log probabilities for the token returned by the most recent ``next()`` call.
+    public private(set) var lastLogProbabilities: DeferredTokenLogProbabilities?
 
     public var tokenCount: Int { telemetry.emittedTokenCount }
     public let maxTokens: Int?
@@ -1266,6 +1310,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
     // Buffer of accepted tokens from the current speculation round
     private var pendingTokens = [Int]()
+    /// The verifier's log probabilities for `pendingTokens`, when requested.
+    private var pendingLogProbabilities = [DeferredTokenLogProbabilities]()
     private var pendingIndex = 0
     /// Pending tokens already represented by each cache. The final token in a
     /// speculative round is sampled from the verifier logits but is not fed
@@ -1387,6 +1433,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         self.state = mainState
 
         self.sampler = parameters.sampler()
+        self.logProbabilityTopK = parameters.logProbabilities.map { Swift.max($0, 0) }
         try components.validate(parameters: parameters)
         self.processor = components.logitProcessor(parameters: parameters, model: mainModel)
 
@@ -1431,6 +1478,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             // prefill-sampled token must be queued here or the stream would
             // silently start at the second generated token.
             pendingTokens.append(token.item(Int.self))
+            recordLogProbabilities(of: [token], sampledFrom: [logits])
         }
 
         // Prefill draft model, don't call didSample here -- processor tracks main model's accepted sequence only
@@ -1525,20 +1573,24 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         state = mainResult.state
 
         let mainTokens: MLXArray
+        let verifyLogits: MLXArray
         if var verifyProcessor = processor?.copy() {
             // Process each position sequentially so that the processor sees tokens sampled at earlier positions
             var sampled = [MLXArray]()
+            var processed = [MLXArray]()
             for i in 0 ..< (numDraft + 1) {
                 var logits = mainLogits[0..., verifyStart + i, 0...]
                 logits = verifyProcessor.process(logits: logits)
                 let token = sampler.sample(logits: logits)
                 verifyProcessor.didSample(token: token)
                 sampled.append(token)
+                processed.append(logits)
             }
             mainTokens = concatenated(sampled)
+            verifyLogits = concatenated(processed)
         } else {
             // Batch-sample all verify tokens from main model in one operation
-            let verifyLogits = mainLogits[0..., verifyStart..., 0...].squeezed(axis: 0)
+            verifyLogits = mainLogits[0..., verifyStart..., 0...].squeezed(axis: 0)
             mainTokens = sampler.sample(logits: verifyLogits)
         }
 
@@ -1562,6 +1614,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         let finalToken = mainTokens[accepted ... accepted]
         processor?.didSample(token: finalToken)
         pendingTokens.append(mainTokensList[accepted])
+        recordLogProbabilities(
+            of: [mainTokens[0 ... accepted]], sampledFrom: [verifyLogits[0 ... accepted]])
         mainCommittedPendingTokenCount = accepted
         // When every draft is accepted the draft cache still trails the main
         // cache by one accepted token; `draftY` carries that token into the
@@ -1625,10 +1679,29 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
         processor?.didSample(token: token)
         eval(token)
         pendingTokens.append(token.item(Int.self))
+        recordLogProbabilities(of: [token], sampledFrom: [logits])
         mainCommittedPendingTokenCount = 0
         draftCommittedPendingTokenCount = 0
         y = .init(tokens: token)
         kvCachePlan.apply(to: mainCacheStorage)
+    }
+
+    /// Records the verifier's log probabilities for tokens just queued in `pendingTokens`.
+    private mutating func recordLogProbabilities(
+        of tokens: [MLXArray], sampledFrom logits: [MLXArray]
+    ) {
+        pendingLogProbabilities += DeferredTokenLogProbabilities.recording(
+            tokens, sampledFrom: logits, topK: logProbabilityTopK)
+    }
+
+    /// Returns the next queued token and makes its log probabilities current.
+    private mutating func dequeuePendingToken() -> Int {
+        lastLogProbabilities =
+            logProbabilityTopK == nil ? nil : pendingLogProbabilities[pendingIndex]
+        let token = pendingTokens[pendingIndex]
+        pendingIndex += 1
+        telemetry.recordGeneratedToken()
+        return token
     }
 
     mutating public func next() -> Int? {
@@ -1638,16 +1711,14 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
         // Drain the pending buffer first
         if pendingIndex < pendingTokens.count {
-            let token = pendingTokens[pendingIndex]
-            pendingIndex += 1
-            telemetry.recordGeneratedToken()
-            return token
+            return dequeuePendingToken()
         }
 
         // Run a new speculation round. Pooled: a round runs draft + verify
         // forwards whose autoreleased MLX temporaries otherwise accumulate
         // across the whole generation.
         pendingTokens.removeAll(keepingCapacity: true)
+        pendingLogProbabilities.removeAll(keepingCapacity: true)
         pendingIndex = 0
         mainCommittedPendingTokenCount = 0
         draftCommittedPendingTokenCount = 0
@@ -1657,10 +1728,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
             return nil
         }
 
-        let token = pendingTokens[pendingIndex]
-        pendingIndex += 1
-        telemetry.recordGeneratedToken()
-        return token
+        return dequeuePendingToken()
     }
 
 }
