@@ -531,7 +531,6 @@ func qwen2VLSegmentedVisionAttention(
     return concatenated(outputs, axis: 0)
 }
 
-
 private enum Vision {
 
     static fileprivate func applyMultimodalRotaryPositionEmbedding(
