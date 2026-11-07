@@ -124,6 +124,67 @@ func validateBatchKVExtension(
 // MARK: - Recurrent caches
 
 extension ArraysCache: BatchableKVCache {
+    /// Every slot's state, `nil` where a slot holds none.
+    private var slots: [MLXArray?] { (0 ..< slotCount).map { self[$0] } }
+
+    public func extend(other: any KVCache) {
+        guard let other = other as? ArraysCache else {
+            preconditionFailure("\(Self.self) can only be extended with an ArraysCache")
+        }
+        extend(other: other)
+    }
+
+    public func validateExtension(other: any KVCache) throws {
+        guard type(of: self) == ArraysCache.self || type(of: self) == MambaCache.self,
+            type(of: self) == type(of: other), let other = other as? ArraysCache,
+            slotCount == other.slotCount
+        else {
+            throw KVCacheError(
+                message: "Recurrent batches must share one exact type and slot count")
+        }
+        for row in [self, other] {
+            let state = row.slots
+            guard row.lengths == nil, state.allSatisfy({ $0 == nil || $0!.ndim > 0 }) else {
+                throw KVCacheError(message: "Recurrent batches need finalized, row-shaped state")
+            }
+            let count = row.batchSize
+            guard state.allSatisfy({ $0 == nil || $0!.dim(0) == count }),
+                row.leftPadding.map({ $0.ndim == 1 && $0.size == count }) ?? true
+            else {
+                throw KVCacheError(message: "Recurrent batch state must agree on the row count")
+            }
+        }
+        for (own, added) in zip(slots, other.slots) {
+            if let own, let added,
+                own.dtype != added.dtype || own.shape.dropFirst() != added.shape.dropFirst()
+            {
+                throw KVCacheError(message: "Recurrent batches must share each state slot's layout")
+            }
+        }
+    }
+
+    /// The row at `index`, as a ``MambaCache`` when this is one.
+    public func extract(_ index: Int) -> any KVCache {
+        let row = self is MambaCache ? MambaCache() : ArraysCache(size: slotCount)
+        for slot in 0 ..< slotCount {
+            row[slot] = self[slot]?[index ..< index + 1]
+        }
+        row.offset = offset
+        row.leftPadding = leftPadding?[index ..< index + 1]
+        row.lengths = lengths?[index ..< index + 1]
+        return row
+    }
+
+    /// ``merge(_:)-swift.type.method`` for rows typed as `KVCache`; rows of exactly this class.
+    public static func merge(_ caches: [any KVCache]) throws -> any BatchableKVCache {
+        guard Self.self == ArraysCache.self || Self.self == MambaCache.self else {
+            throw KVCacheError(message: "\(Self.self) must implement its own batched form")
+        }
+        let rows = try batchRows(caches, of: Self.self)
+        try ArraysCache.validateMerge(rows)
+        return merge(rows)
+    }
+
     /// Check merge storage without reading tensors or excluding prepared metadata.
     static func validateMerge(_ caches: [ArraysCache]) throws {
         guard let first = caches.first else {
@@ -216,6 +277,61 @@ extension ArraysCache: BatchableKVCache {
 // MARK: - Composite caches
 
 extension CacheList: BatchableKVCache {
+    /// The children as batched caches, as ``merge(_:)-swift.type.method`` makes them.
+    /// ``validateExtension(other:)`` refuses a child that is not one by throwing.
+    private var batchedChildren: [any BatchableKVCache] {
+        children.map { child in
+            guard let child = child as? any BatchableKVCache else {
+                preconditionFailure(
+                    "\(type(of: child)) in a CacheList is not a batched cache; merge rows first")
+            }
+            return child
+        }
+    }
+
+    /// Keeps only the rows at `batchIndices`, in that order, in every child.
+    public func filter(batchIndices: MLXArray) {
+        for child in batchedChildren {
+            child.filter(batchIndices: batchIndices)
+        }
+    }
+
+    /// Appends the rows of `other`, a `CacheList` of the same layout, child by child.
+    public func extend(other: any KVCache) {
+        guard let other = other as? CacheList, other.children.count == children.count else {
+            preconditionFailure(
+                "A CacheList can only be extended with a CacheList of the same layout")
+        }
+        for (child, added) in zip(batchedChildren, other.children) {
+            child.extend(other: added)
+        }
+    }
+
+    public func validateExtension(other: any KVCache) throws {
+        guard type(of: self) == CacheList.self, type(of: other) == CacheList.self,
+            let other = other as? CacheList, other.children.count == children.count
+        else {
+            throw KVCacheError(message: "Composite batches must share one exact type and layout")
+        }
+        for (child, added) in zip(children, other.children) {
+            guard let child = child as? any BatchableKVCache else {
+                throw KVCacheError(
+                    message: "\(type(of: child)) in a CacheList is not a batched cache")
+            }
+            try child.validateExtension(other: added)
+        }
+    }
+
+    /// The row at `index` as a composite of single-sequence caches.
+    public func extract(_ index: Int) -> any KVCache {
+        CacheList(caches: batchedChildren.map { $0.extract(index) })
+    }
+
+    /// ``merge(_:)-swift.type.method`` for rows typed as `KVCache`.
+    public static func merge(_ caches: [any KVCache]) throws -> any BatchableKVCache {
+        try merge(try batchRows(caches, of: CacheList.self))
+    }
+
     /// The rows of `caches`, composite caches of one layout, as one composite whose children
     /// are batched. Each child position merges on its own type. Port of mlx-lm's
     /// `CacheList.merge`.
