@@ -77,6 +77,35 @@ public struct BatchTokenIterator {
         }
     }
 
+    /// A ``GenerateParameters`` setting that batched generation does not support.
+    public enum ParameterError: Error, LocalizedError, Equatable {
+        /// `maxKVSize` keeps a pinned prefix in its rotating caches.
+        case maxKVSize
+        /// A `kvCache` capacity with `preservedPrefixTokens` above zero.
+        case pinnedPrefix(Int)
+        /// A `kvCache` rewind reserve.
+        case rewindReserve
+        /// A cache strategy other than full precision.
+        case strategy(KVCacheStrategyIdentifier)
+        /// `logProbabilities`.
+        case logProbabilities
+
+        public var errorDescription: String? {
+            switch self {
+            case .maxKVSize:
+                "maxKVSize pins a prefix of up to 4 tokens, which batched rotating caches do not support. Use kvCache with a capacity whose preservedPrefixTokens is 0."
+            case .pinnedPrefix(let count):
+                "Batched rotating caches do not support a pinned prefix; this capacity preserves \(count) tokens. Use preservedPrefixTokens: 0."
+            case .rewindReserve:
+                "Batched rotating caches do not support a rewind reserve."
+            case .strategy(let strategy):
+                "Batched generation does not support the \(strategy) KV-cache strategy."
+            case .logProbabilities:
+                "Batched generation does not report log probabilities."
+            }
+        }
+    }
+
     private let model: any LanguageModel
     private let sampler: LogitSampler
     private let processor: LogitProcessor?
@@ -132,6 +161,8 @@ public struct BatchTokenIterator {
     private var ending: [Ended] = []
     /// The processors of the rows in `undelivered`.
     private var undeliveredEnded: [Ended] = []
+    /// What ``LanguageModel/newCache(parameters:)`` builds fresh rows' caches from.
+    private var cacheParameters: GenerateParameters?
 
     /// - Parameters:
     ///   - model: the model
@@ -151,6 +182,40 @@ public struct BatchTokenIterator {
         self.stopTokens = stopTokens
         self.maxTokens = maxTokens
         self.prefill = prefill
+    }
+
+    /// An iterator configured from `parameters`, as ``TokenIterator`` is for one sequence.
+    ///
+    /// The rows inserted without their own get `parameters`' sampler, a copy of its processor
+    /// and its token limit; `maxTokens == nil` means no limit, so a row runs until it samples
+    /// a stop token or is removed. Fresh rows' caches come from
+    /// ``LanguageModel/newCache(parameters:)``, so a `kvCache` capacity gives every attention
+    /// layer a rotating cache of that size. Prompts are prefilled with `parameters.prefill`.
+    ///
+    /// - Throws: ``ParameterError`` for a setting batched generation does not support:
+    ///   `maxKVSize`, a capacity with a pinned prefix, a rewind reserve, a cache strategy other
+    ///   than full precision, or `logProbabilities`; `KVCacheConfigurationError` for an
+    ///   invalid cache configuration.
+    public init(
+        model: any LanguageModel, parameters: GenerateParameters, stopTokens: Set<Int> = []
+    ) throws {
+        guard parameters.maxKVSize == nil else { throw ParameterError.maxKVSize }
+        guard parameters.logProbabilities == nil else { throw ParameterError.logProbabilities }
+        let configuration = try parameters.resolvedKVCacheConfiguration()
+        if let configuration {
+            if let capacity = configuration.capacity, capacity.preservedPrefixTokens > 0 {
+                throw ParameterError.pinnedPrefix(capacity.preservedPrefixTokens)
+            }
+            guard configuration.rewind == nil else { throw ParameterError.rewindReserve }
+            guard configuration.strategy == .fullPrecision else {
+                throw ParameterError.strategy(configuration.strategy.identifier)
+            }
+        }
+        self.init(
+            model: model, sampler: parameters.sampler(), processor: parameters.processor(),
+            stopTokens: stopTokens, maxTokens: parameters.maxTokens ?? .max,
+            prefill: parameters.prefill)
+        cacheParameters = configuration == nil ? nil : parameters
     }
 
     /// The ids of every row decoding or queued, in insertion order.
@@ -437,7 +502,7 @@ public struct BatchTokenIterator {
                     throw KVCacheError(message: "A prompt cache copy must preserve its exact types")
                 }
                 return copy
-            } ?? model.newCache(parameters: nil)
+            } ?? model.newCache(parameters: cacheParameters)
         let layerCount = rows.isEmpty ? admitted.first?.cache.count ?? rowCache.count : cache.count
         guard rowCache.count == layerCount else {
             throw KVCacheError(message: "Every row must share the active cache's layer count")
