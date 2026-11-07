@@ -71,7 +71,7 @@ LLMRegistry.deepseek_r1_4bit      // mlx-community/DeepSeek-R1-4bit
 ### GLM
 
 ```swift
-// model_type: "glm4", "glm4_moe", "glm4_moe_lite"
+// model_type: "glm4", "glm4_moe", "glm4_moe_lite", "glm5_next"
 LLMRegistry.glm4_9b_4bit          // mlx-community/GLM-4-9B-0414-4bit
 // Note: GLM4 uses special tool call format
 ```
