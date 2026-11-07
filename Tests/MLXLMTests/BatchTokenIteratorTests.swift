@@ -1026,6 +1026,55 @@ struct BatchTokenIteratorTests {
         }.value
     }
 
+    @Test("A model whose chunks leave cache writes lazy resumes after a cancelled step")
+    func resumablePrefillLazyChunks() async throws {
+        // Carries the iterator from the cancelled task to a fresh one; they run in turn.
+        final class Carrier: @unchecked Sendable {
+            var iterator: BatchTokenIterator?
+            var id = -1
+        }
+        let prompt = Array(1 ..< 8)
+        let carrier = Carrier()
+        try await Task {
+            try Device.withDefaultDevice(.cpu) {
+                var iterator = BatchTokenIterator(
+                    model: LazyChunkModel(tinyLlama()), maxTokens: 6,
+                    prefill: PrefillParameters(stepSize: 2))
+                let id = iterator.insert(prompt: prompt)
+                let first = try iterator.next()
+                #expect(first?.map(describe) == ["prefill(\(id), 2/7)"])
+                withUnsafeCurrentTask { $0?.cancel() }
+                #expect(throws: CancellationError.self) { _ = try iterator.next() }
+                #expect(iterator.pendingIDs == [id])
+                carrier.iterator = iterator
+                carrier.id = id
+            }
+        }.value
+        try await Task {
+            try Device.withDefaultDevice(.cpu) {
+                let expected = Array(
+                    IteratorSequence(
+                        try TokenIterator(
+                            input: LMInput(tokens: MLXArray(prompt.map { Int32($0) })),
+                            model: tinyLlama(), processor: nil, sampler: ArgMaxSampler(),
+                            prefill: PrefillParameters(stepSize: 2), maxTokens: 6)))
+                var iterator = try #require(carrier.iterator)
+                var steps: [String] = []
+                var output: [Int] = []
+                while let events = try iterator.next() {
+                    steps += events.map(describe)
+                    for case .token(_, let token) in events { output.append(token) }
+                }
+                let id = try #require(carrier.id >= 0 ? carrier.id : nil, "the first task ran")
+                #expect(output == expected)
+                #expect(
+                    Array(steps.prefix(3)) == [
+                        "prefill(\(id), 4/7)", "prefill(\(id), 6/7)", "prefill(\(id), 7/7)",
+                    ])
+            }
+        }.value
+    }
+
     @Test("A removed row leaves the batch, queued or decoding")
     func remove() throws {
         try Device.withDefaultDevice(.cpu) {
@@ -1506,6 +1555,41 @@ enum BatchPrefixCacheKind: Sendable, CaseIterable {
             _ = attention.update(keys: keys, values: keys)
             return [CacheList(arrays, CacheList(attention, mamba))]
         }
+    }
+}
+
+/// A resumable model whose chunks leave their cache writes lazy: unlike `LLMModel`'s, its
+/// `prefillChunk` neither evaluates nor submits the cache, so the iterator must.
+private final class LazyChunkModel: Module, ResumablePrefillModel {
+    let inner: LlamaModel
+
+    init(_ inner: LlamaModel) {
+        self.inner = inner
+        super.init()
+    }
+
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
+        try inner.prepare(input, cache: cache, state: state, prefill: prefill)
+    }
+
+    func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        inner(input, cache: cache, state: state)
+    }
+
+    func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try inner.newCache(parameters: parameters)
+    }
+
+    func prefillChunks(for prompt: LMInput.Text, prefill: PrefillParameters) -> [Range<Int>] {
+        inner.prefillChunks(for: prompt, prefill: prefill)
+    }
+
+    func prefillChunk(_ prompt: LMInput.Text, range: Range<Int>, cache: [KVCache]) {
+        _ = inner(prompt[.newAxis, range], cache: cache, state: nil)
     }
 }
 
