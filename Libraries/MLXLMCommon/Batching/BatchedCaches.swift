@@ -37,8 +37,8 @@ public protocol BatchableKVCache: KVCache {
 
 /// The rows of `caches`, single-sequence caches of one layer, as one batched cache.
 ///
-/// Port of mlx-lm's `_merge_caches` for one layer. A cache that is its own batch merges
-/// through its own class; a ``KVCacheSimple`` row merges into a ``BatchKVCache`` and a
+/// Port of mlx-lm's `_merge_caches` for one layer. A cache that is its own batch
+/// (``ArraysCache`` and ``MambaCache``, ``CacheList``) merges through its own class; a ``KVCacheSimple`` row merges into a ``BatchKVCache`` and a
 /// ``RotatingKVCache`` row into a ``BatchRotatingKVCache``. Each batch
 /// takes rows of exactly its class, so a `ChunkedKVCache` or an unsupported compressed cache
 /// is refused rather than treated as the class it subclasses. Empty caches merge into an
@@ -123,7 +123,7 @@ func validateBatchKVExtension(
 
 // MARK: - Recurrent caches
 
-extension ArraysCache {
+extension ArraysCache: BatchableKVCache {
     /// Check merge storage without reading tensors or excluding prepared metadata.
     static func validateMerge(_ caches: [ArraysCache]) throws {
         guard let first = caches.first else {
@@ -215,7 +215,7 @@ extension ArraysCache {
 
 // MARK: - Composite caches
 
-extension CacheList {
+extension CacheList: BatchableKVCache {
     /// The rows of `caches`, composite caches of one layout, as one composite whose children
     /// are batched. Each child position merges on its own type. Port of mlx-lm's
     /// `CacheList.merge`.

@@ -1637,7 +1637,7 @@ struct BatchedHybridCacheTests {
             #expect(joined.offset == offsets.1)
 
             // Through the protocol, as admission extends an active layer.
-            let erased: any KVCache = row(offsets.0)
+            let erased: any BatchableKVCache = row(offsets.0)
             erased.extend(other: row(offsets.1))
             #expect(erased.offset == 7)
 
@@ -1742,6 +1742,24 @@ struct BatchedHybridCacheTests {
         }
         #expect(try mergeCaches([KVCacheSimple(), KVCacheSimple()]) is BatchKVCache)
         #expect(try mergeCaches([MambaCache(), MambaCache()]) is MambaCache)
+    }
+
+    @Test("Recurrent and composite caches are their own batches; a row-form child is refused")
+    func batchableConformance() throws {
+        let own: [any KVCache] = [
+            ArraysCache(size: 2), MambaCache(), CacheList(KVCacheSimple(), MambaCache()),
+        ]
+        for cache in own {
+            #expect(cache is any BatchableKVCache, "\(type(of: cache))")
+        }
+        // A CacheList made from rows holds a KVCacheSimple child, which is not a batch, so
+        // its extension check throws; a merged CacheList's children are all batches.
+        let rows = CacheList(KVCacheSimple(), MambaCache())
+        let merged = try CacheList.merge([CacheList(KVCacheSimple(), MambaCache())])
+        #expect(merged.children.allSatisfy { $0 is any BatchableKVCache })
+        #expect(throws: KVCacheError.self) { try rows.validateExtension(other: merged) }
+        let added = try CacheList.merge([CacheList(KVCacheSimple(), MambaCache())])
+        try merged.validateExtension(other: added)
     }
 
     @Test("A merged CacheList filters, extends and extracts every child")
@@ -1864,7 +1882,7 @@ struct BatchedHybridCacheTests {
                 Array(repeating: 0, count: metadataIndex) + [5, 7]
                 + Array(repeating: 0, count: 2 - metadataIndex)
             let merged = ArraysCache.merge(rows)
-            let extended: any KVCache = rows[0].copy()
+            let extended = try #require(rows[0].copy() as? any BatchableKVCache)
             for row in rows.dropFirst() { extended.extend(other: row) }
 
             for cache in [merged, try #require(extended as? ArraysCache)] {
@@ -1890,7 +1908,7 @@ struct BatchedHybridCacheTests {
     @Test("Empty recurrent filtering and composite admission keep their rows aligned")
     func emptyRecurrentFilterAndCompositeAdmissionKeepRows() throws {
         try Device.withDefaultDevice(.cpu) {
-            let unpadded: any KVCache = MambaCache()
+            let unpadded: any BatchableKVCache = MambaCache()
             unpadded.extend(other: MambaCache())
             let recurrent = try #require(unpadded as? MambaCache)
             #expect(recurrent.batchSize == 2)
@@ -2027,13 +2045,13 @@ struct BatchedHybridCacheTests {
         #expect(mask[1, 0, 0, 0].item(Bool.self) == true)
     }
 
-    @Test("The row methods and merge dispatch through the KVCache type")
+    @Test("The row methods and merge dispatch through the BatchableKVCache type")
     func protocolSurface() throws {
         #expect(try mergeCaches([MambaCache()]) is MambaCache)
         #expect(try mergeCaches([CacheList(KVCacheSimple(), MambaCache())]) is CacheList)
         #expect(throws: KVCacheError.self) { _ = try mergeCaches([QuantizedKVCache()]) }
         #expect(throws: KVCacheError.self) { _ = try mergeCaches([ChunkedKVCache(chunkSize: 4)]) }
-        #expect(throws: KVCacheError.self) { _ = try QuantizedKVCache.merge([QuantizedKVCache()]) }
+        #expect(!(QuantizedKVCache() as any KVCache is any BatchableKVCache))
     }
 }
 
