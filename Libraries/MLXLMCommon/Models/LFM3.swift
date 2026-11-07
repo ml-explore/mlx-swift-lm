@@ -436,18 +436,26 @@ public class LFM3ModelInner: Module {
 
     package let layers: [LFM3DecoderLayer]
 
-    @ModuleInfo(key: "embed_tokens") package var embedTokens: Embedding
+    @ModuleInfo(key: "embed_tokens") private var tokenEmbedding: Embedding?
+    package var embedTokens: Embedding {
+        guard let tokenEmbedding else {
+            preconditionFailure("This LFM3 backbone accepts only embeddings")
+        }
+        return tokenEmbedding
+    }
     @ModuleInfo(key: "embedding_norm") var embeddingNorm: RMSNorm
 
     package var hiddenSize: Int { args.hiddenSize }
 
-    package init(_ args: LFM3Configuration) {
+    package init(_ args: LFM3Configuration, includeTokenEmbedding: Bool = true) {
         self.args = args
         self.firstFullAttentionIdx = args.layerTypes.firstIndex(of: .fullAttention)
         self.firstSlidingAttentionIdx = args.layerTypes.firstIndex(of: .slidingAttention)
 
-        _embedTokens.wrappedValue = Embedding(
-            embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
+        if includeTokenEmbedding {
+            _tokenEmbedding.wrappedValue = Embedding(
+                embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
+        }
 
         self.layers = (0 ..< args.hiddenLayers).map { i in
             LFM3DecoderLayer(args, layerIdx: i)

@@ -60,6 +60,11 @@ struct LFM3VLMessageGenerator: MessageGenerator {
     }
 }
 
+struct LFM3VideoFrameGroup {
+    let startTime: Double
+    let tokens: [Int]
+}
+
 struct LFM3VLProcessor: UserInputProcessor {
     let config: LFM3VLProcessorConfiguration
     let tokenizer: any Tokenizer
@@ -73,6 +78,18 @@ struct LFM3VLProcessor: UserInputProcessor {
         guard input.audios.isEmpty else {
             throw VLMError.processing("LFM3-VL does not support audio input")
         }
+        let messages = LFM3VLMessageGenerator().generate(
+            from: input.removingSpecialTokenLabels(using: tokenizer))
+        let prompt = try tokenizer.applyChatTemplate(
+            messages: messages,
+            tools: input.tools, additionalContext: input.additionalContext)
+        return try await prepare(input: input, prompt: prompt)
+    }
+
+    func prepare(
+        input: UserInput, prompt: [Int],
+        videoExpansion: ((Int, [LFM3VideoFrameGroup]) throws -> [Int])? = nil
+    ) async throws -> LMInput {
         let c = config.image
         guard c.patchSize > 0, c.mergeSize > 0, c.temporalPatchSize > 0,
             c.patchSize <= Int.max / c.mergeSize,
@@ -82,11 +99,6 @@ struct LFM3VLProcessor: UserInputProcessor {
         else {
             throw VLMError.processing("Invalid LFM3-VL image processor configuration")
         }
-        let messages = LFM3VLMessageGenerator().generate(
-            from: input.removingSpecialTokenLabels(using: tokenizer))
-        let prompt = try tokenizer.applyChatTemplate(
-            messages: messages,
-            tools: input.tools, additionalContext: input.additionalContext)
         guard let imageToken = tokenizer.convertTokenToId("<|image|>") else {
             throw VLMError.processing("LFM3-VL tokenizer has no image token")
         }
@@ -122,7 +134,7 @@ struct LFM3VLProcessor: UserInputProcessor {
             throw VLMError.processing("LFM3-VL video frame rate must be finite and positive")
         default: break
         }
-        for video in input.videos {
+        for (videoIndex, video) in input.videos.enumerated() {
             var images = [CIImage]()
             let v = config.video
             guard v.fps.isFinite, v.fps > 0, v.minFrames > 0, v.maxFrames >= v.minFrames else {
@@ -151,7 +163,7 @@ struct LFM3VLProcessor: UserInputProcessor {
             let (pixels, grid) = try patchify(images, height: height, width: width)
             videoPatches.append(pixels)
             videoGrids.append(grid)
-            var expanded = ""
+            var groups = [LFM3VideoFrameGroup]()
             for group in 0 ..< grid.t {
                 let start = min(group * c.temporalPatchSize, sampled.timestamps.count - 1)
                 let end = min(start + c.temporalPatchSize - 1, sampled.timestamps.count - 1)
@@ -159,15 +171,20 @@ struct LFM3VLProcessor: UserInputProcessor {
                 guard time.isFinite else {
                     throw VLMError.processing("Invalid LFM3-VL video timestamp")
                 }
-                expanded += String(
+                var expanded = String(
                     format: "<%.1f seconds>", locale: Locale(identifier: "en_US_POSIX"), time)
                 expanded +=
                     "<|vision_start|>"
                     + String(
                         repeating: "<|video|>", count: grid.h * grid.w / c.mergeSize / c.mergeSize)
                     + "<|vision_end|>"
+                groups.append(
+                    .init(
+                        startTime: sampled.timestamps[start].seconds,
+                        tokens: tokenizer.encode(text: expanded, addSpecialTokens: false)))
             }
-            videoExpansions.append(tokenizer.encode(text: expanded, addSpecialTokens: false))
+            videoExpansions.append(
+                try videoExpansion?(videoIndex, groups) ?? groups.flatMap { $0.tokens })
         }
         var videoIndex = 0
         var tokens = [Int]()

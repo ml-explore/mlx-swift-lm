@@ -38,6 +38,38 @@ struct LFM3OmniAudioFeatures {
         return features
     }
 
+    func stream(
+        _ chunk: MLXArray, state: LFM3OmniFeatureStreamingState,
+        finalize: Bool = false, sampleRate: Int = 16_000
+    ) throws -> MLXArray {
+        guard sampleRate == 16000, !state.finished, chunk.ndim == 1,
+            chunk.dtype.isFloatingPoint, all(isFinite(chunk)).item(Bool.self)
+        else { throw VLMError.processing("Invalid LFM3-Omni audio stream or sample chunk") }
+        let samples =
+            state.samples.map { concatenated([$0, chunk.asType(.float32)]) }
+            ?? chunk.asType(.float32)
+        let total = state.sampleCount + chunk.size
+        let count: Int
+        if finalize {
+            let frames = total == 0 ? 0 : 1 + max(0, total - fftSize + hopSize - 1) / hopSize
+            count = frames - state.frameCount
+        } else {
+            count = samples.size < fftSize ? 0 : 1 + (samples.size - fftSize) / hopSize
+        }
+        let features: MLXArray
+        if count > 0 {
+            let size = (count - 1) * hopSize + fftSize
+            features = try self(samples[..<min(size, samples.size)])
+        } else {
+            features = MLXArray.zeros([melBins, 0])
+        }
+        state.samples = finalize ? nil : contiguous(samples[(count * hopSize)...])
+        state.sampleCount = total
+        state.frameCount += count
+        state.finished = finalize
+        return features
+    }
+
     private func filters() -> MLXArray {
         let frequencyStep = 200.0 / 3.0
         let logStep = log(6.4) / 27.0
@@ -59,4 +91,11 @@ struct LFM3OmniAudioFeatures {
         }
         return MLXArray(weights).reshaped(fftSize / 2 + 1, melBins)
     }
+}
+
+final class LFM3OmniFeatureStreamingState {
+    fileprivate var samples: MLXArray?
+    fileprivate var sampleCount = 0
+    fileprivate var frameCount = 0
+    fileprivate var finished = false
 }

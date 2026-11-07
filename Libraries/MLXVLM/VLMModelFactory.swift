@@ -105,6 +105,7 @@ public enum VLMTypeRegistry {
         "llava_qwen2": create(FastVLMConfiguration.self, FastVLM.init),
         "pixtral": create(PixtralConfiguration.self, PixtralVLM.init),
         "mistral3": create(Mistral3VLMConfiguration.self, Mistral3VLM.init),
+        "lfm3_omni": create(LFM3OmniConfiguration.self, LFM3Omni.init),
         "lfm3_vl": create(LFM3VLConfiguration.self, LFM3VL.init),
         "lfm2_vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "lfm2-vl": create(LFM2VLConfiguration.self, LFM2VL.init),
@@ -149,6 +150,7 @@ public enum VLMProcessorTypeRegistry {
             PixtralProcessorConfiguration.self, PixtralProcessor.init),
         "Mistral3Processor": create(
             Mistral3VLMProcessorConfiguration.self, Mistral3VLMProcessor.init),
+        "Lfm3OmniProcessor": create(LFM3OmniProcessorConfiguration.self, LFM3OmniProcessor.init),
         "Lfm3VlProcessor": create(LFM3VLProcessorConfiguration.self, LFM3VLProcessor.init),
         "Lfm2VlProcessor": create(
             LFM2VLProcessorConfiguration.self, LFM2VLProcessor.init),

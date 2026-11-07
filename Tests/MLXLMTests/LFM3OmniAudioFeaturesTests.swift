@@ -4,6 +4,55 @@ import XCTest
 @testable import MLXVLM
 
 final class LFM3OmniAudioFeaturesTests: XCTestCase {
+    func testStreamingPreservesWindowBoundariesAndFinalPadding() throws {
+        let frontend = LFM3OmniAudioFeatures()
+        var state: UInt32 = 17
+        let samples = (0 ..< 1733).map { _ -> Float in
+            state = state &* 1_664_525 &+ 1_013_904_223
+            return Float(state >> 8) / Float(1 << 24) - 0.5
+        }
+        let input = MLXArray(samples)
+        let expected = try frontend(input)
+        for chunkSize in [1, 159, 160, 399, 401, 800] {
+            let state = LFM3OmniFeatureStreamingState()
+            var chunks = [MLXArray]()
+            for offset in stride(from: 0, to: input.size, by: chunkSize) {
+                chunks.append(
+                    try frontend.stream(
+                        input[offset ..< min(offset + chunkSize, input.size)], state: state))
+            }
+            chunks.append(try frontend.stream(MLXArray.zeros([0]), state: state, finalize: true))
+            let actual = concatenated(chunks, axis: 1)
+            print(
+                "Feature stream chunk \(chunkSize) max error \(abs(actual - expected).max().item(Float.self))"
+            )
+            XCTAssertEqual(actual.shape, expected.shape)
+            XCTAssertTrue(allClose(actual, expected, rtol: 0.001, atol: 0.001).item(Bool.self))
+            XCTAssertThrowsError(try frontend.stream(input, state: state))
+        }
+    }
+
+    func testStreamingLowEnergyBandsPreserveMelPower() throws {
+        let frontend = LFM3OmniAudioFeatures()
+        let input = sin(MLXArray(0 ..< 1733).asType(.float32) * 0.13)
+        let expected = try frontend(input)
+        let state = LFM3OmniFeatureStreamingState()
+        var chunks = [MLXArray]()
+        for offset in stride(from: 0, to: input.size, by: 159) {
+            chunks.append(
+                try frontend.stream(input[offset ..< min(offset + 159, input.size)], state: state))
+        }
+        chunks.append(try frontend.stream(MLXArray.zeros([0]), state: state, finalize: true))
+        let actual = concatenated(chunks, axis: 1)
+        // Logarithms magnify FFT rounding near silence; compare the underlying band power.
+        let actualPower = pow(MLXArray(Float(10)), actual * 4 - 4)
+        let expectedPower = pow(MLXArray(Float(10)), expected * 4 - 4)
+        print(
+            "Mel power absolute error \(abs(actualPower - expectedPower).max().item(Float.self)), reference max \(expectedPower.max().item(Float.self)), relative \((abs(actualPower - expectedPower) / maximum(expectedPower, 1e-8)).max().item(Float.self))"
+        )
+        XCTAssertTrue(allClose(actualPower, expectedPower, rtol: 0.002, atol: 1e-9).item(Bool.self))
+    }
+
     func testSilenceAndTailPadding() throws {
         let frontend = LFM3OmniAudioFeatures()
         for (samples, frames) in [(1, 1), (400, 1), (401, 2), (560, 2), (561, 3)] {
