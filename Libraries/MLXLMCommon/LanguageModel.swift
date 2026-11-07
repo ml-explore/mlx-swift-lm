@@ -455,6 +455,27 @@ extension LanguageModel {
     }
 }
 
+/// A ``LanguageModel`` whose prompt prefill can stop after any chunk and resume later, with
+/// the same result as ``LanguageModel/prepare(_:cache:state:prefill:)``.
+///
+/// ``BatchTokenIterator`` uses it to prefill a queued prompt one chunk per step while other
+/// rows keep decoding, and to report ``BatchEvent/prefill(id:processed:total:)`` progress.
+/// A model opts in only once its chunks and its model-state carry-over between them are
+/// verified to match its `prepare`; other models keep whole-prompt admission. `prepare` then
+/// leaves the prompt's remaining positions, `prompt[chunks.last.upperBound...]` (or the whole
+/// prompt when there are no chunks), for the first sampled forward.
+public protocol ResumablePrefillModel: LanguageModel {
+    /// The prompt ranges `prepare` feeds, in order, before the remainder it leaves for the
+    /// first sampled forward. Empty when the prompt goes through in that forward alone.
+    func prefillChunks(for prompt: LMInput.Text, prefill: PrefillParameters) -> [Range<Int>]
+
+    /// Feeds `range` of `prompt` into `cache` as `prepare` feeds that chunk, and returns the
+    /// model state for the next chunk.
+    func prefillChunk(
+        _ prompt: LMInput.Text, range: Range<Int>, cache: [KVCache], state: LMOutput.State?
+    ) -> LMOutput.State?
+}
+
 /// Optional protocol that can be implemented by ``LanguageModel`` and will
 /// provide an automatic implementation of ``LanguageModel/newCache(parameters:)``
 public protocol KVCacheDimensionProvider {

@@ -144,25 +144,44 @@ public struct PrefillParameters: Sendable {
         maximumStepSize: Int? = nil,
         _ body: (Range<Int>) -> Void
     ) throws -> Int {
+        let ranges = chunkRanges(
+            total: total, reserving: reserving, defaultStepSize: defaultStepSize,
+            maximumStepSize: maximumStepSize)
+        for range in ranges {
+            try Task.checkCancellation()
+            autoreleasepool {
+                body(range)
+                progress?(range.upperBound, total)
+                Memory.clearCache()
+            }
+        }
+        return ranges.last?.upperBound ?? 0
+    }
+
+    /// The chunks ``forEachChunk(total:reserving:defaultStepSize:maximumStepSize:_:)`` feeds,
+    /// in order: consecutive ranges from 0 that leave `reserving` positions for the caller's
+    /// final forward. Empty under ``Chunking/unchunked``.
+    public func chunkRanges(
+        total: Int,
+        reserving: Int = 1,
+        defaultStepSize: Int = PrefillParameters.defaultStepSize,
+        maximumStepSize: Int? = nil
+    ) -> [Range<Int>] {
         guard
             let chunkLength = chunkLength(
                 forChunking: total - reserving,
                 defaultStepSize: defaultStepSize, maximumStepSize: maximumStepSize)
         else {
-            return 0
+            return []
         }
         let slack = min(reserving, 1)
+        var ranges: [Range<Int>] = []
         var processed = 0
         while total - processed > reserving {
-            try Task.checkCancellation()
-            autoreleasepool {
-                let n = min(chunkLength, total - processed - slack)
-                body(processed ..< processed + n)
-                processed += n
-                progress?(processed, total)
-                Memory.clearCache()
-            }
+            let n = min(chunkLength, total - processed - slack)
+            ranges.append(processed ..< processed + n)
+            processed += n
         }
-        return processed
+        return ranges
     }
 }
