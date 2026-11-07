@@ -480,16 +480,12 @@ final class GLM5NextTests: XCTestCase {
     /// `MLX_GLM5NEXT_ORACLES` lists reference JSON files (comma-separated),
     /// each `{"prompt": [token ids], "greedy": [token ids]}` from greedy
     /// decoding at batch 1. Prints decode tokens/s and peak memory.
-    func testLocalCheckpointGreedyParity() throws {
+    func testLocalCheckpointGreedyParity() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard let path = environment["MLX_GLM5NEXT_MODEL"], !path.isEmpty,
             let oracles = environment["MLX_GLM5NEXT_ORACLES"], !oracles.isEmpty
         else {
             throw XCTSkip("set MLX_GLM5NEXT_MODEL and MLX_GLM5NEXT_ORACLES to run")
-        }
-        struct Oracle: Decodable {
-            let prompt: [Int]
-            let greedy: [Int]
         }
 
         let directory = URL(fileURLWithPath: path)
@@ -503,6 +499,21 @@ final class GLM5NextTests: XCTestCase {
             modelDirectory: directory, model: model,
             perLayerQuantization: base.perLayerQuantization)
 
+        // Keep the weights wired, as a caller of `generate` does with a wired
+        // memory ticket. Unwired, a checkpoint this size is paged on every
+        // decode step and decodes at about 1% of the wired rate.
+        let weightBytes = model.parameters().flattened().reduce(0) { $0 + $1.1.nbytes }
+        let ticket = WiredSumPolicy().ticket(size: weightBytes, kind: .active)
+        try await ticket.withWiredLimit {
+            try runOracles(oracles, model: model)
+        }
+    }
+
+    private func runOracles(_ oracles: String, model: any LanguageModel) throws {
+        struct Oracle: Decodable {
+            let prompt: [Int]
+            let greedy: [Int]
+        }
         for file in oracles.split(separator: ",") {
             let oracle = try JSONDecoder().decode(
                 Oracle.self, from: Data(contentsOf: URL(fileURLWithPath: String(file))))
