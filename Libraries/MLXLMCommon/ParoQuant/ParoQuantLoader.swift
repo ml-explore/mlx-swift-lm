@@ -813,6 +813,7 @@ public func loadParoQuantModel<T: LanguageModel>(
 
     // 13. Load tokenizer
     let tokenizer = try await tokenizerLoader.load(from: directory)
+    try model.validate(tokenizer: tokenizer)
 
     // 14. Create processor with messageGenerator
     // Use DefaultMessageGenerator — LLMModel.messageGenerator(tokenizer:) is in MLXLLM

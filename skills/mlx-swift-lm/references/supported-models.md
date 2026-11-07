@@ -123,7 +123,7 @@ includes both required fixes:
 [#398](https://github.com/huggingface/swift-transformers/pull/398). The token-ID and
 chat/tool-template integration tests pass with 1.4.0. Supply a `TokenizerLoader`
 using that release or another compatible implementation. The model rejects known
-incompatible tokenization through the generic `LLMModel.validate(tokenizer:)` hook
+incompatible tokenization through the generic `BaseLanguageModel.validate(tokenizer:)` hook
 at load time. The core package does not depend on Swift Transformers.
 
 Unit tests generate deterministic weights in memory and compare every operator,

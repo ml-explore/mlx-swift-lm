@@ -631,7 +631,7 @@ final class LFM3Tests: XCTestCase {
     }
 
     func testTokenizerCompatibilityProbes() throws {
-        let model: any LLMModel = try tinyModel()
+        let model: any BaseLanguageModel = try tinyModel()
         XCTAssertNoThrow(try model.validate(tokenizer: ProbeTokenizer()))
         for broken in [".reduce", "line.\r\nThis"] {
             XCTAssertThrowsError(try model.validate(tokenizer: ProbeTokenizer(broken: broken))) {
