@@ -2087,6 +2087,57 @@ struct BatchedRecurrentParityTests {
     /// LFM2's convolution layers keep a rewind history whose length depends on the prompt, in
     /// a `MambaCache` subclass. Merging it as a plain recurrent cache would stack histories of
     /// different lengths, so its rows are refused until it has a batched form of its own.
+    /// The typed `ArraysCache.merge(_: [ArraysCache])` checks its rows through `validateMerge`,
+    /// which must refuse a subclass and a mix of classes the way the erased path does.
+    @Test("Typed recurrent merge validation refuses subclasses and mixed classes")
+    func typedMergeValidationRefusesSubclassesAndMixedClasses() throws {
+        let model = try tinyLFM2()
+        let convolution = try [[Int32(1), 2, 3], [4, 5, 6, 7, 8]].map { prompt in
+            let cache = try model.newCache(parameters: nil)
+            eval(model(MLXArray(prompt).reshaped([1, prompt.count]), cache: cache))
+            return try #require(cache[0] as? RewindableConvolutionCache)
+        }
+        #expect(throws: KVCacheError.self) { try ArraysCache.validateMerge(convolution) }
+        #expect(throws: KVCacheError.self) {
+            try ArraysCache.validateMerge([MambaCache(), convolution[0]])
+        }
+        #expect(throws: KVCacheError.self) {
+            try ArraysCache.validateMerge([ArraysCache(size: 2), MambaCache()])
+        }
+        #expect(throws: KVCacheError.self) {
+            try ArraysCache.validateMerge([MambaCache(), ArraysCache(size: 2)])
+        }
+        try ArraysCache.validateMerge([MambaCache(), MambaCache()])
+        try ArraysCache.validateMerge([ArraysCache(size: 2), ArraysCache(size: 2)])
+    }
+
+    @Test("Typed recurrent merge stops on rewindable convolution rows")
+    func typedMergeStopsOnRewindableConvolutionRows() async throws {
+        let result = try await #require(
+            processExitsWith: .failure, observing: [\.standardErrorContent]
+        ) {
+            _ = ArraysCache.merge([
+                RewindableConvolutionCache(stateLength: 3),
+                RewindableConvolutionCache(stateLength: 3),
+            ])
+        }
+        #expect(
+            String(decoding: result.standardErrorContent, as: UTF8.self).contains(
+                "RewindableConvolutionCache must implement its own batched form"))
+    }
+
+    @Test("Typed recurrent merge stops on a mix of ArraysCache and MambaCache rows")
+    func typedMergeStopsOnMixedRecurrentClasses() async throws {
+        let result = try await #require(
+            processExitsWith: .failure, observing: [\.standardErrorContent]
+        ) {
+            _ = ArraysCache.merge([ArraysCache(size: 2), MambaCache()])
+        }
+        #expect(
+            String(decoding: result.standardErrorContent, as: UTF8.self).contains(
+                "Recurrent rows must all be ArraysCache"))
+    }
+
     @Test("LFM2's rewindable convolution rows are refused, not merged as plain recurrent state")
     func lfm2ConvolutionRowsAreRefused() throws {
         let model = try tinyLFM2()

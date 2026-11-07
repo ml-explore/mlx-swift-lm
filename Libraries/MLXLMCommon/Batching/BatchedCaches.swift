@@ -186,9 +186,20 @@ extension ArraysCache: BatchableKVCache {
     }
 
     /// Check merge storage without reading tensors or excluding prepared metadata.
+    ///
+    /// Rows must be all exactly `ArraysCache` or all exactly `MambaCache`. A subclass such as
+    /// LFM2's `RewindableConvolutionCache` keeps state this merge would drop, so it needs a
+    /// batched form of its own.
     static func validateMerge(_ caches: [ArraysCache]) throws {
         guard let first = caches.first else {
             throw KVCacheError(message: "merge needs a cache")
+        }
+        let kind = type(of: first)
+        guard kind == ArraysCache.self || kind == MambaCache.self else {
+            throw KVCacheError(message: "\(kind) must implement its own batched form")
+        }
+        guard caches.allSatisfy({ type(of: $0) == kind }) else {
+            throw KVCacheError(message: "Recurrent rows must all be \(kind)")
         }
         guard caches.allSatisfy({ $0.slotCount == first.slotCount }) else {
             throw KVCacheError(message: "Recurrent rows must share one slot count")
@@ -230,7 +241,8 @@ extension ArraysCache: BatchableKVCache {
     /// rest; a batch of `MambaCache` stays a `MambaCache`. When any row holds state, the
     /// empty rows get zero state of the same shape first, so every row counts. An all-empty
     /// merge stays empty and takes its row count from the first update.
-    /// Inputs must share their slot counts and populated state layouts.
+    /// Inputs must be all exactly `ArraysCache` or all exactly `MambaCache`, and share their
+    /// slot counts and populated state layouts.
     public static func merge(_ caches: [ArraysCache]) -> ArraysCache {
         precondition(!caches.isEmpty, "merge needs a cache")
         do {
