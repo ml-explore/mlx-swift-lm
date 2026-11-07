@@ -416,12 +416,16 @@ public final class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache, Ba
     }
 
     /// The row at `index` in temporal order without its left padding, as a
-    /// ``RotatingKVCache`` with this cache's window, step and capacity origin.
+    /// ``RotatingKVCache`` with this cache's window, step and capacity origin. A row whose
+    /// padding covers every written position comes back empty.
     public func extract(_ index: Int) -> any KVCache {
         // An array index past the rows would read another row's metadata; check it first, as
         // mlx-vlm's BatchKVCache.extract does:
         // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1730-L1736
         precondition(index >= 0 && index < batchSize, "BatchRotatingKVCache row index out of range")
+        precondition(
+            lengths == nil,
+            "BatchRotatingKVCache.extract takes finalized rows; finalize a ragged prefill first")
         let cache = RotatingKVCache(maxSize: window, step: step)
         let padding = Int(leftPadding[index].item(Int32.self))
         let rowOffset = max(0, Int(batchOffset[index].item(Int32.self)))
@@ -435,8 +439,10 @@ public final class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache, Ba
                 rowValues = MLX.roll(rowValues, shift: -idx, axis: 2)
             }
             let end = rotated ? window : idx
-            rowKeys = MLX.contiguous(rowKeys[.ellipsis, padding ..< end, 0...])
-            rowValues = MLX.contiguous(rowValues[.ellipsis, padding ..< end, 0...])
+            // Padding past the written positions leaves an empty row, as Python's slice does.
+            let start = min(padding, end)
+            rowKeys = MLX.contiguous(rowKeys[.ellipsis, start ..< end, 0...])
+            rowValues = MLX.contiguous(rowValues[.ellipsis, start ..< end, 0...])
             cache.state = [rowKeys, rowValues]
             // A concatenated buffer can hold more than a window, in temporal order.
             rowIdx = min(rowOffset, rowKeys.dim(2))
@@ -542,7 +548,9 @@ extension RotatingKVCache {
     /// absolute position. Port of mlx-lm's `RotatingKVCache.merge`.
     ///
     /// - Throws: `KVCacheError` when a cache keeps a prefix or a rewind reserve,
-    ///   which a batch cannot hold, or when the rows mix empty and prefilled caches.
+    ///   which a batch cannot hold, when the rows mix empty and prefilled caches, or when a
+    ///   cache holds more than one row or differs from the first prefilled row in heads,
+    ///   widths or dtype.
     public static func merge(_ caches: [RotatingKVCache]) throws -> BatchRotatingKVCache {
         precondition(!caches.isEmpty, "merge needs a cache")
         let first = caches[0]
@@ -566,6 +574,8 @@ extension RotatingKVCache {
                 message: "RotatingKVCache.merge needs rows that are all empty or all prefilled")
         }
         let rows = try caches.map { try BatchRotatingKVCache(row: $0) }
+        // Each input must be one row of one layout, or `extend` stops in concatenation.
+        try validateBatchKVRows(rows.map { ($0.keys, $0.values, $0.keys?.dim(2) ?? 0) })
         guard prefilled > 0 else {
             // Empty rows have nothing to join; size the batch directly, as mlx-vlm does:
             // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L2120-L2121

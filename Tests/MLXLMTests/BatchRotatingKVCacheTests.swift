@@ -837,6 +837,64 @@ struct BatchRotatingKVCacheTests {
                 "BatchRotatingKVCache row index out of range"))
     }
 
+    @Test("extract returns an empty row when its padding covers every written position")
+    func extractPaddingOnlyRow() throws {
+        let cache = BatchRotatingKVCache(maxSize: 8, leftPadding: [4, 0])
+        cache.capacityOrigin = .requested
+        cache.step = 3
+        let keys = MLXArray([Float(1), 2]).reshaped([2, 1, 1, 1])
+        _ = cache.update(keys: keys, values: keys + 100)
+
+        let padded = try row(cache, 0)
+        #expect(padded.offset == 0)
+        #expect(try #require(padded.state.first).size == 0)
+        #expect(padded.maxSize == 8)
+        #expect(padded.allocationStep == 3)
+        #expect(padded.capacityOrigin == .requested)
+        let written = try row(cache, 1)
+        #expect(written.offset == 1)
+        #expect(try view(written).0.asArray(Float.self) == [2])
+    }
+
+    @Test("extract refuses a ragged prefill before finalize")
+    func extractBeforeFinalize() async throws {
+        let result = try await #require(
+            processExitsWith: .failure, observing: [\.standardErrorContent]
+        ) {
+            Device.withDefaultDevice(.cpu) {
+                let cache = BatchRotatingKVCache(maxSize: 8, leftPadding: [0, 0])
+                cache.prepare(lengths: [1, 3])
+                let kv = MLXArray.ones([2, 1, 3, 1])
+                _ = cache.update(keys: kv, values: kv)
+                _ = cache.extract(0)
+            }
+        }
+        #expect(
+            String(decoding: result.standardErrorContent, as: UTF8.self).contains(
+                "BatchRotatingKVCache.extract takes finalized rows"))
+    }
+
+    @Test("merge throws for rows of another layout or with more than one row")
+    func mergeRefusesMismatchedRows() throws {
+        func filled(
+            heads: Int = 1, headDim: Int = 1, rows: Int = 1, dtype: DType = .float32
+        ) -> RotatingKVCache {
+            let cache = RotatingKVCache(maxSize: 8)
+            let kv = MLXArray.ones([rows, heads, 3, headDim]).asType(dtype)
+            _ = cache.update(keys: kv, values: kv)
+            return cache
+        }
+        for other in [filled(headDim: 2), filled(heads: 2), filled(dtype: .float16)] {
+            #expect(throws: KVCacheError.self) { _ = try RotatingKVCache.merge([filled(), other]) }
+        }
+        // A cache holding two rows is not a row, also alone: admission merges one at a time.
+        #expect(throws: KVCacheError.self) { _ = try mergeCaches([filled(rows: 2)]) }
+        #expect(throws: KVCacheError.self) {
+            _ = try RotatingKVCache.merge([filled(), filled(rows: 2)])
+        }
+        #expect(try RotatingKVCache.merge([filled(), filled()]).batchSize == 2)
+    }
+
     @Test("A batched rotating cache cannot be saved as a prompt cache")
     func savePromptCacheRefuses() {
         let cache = BatchRotatingKVCache(maxSize: 16, leftPadding: [0, 1])
