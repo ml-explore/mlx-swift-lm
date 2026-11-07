@@ -4,6 +4,36 @@ import Foundation
 import MLX
 import MLXNN
 
+/// What one ``BatchTokenIterator/next()`` call reports for one row.
+///
+/// Every row ends with exactly one terminal event, `.finished` or `.failed`, placed after its
+/// last `.token` in the same array; its id never appears again. A row dropped with
+/// ``BatchTokenIterator/remove(_:)`` gets no terminal event.
+public enum BatchEvent: Sendable {
+    /// Prefill progress for the row that was prefilled this step, in prompt tokens.
+    ///
+    /// Not emitted yet: every queued prompt is prefilled whole within one ``BatchTokenIterator/next()``,
+    /// and `PrefillParameters.progress` reports its chunks. Reserved for resumable prefill.
+    case prefill(id: Int, processed: Int, total: Int)
+    /// A generated token. Stop tokens are never reported here.
+    case token(id: Int, token: Int)
+    /// The row ended normally: `.stop` on a stop token, carried in `stopToken`, or `.length`
+    /// after the row's last `.token` within its limit.
+    case finished(id: Int, reason: GenerateStopReason, stopToken: Int?)
+    /// The row could not join the batch and produced no tokens: its supplied cache does not
+    /// match the batch, its prefill failed, or the model's state allows only one row.
+    case failed(id: Int, error: any Error)
+
+    /// The row the event is about.
+    public var id: Int {
+        switch self {
+        case .prefill(let id, _, _), .token(let id, _), .finished(let id, _, _),
+            .failed(let id, _):
+            id
+        }
+    }
+}
+
 /// Tokens for a batch of prompts, decoded together, with rows joining and leaving at any step.
 ///
 /// The batched form of ``TokenIterator``: port of mlx-vlm's `BatchGenerator` and
@@ -13,8 +43,13 @@ import MLXNN
 /// ``insert(prompts:maxTokens:caches:samplers:processors:)`` are prefilled on the next
 /// call to ``next()``, one at a time through the model's own
 /// prefill, then their caches are merged into the decoding batch. Every ``next()`` decodes
-/// one token for every row; a row leaves when it emits a stop token or reaches its limit, or
-/// when it is removed.
+/// one token for every row; a row leaves when it samples a stop token or reaches its limit,
+/// or when it is removed.
+///
+/// ``next()`` returns the step's ``BatchEvent``s, or `nil` when the iterator is idle: no row
+/// is decoding or queued. Unlike `IteratorProtocol`, `nil` does not mean exhausted; inserting
+/// more prompts makes the next call return events again. Drive it with
+/// `while let events = try iterator.next() { … }`.
 ///
 /// One sampler draws the whole `[B, V]` batch when every row shares one; otherwise each row
 /// is sampled on its own, so a row with a seeded sampler draws the tokens it would draw
@@ -24,15 +59,6 @@ import MLXNN
 /// arbitrary per-request state cannot be merged or filtered without a model-specific contract.
 public struct BatchTokenIterator {
 
-    /// One decoded token of one row.
-    public struct Response: Sendable, Equatable {
-        public let id: Int
-        public let token: Int
-        /// Set on the row's last token: `.stop` on the stop token itself, `.length` on the last
-        /// one within the limit.
-        public let finishReason: GenerateStopReason?
-    }
-
     public enum StateError: Error, LocalizedError, Equatable {
         case modelStateRequiresSingleRow
         case invalidatedByModelState
@@ -40,7 +66,7 @@ public struct BatchTokenIterator {
         public var errorDescription: String? {
             switch self {
             case .modelStateRequiresSingleRow:
-                "Model-owned state requires a single row; remove the queued rows before continuing."
+                "Model-owned state requires a single row; this row cannot join the batch."
             case .invalidatedByModelState:
                 "The model returned state while decoding multiple rows. Remove all rows before continuing."
             }
@@ -68,6 +94,15 @@ public struct BatchTokenIterator {
         let cache: [KVCache]?
     }
 
+    /// A queued row prefilled into its own cache, ready to join the batch.
+    private struct Prefilled {
+        let row: Row
+        let cache: [KVCache]
+        /// The row's cache, layer by layer, as a batch of one.
+        let batches: [any BatchableKVCache]
+        let logits: MLXArray
+    }
+
     private var pending: [Pending] = []
     private var nextID = 0
 
@@ -80,6 +115,8 @@ public struct BatchTokenIterator {
     private var nextTokens: MLXArray?
     private var state: LMOutput.State?
     private var invalidatedByModelState = false
+    /// `.failed` events from a ``next()`` call that then threw, returned by the next call.
+    private var undelivered: [BatchEvent] = []
 
     /// - Parameters:
     ///   - model: the model
@@ -104,13 +141,17 @@ public struct BatchTokenIterator {
     /// The ids of every row decoding or queued, in insertion order.
     public var ids: [Int] { rows.map(\.id) + pending.map(\.row.id) }
 
+    /// The ids of the queued rows, in the order they are prefilled.
+    public var pendingIDs: [Int] { pending.map(\.row.id) }
+
     /// Queues prompts; they are prefilled on the next ``next()``.
     ///
     /// - Parameters:
     ///   - prompts: the token prompts, each at least one token
     ///   - maxTokens: a token limit per prompt, or the iterator's for all
     ///   - caches: a prompt cache per prompt to continue from, as ``LanguageModel/newCache(parameters:)``
-    ///     makes it, or `nil` for a fresh one. The batch keeps them; do not use them elsewhere.
+    ///     makes it, or `nil` for a fresh one. The batch works on a copy; the supplied cache
+    ///     is not changed.
     ///   - samplers: a sampler per prompt, or the iterator's
     ///   - processors: a processor per prompt, or a copy of the iterator's
     /// - Returns: one id per prompt, in order
@@ -140,7 +181,21 @@ public struct BatchTokenIterator {
         return ids
     }
 
-    /// Drops rows, queued or decoding.
+    /// Queues one prompt; it is prefilled on the next ``next()``. The single-row form of
+    /// ``insert(prompts:maxTokens:caches:samplers:processors:)``.
+    ///
+    /// - Returns: the row's id
+    @discardableResult
+    public mutating func insert(
+        prompt: [Int], maxTokens: Int? = nil, cache: [KVCache]? = nil,
+        sampler: LogitSampler? = nil, processor: LogitProcessor? = nil
+    ) -> Int {
+        insert(
+            prompts: [prompt], maxTokens: maxTokens.map { [$0] }, caches: [cache],
+            samplers: [sampler], processors: [processor])[0]
+    }
+
+    /// Drops rows, queued or decoding. A removed row gets no terminal event.
     public mutating func remove(_ ids: [Int]) {
         let removed = Set(ids)
         pending.removeAll { removed.contains($0.row.id) }
@@ -152,119 +207,101 @@ public struct BatchTokenIterator {
 
     /// Prefills the queued prompts and decodes one token for every row.
     ///
-    /// - Returns: a token per decoding row, in batch order; empty once nothing is left
-    /// - Throws: `KVCacheError` when caches cannot be batched or extended compatibly, or ``StateError`` when
-    ///   multiple rows need model-owned state. An error after a batched forward invalidates
-    ///   the batch because its cache writes cannot be undone; remove all rows before resuming.
-    public mutating func next() throws -> [Response] {
+    /// A queued row that cannot join the batch ends with a `.failed` event and the other rows
+    /// carry on: its supplied cache does not match the batch (`KVCacheError`), its prefill
+    /// throws, or the model's state allows one row only (``StateError/modelStateRequiresSingleRow``).
+    ///
+    /// - Returns: the step's events, in batch order and never empty, or `nil` when no row is
+    ///   decoding or queued
+    /// - Throws: ``StateError/invalidatedByModelState`` when the model returns state while
+    ///   decoding several rows. An error from a batched forward invalidates the batch because
+    ///   its cache writes cannot be undone; remove all rows before resuming. `.failed` events
+    ///   from the throwing call are returned by the next one.
+    public mutating func next() throws -> [BatchEvent]? {
         // Drain admission and decode temporaries, including rejected admissions.
         try autoreleasepool {
+            if !undelivered.isEmpty {
+                let events = undelivered
+                undelivered = []
+                return events
+            }
             guard !invalidatedByModelState else { throw StateError.invalidatedByModelState }
-            if !pending.isEmpty {
-                try admit()
-            }
-            guard !rows.isEmpty else { return [] }
+            guard !rows.isEmpty || !pending.isEmpty else { return nil }
 
-            let tokens = try step()
-            var responses: [Response] = []
-            var keep: [Int] = []
-            for (index, token) in tokens.enumerated() {
-                rows[index].generated += 1
-                let reason: GenerateStopReason? =
-                    stopTokens.contains(token)
-                    ? .stop : rows[index].generated >= rows[index].maxTokens ? .length : nil
-                responses.append(Response(id: rows[index].id, token: token, finishReason: reason))
-                if reason == nil {
-                    keep.append(index)
-                }
+            // Every queued row either fails here or joins the rows.
+            let events = pending.isEmpty ? [] : admit()
+            guard !rows.isEmpty else { return events }
+            do {
+                return events + (try decode())
+            } catch {
+                undelivered = events
+                throw error
             }
-            if keep.count < rows.count {
-                filter(keeping: keep)
-            }
-            return responses
         }
     }
 
-    /// Prefills the queued prompts separately and joins them to the rows.
-    private mutating func admit() throws {
-        guard state?.isEmpty != false else { throw StateError.modelStateRequiresSingleRow }
-        let admitted = pending
-        // Check topology before a model can index a supplied cache during prefill.
-        func preservesTypes(_ original: KVCache, _ copy: KVCache) -> Bool {
-            guard type(of: original) == type(of: copy) else { return false }
-            if let original = original as? CacheList, let copy = copy as? CacheList {
-                return original.children.count == copy.children.count
-                    && zip(original.children, copy.children).allSatisfy(preservesTypes)
+    /// Feeds every row its next token and reports the tokens, finishing the rows that end.
+    private mutating func decode() throws -> [BatchEvent] {
+        let tokens = try step()
+        var events: [BatchEvent] = []
+        var keep: [Int] = []
+        for (index, token) in tokens.enumerated() {
+            let id = rows[index].id
+            if stopTokens.contains(token) {
+                events.append(.finished(id: id, reason: .stop, stopToken: token))
+                continue
             }
-            return true
+            rows[index].generated += 1
+            events.append(.token(id: id, token: token))
+            if rows[index].generated >= rows[index].maxTokens {
+                events.append(.finished(id: id, reason: .length, stopToken: nil))
+            } else {
+                keep.append(index)
+            }
         }
-        let caches = try admitted.map { pending in
-            try pending.cache?.map { original in
-                let copy = original.copy()
-                guard preservesTypes(original, copy) else {
-                    throw KVCacheError(message: "A prompt cache copy must preserve its exact types")
-                }
-                return copy
-            } ?? model.newCache(parameters: nil)
+        if keep.count < rows.count {
+            filter(keeping: keep)
         }
-        let layerCount = rows.isEmpty ? caches[0].count : cache.count
-        guard caches.allSatisfy({ $0.count == layerCount }) else {
-            throw KVCacheError(message: "Every row must share the active cache's layer count")
-        }
+        return events
+    }
 
-        // Each prompt goes into its own cache first, as TokenIterator feeds it: the model's
-        // prefill (chunked) and then the remainder it leaves, whose last position's logits
-        // give the row's first sample. mlx-vlm's chunked prefill likewise stops short of the
-        // last token and feeds it in the step that samples:
-        // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/generate/ar.py#L2358-L2364 The rows merge after, every one prefilled, so a
-        // one-token prompt joins a longer one on any cache type. Rows are not prefilled
-        // together right-padded: the recurrent models' scans do not honour the prepared
-        // lengths yet.
-        var firstLogits: [MLXArray] = []
+    /// Prefills the queued prompts separately, in queue order, and joins the ones that can
+    /// to the rows. Returns a `.failed` event for each one that cannot; the active rows and
+    /// the other queued rows are unaffected by it.
+    private mutating func admit() -> [BatchEvent] {
+        let queued = pending
+        pending = []
+        var events: [BatchEvent] = []
+        var admitted: [Prefilled] = []
         var admittedState: LMOutput.State?
-        for (pending, cache) in zip(admitted, caches) {
-            let input = LMInput(tokens: MLXArray(pending.prompt.map { Int32($0) }))
-            let output: LMOutput
-            if let prefix = prefill.prefix {
-                prefix(KVCacheStorage(cache, plan: .disabled).processedTokenCount)
+        for item in queued {
+            do {
+                let (row, rowState) = try prefillRow(
+                    item, joining: admitted, admittedState: admittedState)
+                if rowState != nil { admittedState = rowState }
+                admitted.append(row)
+            } catch {
+                events.append(.failed(id: item.row.id, error: error))
             }
-            switch try model.prepare(input, cache: cache, state: nil, prefill: prefill) {
-            case .tokens(let remainder):
-                output = model.nextTokenLogits(remainder[text: .newAxis], cache: cache, state: nil)
-                // A `.tokens` prefill reports its own chunks only; the remainder completes
-                // the prompt (a `.logits` prefill reports its own terminal).
-                let total = pending.prompt.count
-                prefill.progress?(total, total)
-            case .logits(let prepared):
-                output = prepared
-            }
-            if output.state?.isEmpty == false {
-                guard rows.count + admitted.count == 1 else {
-                    throw StateError.modelStateRequiresSingleRow
-                }
-                admittedState = output.state
-            }
-            let logits = output.logits[0..., -1, 0...]
-            eval(cache)
-            eval(logits)
-            firstLogits.append(logits)
         }
-        // Validate every pair before one bulk merge; extending each prefix repeatedly
-        // copies KV buffers. No sampling or active-cache changes happen until all layers pass.
-        let merged = try (0 ..< layerCount).map { layer in
-            let layerCaches = caches.map { $0[layer] }
-            let rowBatches = try layerCaches.map { try mergeCaches([$0]) }
-            for index in rowBatches.indices {
-                for previous in 0 ..< index {
-                    try rowBatches[previous].validateExtension(other: rowBatches[index])
+        guard !admitted.isEmpty else { return events }
+
+        // Each row was checked against the active rows and the rows before it; one bulk merge
+        // avoids copying KV buffers by extending each prefix repeatedly. No sampling or
+        // active-cache changes happen until every layer merges.
+        let merged: [any BatchableKVCache]
+        do {
+            merged = try admitted[0].cache.indices.map { layer in
+                let joined =
+                    admitted.count == 1
+                    ? admitted[0].batches[layer] : try mergeCaches(admitted.map { $0.cache[layer] })
+                if !rows.isEmpty {
+                    try cache[layer].validateExtension(other: joined)
                 }
+                return joined
             }
-            let joined =
-                rowBatches.count == 1 ? rowBatches[0] : try mergeCaches(layerCaches)
-            if !rows.isEmpty {
-                try cache[layer].validateExtension(other: joined)
-            }
-            return joined
+        } catch {
+            return events + admitted.map { .failed(id: $0.row.id, error: error) }
         }
 
         // The new rows sample their first tokens alone: the decoding rows' next tokens are
@@ -275,7 +312,7 @@ public struct BatchTokenIterator {
         batch.rows = admitted.map(\.row)
         batch.cache = merged
         batch.state = admittedState
-        batch.nextTokens = batch.sampleNext(concatenated(firstLogits))
+        batch.nextTokens = batch.sampleNext(concatenated(admitted.map(\.logits)))
 
         if rows.isEmpty {
             rows = batch.rows
@@ -289,7 +326,87 @@ public struct BatchTokenIterator {
             rows += batch.rows
             nextTokens = concatenated([nextTokens!, batch.nextTokens!])
         }
-        pending = []
+        return events
+    }
+
+    /// Prefills one queued prompt into its own cache and checks that it can join the active
+    /// rows and `admitted`, the rows already prefilled this step.
+    ///
+    /// - Returns: the prefilled row, and the model state its prefill returned, if any
+    private func prefillRow(
+        _ item: Pending, joining admitted: [Prefilled], admittedState: LMOutput.State?
+    ) throws -> (Prefilled, LMOutput.State?) {
+        // Model state is carried for one row only.
+        guard state?.isEmpty != false, admittedState == nil else {
+            throw StateError.modelStateRequiresSingleRow
+        }
+        // Check topology before a model can index a supplied cache during prefill.
+        func preservesTypes(_ original: KVCache, _ copy: KVCache) -> Bool {
+            guard type(of: original) == type(of: copy) else { return false }
+            if let original = original as? CacheList, let copy = copy as? CacheList {
+                return original.children.count == copy.children.count
+                    && zip(original.children, copy.children).allSatisfy(preservesTypes)
+            }
+            return true
+        }
+        let rowCache =
+            try item.cache?.map { original in
+                let copy = original.copy()
+                guard preservesTypes(original, copy) else {
+                    throw KVCacheError(message: "A prompt cache copy must preserve its exact types")
+                }
+                return copy
+            } ?? model.newCache(parameters: nil)
+        let layerCount = rows.isEmpty ? admitted.first?.cache.count ?? rowCache.count : cache.count
+        guard rowCache.count == layerCount else {
+            throw KVCacheError(message: "Every row must share the active cache's layer count")
+        }
+
+        // The prompt goes into its own cache first, as TokenIterator feeds it: the model's
+        // prefill (chunked) and then the remainder it leaves, whose last position's logits
+        // give the row's first sample. mlx-vlm's chunked prefill likewise stops short of the
+        // last token and feeds it in the step that samples:
+        // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/generate/ar.py#L2358-L2364 The rows merge after, every one prefilled, so a
+        // one-token prompt joins a longer one on any cache type. Rows are not prefilled
+        // together right-padded: the recurrent models' scans do not honour the prepared
+        // lengths yet.
+        let input = LMInput(tokens: MLXArray(item.prompt.map { Int32($0) }))
+        let output: LMOutput
+        if let prefix = prefill.prefix {
+            prefix(KVCacheStorage(rowCache, plan: .disabled).processedTokenCount)
+        }
+        switch try model.prepare(input, cache: rowCache, state: nil, prefill: prefill) {
+        case .tokens(let remainder):
+            output = model.nextTokenLogits(remainder[text: .newAxis], cache: rowCache, state: nil)
+            // A `.tokens` prefill reports its own chunks only; the remainder completes
+            // the prompt (a `.logits` prefill reports its own terminal).
+            let total = item.prompt.count
+            prefill.progress?(total, total)
+        case .logits(let prepared):
+            output = prepared
+        }
+        let rowState = output.state?.isEmpty == false ? output.state : nil
+        if rowState != nil, !rows.isEmpty || !admitted.isEmpty {
+            throw StateError.modelStateRequiresSingleRow
+        }
+        let logits = output.logits[0..., -1, 0...]
+        eval(rowCache)
+        eval(logits)
+
+        // Check every layer against the active rows and the rows admitted before it, so a
+        // row that cannot join fails alone.
+        let batches = try rowCache.map { try mergeCaches([$0]) }
+        for layer in batches.indices {
+            for previous in admitted {
+                try previous.batches[layer].validateExtension(other: batches[layer])
+            }
+            if !rows.isEmpty {
+                try cache[layer].validateExtension(other: batches[layer])
+            }
+        }
+        return (
+            Prefilled(row: item.row, cache: rowCache, batches: batches, logits: logits), rowState
+        )
     }
 
     /// Feeds the next tokens, samples their successors and returns the fed tokens.
@@ -398,6 +515,8 @@ extension LogitSampler {
 ///   - processor: the processor every prompt gets a copy of
 ///   - prefill: how prompts are prefilled
 /// - Returns: the generated tokens per prompt, in order
+/// - Throws: the error of the first prompt that cannot join the batch, or an error from a
+///   batched forward
 public func batchGenerate(
     model: any LanguageModel, prompts: [[Int]], caches: [[KVCache]?]? = nil,
     maxTokens: Int = 128, stopTokens: Set<Int> = [], sampler: LogitSampler = ArgMaxSampler(),
@@ -408,11 +527,17 @@ public func batchGenerate(
         maxTokens: maxTokens, prefill: prefill)
     let ids = iterator.insert(prompts: prompts, caches: caches)
     var results = [Int: [Int]](uniqueKeysWithValues: ids.map { ($0, []) })
-    while true {
-        let responses = try iterator.next()
-        if responses.isEmpty { break }
-        for response in responses where response.finishReason != .stop {
-            results[response.id, default: []].append(response.token)
+    while let events = try iterator.next() {
+        for event in events {
+            switch event {
+            case .token(let id, let token):
+                results[id, default: []].append(token)
+            case .failed(_, let error):
+                iterator.remove(iterator.ids)
+                throw error
+            case .prefill, .finished:
+                break
+            }
         }
     }
     return ids.map { results[$0] ?? [] }

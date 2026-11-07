@@ -29,9 +29,9 @@ struct BatchTokenIteratorTests {
                 var iterator = BatchTokenIterator(model: model, maxTokens: 2)
                 let uids = iterator.insert(prompts: [[1], [3]])
 
-                let responses = try iterator.next()
-                #expect(responses.map(\.id) == uids)
-                #expect(responses.map(\.token) == [2, 4])
+                let events = try iterator.next()
+                #expect(tokenIDs(events) == uids)
+                #expect(tokens(events) == [2, 4])
                 #expect(log.created.filter { $0 == "prepare" }.count == 2)
                 #expect(log.created.filter { $0 == "forward" }.count == 3)
                 #expect(log.released.sorted() == log.created.sorted())
@@ -39,7 +39,7 @@ struct BatchTokenIteratorTests {
         }
     }
 
-    @Test("Throwing admission drains its autoreleases while leaving the request queued")
+    @Test("Throwing admission drains its autoreleases and fails the request")
     func rejectedAdmissionAutoreleases() throws {
         try Device.withDefaultDevice(.cpu) {
             try autoreleasepool {
@@ -53,14 +53,15 @@ struct BatchTokenIteratorTests {
                 var iterator = BatchTokenIterator(model: model)
                 let uids = iterator.insert(prompts: [[1]])
 
-                do {
-                    _ = try iterator.next()
-                    Issue.record("Expected prompt preparation to throw")
-                } catch BatchAdmissionProbeError.rejected {
-                }
-                #expect(iterator.ids == uids)
+                let events = try #require(try iterator.next())
+                #expect(events.count == 1)
+                let failure = try #require(failures(events).first)
+                #expect(failure.id == uids[0])
+                #expect(failure.error as? BatchAdmissionProbeError == .rejected)
+                #expect(iterator.ids.isEmpty)
                 #expect(log.created == ["prepare"])
                 #expect(log.released == log.created)
+                #expect(try iterator.next() == nil)
             }
         }
     }
@@ -82,9 +83,9 @@ struct BatchTokenIteratorTests {
 
             let first = try iterator.next()
             let second = try iterator.next()
-            #expect(first.map(\.id) == uids)
-            #expect(first.map(\.token) == [0, 0])
-            #expect(second.map(\.token) == [7, 7])
+            #expect(tokenIDs(first) == uids)
+            #expect(tokens(first) == [0, 0])
+            #expect(tokens(second) == [7, 7])
             #expect(model.decodeOffsets == [7, 7])
             #expect(prefixes.map(\.offset) == offsets)
             for (prefix, offset) in zip(prefixes, offsets) {
@@ -111,104 +112,139 @@ struct BatchTokenIteratorTests {
             let second = try iterator.next()
             let third = try iterator.next()
 
-            #expect(first.map(\.id) == running)
-            #expect(second.map(\.id) == running + joining)
-            #expect(second.map(\.token) == [3, 0])
-            #expect(third.map(\.token) == [7, 7])
+            #expect(tokenIDs(first) == running)
+            #expect(tokenIDs(second) == running + joining)
+            #expect(tokens(second) == [3, 0])
+            #expect(tokens(third) == [7, 7])
             // The batch decodes at the longest row's offset once the longer row joins.
             #expect(model.decodeOffsets == [3, 7, 7])
         }
     }
 
     @Test(
-        "Incompatible admission preserves active caches, queued uids and the seeded stream",
+        "Incompatible admission fails the queued row and leaves active caches and the seeded stream",
         arguments: CacheAdmissionMismatch.allCases)
     func incompatibleAdmission(mismatch: CacheAdmissionMismatch) throws {
         try Device.withDefaultDevice(.cpu) {
+            func cacheValues(_ caches: [KVCache]) -> [[[Float]]] {
+                caches.map { cache in cache.state.map { $0.asType(.float32).asArray(Float.self) } }
+            }
+            // The same active row without the incompatible one, for comparison.
+            let referenceModel = BatchTextOnlyModel(
+                preparation: .tokens, cacheFactory: mismatch.active)
+            let referenceSampler = AdmissionCountingSampler()
+            var reference = BatchTokenIterator(
+                model: referenceModel, sampler: referenceSampler, maxTokens: 6)
+            _ = reference.insert(prompts: [[1, 3]])
+            let referenceTokens = tokens(try reference.next()) + tokens(try reference.next())
+
             let model = BatchTextOnlyModel(preparation: .tokens, cacheFactory: mismatch.active)
             let sampler = AdmissionCountingSampler()
             var iterator = BatchTokenIterator(model: model, sampler: sampler, maxTokens: 6)
             let active = iterator.insert(prompts: [[1, 3]])
-            var tokens = try iterator.next().map(\.token)
-            let activeCaches = model.lastCache
-            let saved = activeCaches.map { cache in
-                cache.state.map { $0.asType(.float32).asArray(Float.self) }
-            }
-            let calls = sampler.calls
+            var generated = tokens(try iterator.next())
             let prepares = model.prepareCacheOffsets.count
             let queued = iterator.insert(prompts: [[7]], caches: [mismatch.incoming()])
 
-            #expect(throws: KVCacheError.self) { _ = try iterator.next() }
-            #expect(iterator.ids == active + queued)
-            #expect(sampler.calls == calls, "rejection must not draw from the shared random state")
+            // The queued row fails and the active row decodes in the same step.
+            let events = try #require(try iterator.next())
+            let failure = try #require(failures(events).first)
+            #expect(failures(events).count == 1)
+            #expect(failure.id == queued[0])
+            #expect(failure.error is KVCacheError)
+            #expect(tokenIDs(events) == active)
+            #expect(iterator.ids == active)
+            generated += tokens(events)
+            #expect(generated == referenceTokens)
             #expect(
-                activeCaches.map { cache in
-                    cache.state.map { $0.asType(.float32).asArray(Float.self) }
-                } == saved)
+                sampler.calls == referenceSampler.calls,
+                "rejection must not draw from the shared random state")
+            #expect(cacheValues(model.lastCache) == cacheValues(referenceModel.lastCache))
             if mismatch == .layerCount {
                 #expect(model.prepareCacheOffsets.count == prepares)
             }
 
-            iterator.remove(queued)
-            tokens += try collect(&iterator, uids: active)[0]
+            generated += try collect(&iterator, uids: active)[0]
             let expected = try batchGenerate(
                 model: BatchTextOnlyModel(preparation: .tokens, cacheFactory: mismatch.active),
                 prompts: [[1, 3]], maxTokens: 6, sampler: AdmissionCountingSampler())
-            #expect(tokens == expected[0])
+            #expect(generated == expected[0])
         }
     }
 
-    @Test("Queued rows with different layer counts fail before either prompt is prefilled")
+    @Test("A queued row with a different layer count fails before its prompt is prefilled")
     func pendingLayerCounts() throws {
         try Device.withDefaultDevice(.cpu) {
+            let referenceSampler = AdmissionCountingSampler()
+            var reference = BatchTokenIterator(
+                model: BatchTextOnlyModel(preparation: .tokens), sampler: referenceSampler)
+            _ = reference.insert(prompts: [[1]], caches: [[KVCacheSimple()]])
+            _ = try reference.next()
+
             let model = BatchTextOnlyModel(preparation: .tokens)
             let sampler = AdmissionCountingSampler()
             var iterator = BatchTokenIterator(model: model, sampler: sampler)
             let uids = iterator.insert(
                 prompts: [[1], [2]],
                 caches: [[KVCacheSimple()], [KVCacheSimple(), KVCacheSimple()]])
-            #expect(throws: KVCacheError.self) { _ = try iterator.next() }
-            #expect(iterator.ids == uids)
-            #expect(model.prepareCacheOffsets.isEmpty)
-            #expect(sampler.calls == 0)
-            iterator.remove([uids[1]])
-            let responses = try iterator.next()
-            #expect(responses.map(\.id) == [uids[0]])
+            let events = try iterator.next()
+            #expect(failures(events).map(\.id) == [uids[1]])
+            #expect(failures(events).allSatisfy { $0.error is KVCacheError })
+            #expect(tokenIDs(events) == [uids[0]])
+            #expect(iterator.ids == [uids[0]])
+            #expect(model.prepareCacheOffsets == [0], "only the first row is prefilled")
+            #expect(
+                sampler.calls == referenceSampler.calls,
+                "rejection must not draw from the shared random state")
         }
     }
 
     @Test(
-        "Queued rows that cannot join each other fail before sampling or touching active rows",
+        "A queued row that cannot join the others fails before sampling or touching active rows",
         arguments: [false, true])
     func incompatibleQueuedRows(withActiveRows: Bool) throws {
         try Device.withDefaultDevice(.cpu) {
-            let model = BatchTextOnlyModel(
-                preparation: .tokens, cacheFactory: { [RotatingKVCache(maxSize: 16)] })
-            let sampler = AdmissionCountingSampler()
-            var iterator = BatchTokenIterator(model: model, sampler: sampler, maxTokens: 6)
-            var active: [Int] = []
-            if withActiveRows {
-                active = iterator.insert(prompts: [[1, 3]])
-                _ = try iterator.next()
+            func run(includingMismatch: Bool) throws -> (
+                iterator: BatchTokenIterator, sampler: AdmissionCountingSampler, active: [Int],
+                queued: [Int], events: [BatchEvent]?
+            ) {
+                let model = BatchTextOnlyModel(
+                    preparation: .tokens, cacheFactory: { [RotatingKVCache(maxSize: 16)] })
+                let sampler = AdmissionCountingSampler()
+                var iterator = BatchTokenIterator(model: model, sampler: sampler, maxTokens: 6)
+                var active: [Int] = []
+                if withActiveRows {
+                    active = iterator.insert(prompts: [[1, 3]])
+                    _ = try iterator.next()
+                }
+                // The first queued row matches the active rows; the second's window matches
+                // neither.
+                var prompts: [[Int]] = [[7]]
+                var caches: [[KVCache]?] = [[RotatingKVCache(maxSize: 16)]]
+                if includingMismatch {
+                    prompts.append([9])
+                    caches.append([RotatingKVCache(maxSize: 8)])
+                }
+                let queued = iterator.insert(prompts: prompts, caches: caches)
+                let events = try iterator.next()
+                return (iterator, sampler, active, queued, events)
             }
-            let calls = sampler.calls
-            // The first queued row matches the active rows; the second's window matches neither.
-            let queued = iterator.insert(
-                prompts: [[7], [9]],
-                caches: [[RotatingKVCache(maxSize: 16)], [RotatingKVCache(maxSize: 8)]])
+            let reference = try run(includingMismatch: false)
+            let actual = try run(includingMismatch: true)
 
-            #expect(throws: KVCacheError.self) { _ = try iterator.next() }
-            #expect(iterator.ids == active + queued)
-            #expect(sampler.calls == calls, "rejection must not draw from the shared random state")
-
-            iterator.remove([queued[1]])
-            let responses = try iterator.next()
-            #expect(responses.map(\.id) == active + [queued[0]])
+            #expect(failures(actual.events).map(\.id) == [actual.queued[1]])
+            #expect(failures(actual.events).allSatisfy { $0.error is KVCacheError })
+            #expect(tokenIDs(actual.events) == actual.active + [actual.queued[0]])
+            #expect(tokens(actual.events) == tokens(reference.events))
+            #expect(actual.iterator.ids == actual.active + [actual.queued[0]])
+            #expect(
+                actual.sampler.calls == reference.sampler.calls,
+                "rejection must not draw from the shared random state")
         }
     }
 
     @Test(
-        "A model whose cache layer has no batched form is refused at admission by a throw",
+        "A model whose cache layer has no batched form is refused at admission with failures",
         arguments: [false, true])
     func layerWithoutBatchedForm(nested: Bool) throws {
         try Device.withDefaultDevice(.cpu) {
@@ -223,9 +259,13 @@ struct BatchTokenIteratorTests {
             let sampler = AdmissionCountingSampler()
             var iterator = BatchTokenIterator(model: model, sampler: sampler)
             let uids = iterator.insert(prompts: [[1, 2], [3]])
-            #expect(throws: KVCacheError.self) { _ = try iterator.next() }
-            #expect(iterator.ids == uids)
+            let events = try iterator.next()
+            #expect(failures(events).map(\.id) == uids)
+            #expect(failures(events).allSatisfy { $0.error is KVCacheError })
+            #expect(events?.count == uids.count)
+            #expect(iterator.ids.isEmpty)
             #expect(sampler.calls == 0)
+            #expect(try iterator.next() == nil)
         }
     }
 
@@ -241,8 +281,10 @@ struct BatchTokenIteratorTests {
                 let sampler = AdmissionCountingSampler()
                 var iterator = BatchTokenIterator(model: model, sampler: sampler)
                 let uids = iterator.insert(prompts: [[1]], caches: [[cache]])
-                #expect(throws: KVCacheError.self) { _ = try iterator.next() }
-                #expect(iterator.ids == uids)
+                let events = try iterator.next()
+                #expect(failures(events).map(\.id) == uids)
+                #expect(failures(events).allSatisfy { $0.error is KVCacheError })
+                #expect(iterator.ids.isEmpty)
                 #expect(model.prepareCacheOffsets.isEmpty)
                 #expect(sampler.calls == 0)
             }
@@ -279,50 +321,57 @@ struct BatchTokenIteratorTests {
         }
     }
 
-    @Test("Rejected stateful admission leaves the active row and queued uid intact")
+    @Test("Rejected stateful admission fails the queued row and leaves the active row intact")
     func statefulAdmissionPreservesActiveRow() throws {
         try Device.withDefaultDevice(.cpu) {
             let model = BatchTextOnlyModel(preparation: .logits, stateful: true)
             var iterator = BatchTokenIterator(model: model, maxTokens: 5)
             let active = iterator.insert(prompts: [[1, 3]])
-            var tokens = try iterator.next().map(\.token)
+            var generated = tokens(try iterator.next())
             let queued = iterator.insert(prompts: [[7]])
-            #expect(throws: BatchTokenIterator.StateError.modelStateRequiresSingleRow) {
-                _ = try iterator.next()
-            }
-            #expect(iterator.ids == active + queued)
-            iterator.remove(queued)
-            tokens += try collect(&iterator, uids: active)[0]
-            #expect(tokens == [4, 6, 9, 13, 2])
+            let events = try iterator.next()
+            #expect(failures(events).map(\.id) == queued)
+            #expect(
+                failures(events).allSatisfy {
+                    $0.error as? BatchTokenIterator.StateError == .modelStateRequiresSingleRow
+                })
+            #expect(tokenIDs(events) == active)
+            #expect(iterator.ids == active)
+            generated += tokens(events)
+            generated += try collect(&iterator, uids: active)[0]
+            #expect(generated == [4, 6, 9, 13, 2])
 
             let removed = iterator.insert(prompts: [[5]])
-            #expect(try iterator.next().map(\.token) == [6])
+            #expect(tokens(try iterator.next()) == [6])
             iterator.remove(removed)
             _ = iterator.insert(prompts: [[8]])
-            #expect(try iterator.next().map(\.token) == [9])
+            #expect(tokens(try iterator.next()) == [9])
         }
     }
 
     @Test(
-        "Stateful multirow prefill is rejected without discarding queued rows",
+        "A row cannot join a queued row whose prefill returned model state",
         arguments: BatchTextOnlyPreparation.allCases)
     func statefulPrefillRefusesMultipleRows(preparation: BatchTextOnlyPreparation) throws {
         try Device.withDefaultDevice(.cpu) {
             let model = BatchTextOnlyModel(preparation: preparation, stateful: true)
             var iterator = BatchTokenIterator(model: model, maxTokens: 3)
             let uids = iterator.insert(prompts: [[1, 3], [7]])
-            #expect(throws: BatchTokenIterator.StateError.modelStateRequiresSingleRow) {
-                _ = try iterator.next()
-            }
-            #expect(iterator.ids == uids)
-            iterator.remove([uids[1]])
-            let tokens = try collect(&iterator, uids: [uids[0]])
-            #expect(tokens == [[4, 6, 9]])
+            let first = try iterator.next()
+            #expect(failures(first).map(\.id) == [uids[1]])
+            #expect(
+                failures(first).allSatisfy {
+                    $0.error as? BatchTokenIterator.StateError == .modelStateRequiresSingleRow
+                })
+            #expect(model.prepareCacheOffsets == [0], "the refused row is not prefilled")
+            #expect(iterator.ids == [uids[0]])
+            let rest = try collect(&iterator, uids: [uids[0]])
+            #expect([tokens(first) + rest[0]] == [[4, 6, 9]])
         }
     }
 
     @Test(
-        "Rejected admission retries a supplied prefix without prefilling it twice",
+        "A refused row leaves its supplied prefix to retry without prefilling it twice",
         arguments: BatchTextOnlyPreparation.allCases)
     func rejectedAdmissionPreservesSuppliedCache(preparation: BatchTextOnlyPreparation) throws {
         try Device.withDefaultDevice(.cpu) {
@@ -334,21 +383,27 @@ struct BatchTokenIteratorTests {
             var prefill = PrefillParameters()
             prefill.prefix = { log.events.append(.prefix($0)) }
             var iterator = BatchTokenIterator(model: model, maxTokens: 3, prefill: prefill)
-            let uids = iterator.insert(prompts: [[1, 3], [7]], caches: [[prefix], nil])
-            #expect(throws: BatchTokenIterator.StateError.modelStateRequiresSingleRow) {
-                _ = try iterator.next()
-            }
+            // The first row's prefill returns state, so the row with the prefix is refused.
+            let uids = iterator.insert(prompts: [[7], [1, 3]], caches: [nil, [prefix]])
+            let first = try iterator.next()
+            #expect(failures(first).map(\.id) == [uids[1]])
+            #expect(
+                failures(first).allSatisfy {
+                    $0.error as? BatchTokenIterator.StateError == .modelStateRequiresSingleRow
+                })
             #expect(prefix.offset == 2)
             #expect(maxAbsDifference(try #require(prefix.state.first), keys) == 0)
-            #expect(model.prepareCacheOffsets == [2])
-            #expect(log.events == [.prefix(2)])
+            #expect(model.prepareCacheOffsets == [0])
+            #expect(log.events == [.prefix(0)])
+            let running = try collect(&iterator, uids: [uids[0]])
+            #expect([tokens(first) + running[0]] == [[8, 10, 13]])
 
-            iterator.remove([uids[1]])
-            let tokens = try collect(&iterator, uids: [uids[0]])
-            #expect(tokens == [[4, 6, 9]])
-            #expect(model.prepareCacheOffsets == [2, 2])
+            let retry = iterator.insert(prompt: [1, 3], cache: [prefix])
+            let retried = try collect(&iterator, uids: [retry])
+            #expect(retried == [[4, 6, 9]])
+            #expect(model.prepareCacheOffsets == [0, 2])
             #expect(prefix.offset == 2)
-            #expect(log.events == [.prefix(2), .prefix(2)])
+            #expect(log.events == [.prefix(0), .prefix(2)])
         }
     }
 
@@ -367,8 +422,95 @@ struct BatchTokenIteratorTests {
             }
             iterator.remove(iterator.ids)
             _ = iterator.insert(prompts: [[7]])
-            let tokens = try iterator.next().map(\.token)
-            #expect(tokens == [8])
+            let events = try iterator.next()
+            #expect(tokens(events) == [8])
+        }
+    }
+
+    @Test("Each row ends with one terminal event after its last token, and nil means idle")
+    func terminalEvents() throws {
+        try Device.withDefaultDevice(.cpu) {
+            // Each step samples the fed token plus one: [1] samples the stop token 2 first,
+            // [5] runs to its limit and [9] stops on 11 after one token.
+            let model = BatchTextOnlyModel(preparation: .tokens)
+            var iterator = BatchTokenIterator(model: model, stopTokens: [2, 11])
+            #expect(try iterator.next() == nil)
+            let ids = iterator.insert(prompts: [[1], [5], [9]], maxTokens: [4, 3, 4])
+            #expect(iterator.pendingIDs == ids)
+            #expect(iterator.ids == ids)
+
+            var steps: [[String]] = []
+            while let events = try iterator.next() {
+                #expect(!events.isEmpty)
+                #expect(iterator.pendingIDs.isEmpty)
+                steps.append(events.map(describe))
+            }
+            let (a, b, c) = (ids[0], ids[1], ids[2])
+            #expect(
+                steps == [
+                    ["finished(\(a), stop, 2)", "token(\(b), 6)", "token(\(c), 10)"],
+                    ["token(\(b), 7)", "finished(\(c), stop, 11)"],
+                    ["token(\(b), 8)", "finished(\(b), length, nil)"],
+                ])
+            #expect(iterator.ids.isEmpty)
+            #expect(try iterator.next() == nil)
+
+            // Inserting after idle starts the iterator again.
+            let d = iterator.insert(prompt: [3], maxTokens: 1)
+            #expect(d == c + 1)
+            #expect(iterator.pendingIDs == [d])
+            #expect(
+                try iterator.next()?.map(describe) == [
+                    "token(\(d), 4)", "finished(\(d), length, nil)",
+                ])
+            #expect(try iterator.next() == nil)
+        }
+    }
+
+    @Test("The single-prompt insert forwards its cache, limit, sampler and processor")
+    func singlePromptInsert() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = tinyLlama()
+            let parameters = GenerateParameters(repetitionPenalty: 1.5, repetitionContextSize: 8)
+            let sampler = TopPSampler(temperature: 0.8, topP: 0.9, seed: 5)
+            let prefix: [Int] = [1, 2, 3, 4]
+            let alone = try model.newCache(parameters: nil)
+            eval(model(MLXArray(prefix.map { Int32($0) })[.newAxis], cache: alone))
+            let expected = try generateAlone(
+                model, prompt: [5, 6], cache: alone, processor: parameters.processor(),
+                sampler: TopPSampler(temperature: 0.8, topP: 0.9, seed: 5), maxTokens: 5)
+
+            let cache = try model.newCache(parameters: nil)
+            eval(model(MLXArray(prefix.map { Int32($0) })[.newAxis], cache: cache))
+            var iterator = BatchTokenIterator(model: model, maxTokens: 8)
+            let id = iterator.insert(
+                prompt: [5, 6], maxTokens: 5, cache: cache, sampler: sampler,
+                processor: parameters.processor())
+            #expect(try collect(&iterator, uids: [id]) == [expected])
+        }
+    }
+
+    @Test("Failures from a step that then throws are returned by the next call")
+    func failuresSurviveAThrowingStep() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = BatchTextOnlyModel(preparation: .tokens, emitsBatchState: true)
+            var iterator = BatchTokenIterator(model: model)
+            let ids = iterator.insert(
+                prompts: [[1, 3], [7], [9]],
+                caches: [nil, nil, [KVCacheSimple(), KVCacheSimple()]])
+            #expect(throws: BatchTokenIterator.StateError.invalidatedByModelState) {
+                _ = try iterator.next()
+            }
+            let delivered = try iterator.next()
+            #expect(delivered?.count == 1)
+            #expect(failures(delivered).map(\.id) == [ids[2]])
+            #expect(failures(delivered).allSatisfy { $0.error is KVCacheError })
+            #expect(throws: BatchTokenIterator.StateError.invalidatedByModelState) {
+                _ = try iterator.next()
+            }
+            #expect(iterator.ids == [ids[0], ids[1]])
+            iterator.remove(iterator.ids)
+            #expect(try iterator.next() == nil)
         }
     }
 
@@ -450,8 +592,8 @@ struct BatchTokenIteratorTests {
             var iterator = BatchTokenIterator(model: model, maxTokens: 24)
             let first = iterator.insert(
                 prompts: [Self.prompts[0]], samplers: [boundarySampler(0)])
-            var firstTokens = try iterator.next().map(\.token)
-            firstTokens += try iterator.next().map(\.token)
+            var firstTokens = tokens(try iterator.next())
+            firstTokens += tokens(try iterator.next())
             let admitted = iterator.insert(
                 prompts: Array(Self.prompts.dropFirst()),
                 samplers: [boundarySampler(1), boundarySampler(2)])
@@ -487,29 +629,44 @@ struct BatchTokenIteratorTests {
             let stop = alone[0][2]
             var iterator = BatchTokenIterator(model: model, stopTokens: [stop], maxTokens: 6)
             let first = iterator.insert(prompts: [Self.prompts[0], Self.prompts[1]])
-            var steps: [[BatchTokenIterator.Response]] = []
-            steps.append(try iterator.next())
-            steps.append(try iterator.next())
+            var steps: [[BatchEvent]] = []
+            steps.append(try #require(try iterator.next()))
+            steps.append(try #require(try iterator.next()))
             let third = iterator.insert(prompts: [Self.prompts[2]], maxTokens: [3])
             #expect(iterator.ids == first + third)
-            while true {
-                let responses = try iterator.next()
-                if responses.isEmpty { break }
-                steps.append(responses)
+            while let events = try iterator.next() {
+                steps.append(events)
             }
 
-            func tokens(_ uid: Int) -> [Int] {
-                steps.flatMap { $0.filter { $0.id == uid } }.map(\.token)
+            func rowTokens(_ uid: Int) -> [Int] {
+                steps.flatMap { tokens($0.filter { $0.id == uid }) }
             }
-            func reasons(_ uid: Int) -> [GenerateStopReason?] {
-                steps.flatMap { $0.filter { $0.id == uid } }.map(\.finishReason)
+            func rowFinishes(_ uid: Int) -> [BatchFinish] {
+                steps.flatMap { finishes($0.filter { $0.id == uid }) }
             }
-            #expect(tokens(first[0]) == Array(alone[0].prefix(3)))
-            #expect(reasons(first[0]) == [nil, nil, .stop])
-            #expect(tokens(first[1]) == alone[1])
-            #expect(reasons(first[1]) == [nil, nil, nil, nil, nil, .length])
-            #expect(tokens(third[0]) == Array(alone[2].prefix(3)))
-            #expect(reasons(third[0]) == [nil, nil, .length])
+            /// Whether the row's terminal event is its last event.
+            func endsWithFinish(_ uid: Int) -> Bool {
+                guard case .finished = steps.flatMap({ $0.filter { $0.id == uid } }).last else {
+                    return false
+                }
+                return true
+            }
+            // The stop token ends the row without being reported as a token.
+            #expect(rowTokens(first[0]) == Array(alone[0].prefix(2)))
+            #expect(
+                rowFinishes(first[0]) == [BatchFinish(id: first[0], reason: .stop, stopToken: stop)]
+            )
+            #expect(rowTokens(first[1]) == alone[1])
+            #expect(
+                rowFinishes(first[1]) == [
+                    BatchFinish(id: first[1], reason: .length, stopToken: nil)
+                ])
+            #expect(rowTokens(third[0]) == Array(alone[2].prefix(3)))
+            #expect(
+                rowFinishes(third[0]) == [
+                    BatchFinish(id: third[0], reason: .length, stopToken: nil)
+                ])
+            #expect((first + third).allSatisfy(endsWithFinish))
             #expect(steps[2].map(\.id) == first + third)
             #expect(steps[3].map(\.id) == [first[1], third[0]])
             #expect(iterator.ids.isEmpty)
@@ -527,8 +684,7 @@ struct BatchTokenIteratorTests {
             _ = try iterator.next()
             iterator.remove([uids[0]])
             #expect(iterator.ids == [uids[2]])
-            let responses = try iterator.next()
-            #expect(responses.map(\.id) == [uids[2]])
+            #expect(tokenIDs(try iterator.next()) == [uids[2]])
         }
     }
 
@@ -601,16 +757,14 @@ struct BatchTokenIteratorTests {
         var uids = iterator.insert(prompts: Array(prompts[0 ..< 2]))
         var tokens = [Int: [Int]]()
         for _ in 0 ..< 2 {
-            for response in try iterator.next() {
-                tokens[response.id, default: []].append(response.token)
+            for case .token(let id, let token) in try iterator.next() ?? [] {
+                tokens[id, default: []].append(token)
             }
         }
         uids += iterator.insert(prompts: [prompts[2]])
-        while true {
-            let responses = try iterator.next()
-            if responses.isEmpty { break }
-            for response in responses {
-                tokens[response.id, default: []].append(response.token)
+        while let events = try iterator.next() {
+            for case .token(let id, let token) in events {
+                tokens[id, default: []].append(token)
             }
         }
         let actual = uids.map { tokens[$0] ?? [] }
@@ -735,9 +889,11 @@ struct BatchTokenIteratorTests {
             var prefill = PrefillParameters()
             prefill.prefix = { log.events.append(.prefix($0)) }
             var iterator = BatchTokenIterator(model: model, prefill: prefill)
-            _ = iterator.insert(prompts: [[1]], caches: [caches])
+            let uids = iterator.insert(prompts: [[1]], caches: [caches])
 
-            #expect(throws: BatchPrefillObservationError.stopped) { _ = try iterator.next() }
+            let failed = failures(try? iterator.next())
+            #expect(failed.map(\.id) == uids)
+            #expect(failed.allSatisfy { $0.error as? BatchPrefillObservationError == .stopped })
             #expect(log.events == [.prefix(kind.expectedCount), .prepare])
         }
     }
@@ -1126,17 +1282,60 @@ private func generateAlone(
     return Array(IteratorSequence(iterator))
 }
 
-/// Every row's tokens, in uid order, until the batch is empty.
+/// Every row's tokens, in uid order, until the iterator is idle.
 private func collect(_ iterator: inout BatchTokenIterator, uids: [Int]) throws -> [[Int]] {
     var results = [Int: [Int]]()
-    while true {
-        let responses = try iterator.next()
-        if responses.isEmpty { break }
-        for response in responses {
-            results[response.id, default: []].append(response.token)
+    while let events = try iterator.next() {
+        for case .token(let id, let token) in events {
+            results[id, default: []].append(token)
         }
     }
     return uids.map { results[$0] ?? [] }
+}
+
+/// The step's `.token` values, in batch order; empty for `nil`.
+private func tokens(_ events: [BatchEvent]?) -> [Int] {
+    (events ?? []).compactMap { if case .token(_, let token) = $0 { token } else { nil } }
+}
+
+/// The ids of the step's `.token` events, in batch order; empty for `nil`.
+private func tokenIDs(_ events: [BatchEvent]?) -> [Int] {
+    (events ?? []).compactMap { if case .token(let id, _) = $0 { id } else { nil } }
+}
+
+/// The step's `.failed` events, in order.
+private func failures(_ events: [BatchEvent]?) -> [(id: Int, error: any Error)] {
+    (events ?? []).compactMap {
+        if case .failed(let id, let error) = $0 { (id, error) } else { nil }
+    }
+}
+
+/// The step's `.finished` events, in order.
+private func finishes(_ events: [BatchEvent]?) -> [BatchFinish] {
+    (events ?? []).compactMap {
+        if case .finished(let id, let reason, let stopToken) = $0 {
+            BatchFinish(id: id, reason: reason, stopToken: stopToken)
+        } else {
+            nil
+        }
+    }
+}
+
+/// An event as text, to compare whole steps.
+private func describe(_ event: BatchEvent) -> String {
+    switch event {
+    case .prefill(let id, let processed, let total): "prefill(\(id), \(processed)/\(total))"
+    case .token(let id, let token): "token(\(id), \(token))"
+    case .finished(let id, let reason, let stopToken):
+        "finished(\(id), \(reason), \(stopToken.map(String.init) ?? "nil"))"
+    case .failed(let id, let error): "failed(\(id), \(error))"
+    }
+}
+
+private struct BatchFinish: Equatable {
+    let id: Int
+    let reason: GenerateStopReason
+    let stopToken: Int?
 }
 
 extension BatchTokenIteratorTests {
@@ -1164,25 +1363,23 @@ extension BatchTokenIteratorTests {
             var uids = iterator.insert(prompts: [prompts[0]], samplers: [sampler(0)])
             var output = [Int: [Int]]()
             for _ in 0 ..< 2 {
-                for response in try iterator.next() {
-                    output[response.id, default: []].append(response.token)
+                for case .token(let id, let token) in try iterator.next() ?? [] {
+                    output[id, default: []].append(token)
                 }
             }
             uids += iterator.insert(
                 prompts: Array(prompts.dropFirst()),
                 samplers: prompts.indices.dropFirst().map { sampler($0) })
             for _ in 0 ..< 2 {
-                for response in try iterator.next() {
-                    output[response.id, default: []].append(response.token)
+                for case .token(let id, let token) in try iterator.next() ?? [] {
+                    output[id, default: []].append(token)
                 }
             }
             iterator.remove([uids[0]])
             #expect(iterator.ids == Array(uids.dropFirst()))
-            while true {
-                let responses = try iterator.next()
-                if responses.isEmpty { break }
-                for response in responses {
-                    output[response.id, default: []].append(response.token)
+            while let events = try iterator.next() {
+                for case .token(let id, let token) in events {
+                    output[id, default: []].append(token)
                 }
             }
             #expect(output[uids[0]] == Array(expected[0].prefix(4)))
