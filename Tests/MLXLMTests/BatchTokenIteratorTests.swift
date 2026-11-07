@@ -30,7 +30,7 @@ struct BatchTokenIteratorTests {
                 let uids = iterator.insert(prompts: [[1], [3]])
 
                 let responses = try iterator.next()
-                #expect(responses.map(\.uid) == uids)
+                #expect(responses.map(\.id) == uids)
                 #expect(responses.map(\.token) == [2, 4])
                 #expect(log.created.filter { $0 == "prepare" }.count == 2)
                 #expect(log.created.filter { $0 == "forward" }.count == 3)
@@ -58,7 +58,7 @@ struct BatchTokenIteratorTests {
                     Issue.record("Expected prompt preparation to throw")
                 } catch BatchAdmissionProbeError.rejected {
                 }
-                #expect(iterator.uids == uids)
+                #expect(iterator.ids == uids)
                 #expect(log.created == ["prepare"])
                 #expect(log.released == log.created)
             }
@@ -82,7 +82,7 @@ struct BatchTokenIteratorTests {
 
             let first = try iterator.next()
             let second = try iterator.next()
-            #expect(first.map(\.uid) == uids)
+            #expect(first.map(\.id) == uids)
             #expect(first.map(\.token) == [0, 0])
             #expect(second.map(\.token) == [7, 7])
             #expect(model.decodeOffsets == [7, 7])
@@ -111,8 +111,8 @@ struct BatchTokenIteratorTests {
             let second = try iterator.next()
             let third = try iterator.next()
 
-            #expect(first.map(\.uid) == running)
-            #expect(second.map(\.uid) == running + joining)
+            #expect(first.map(\.id) == running)
+            #expect(second.map(\.id) == running + joining)
             #expect(second.map(\.token) == [3, 0])
             #expect(third.map(\.token) == [7, 7])
             // The batch decodes at the longest row's offset once the longer row joins.
@@ -139,7 +139,7 @@ struct BatchTokenIteratorTests {
             let queued = iterator.insert(prompts: [[7]], caches: [mismatch.incoming()])
 
             #expect(throws: KVCacheError.self) { _ = try iterator.next() }
-            #expect(iterator.uids == active + queued)
+            #expect(iterator.ids == active + queued)
             #expect(sampler.calls == calls, "rejection must not draw from the shared random state")
             #expect(
                 activeCaches.map { cache in
@@ -168,12 +168,12 @@ struct BatchTokenIteratorTests {
                 prompts: [[1], [2]],
                 caches: [[KVCacheSimple()], [KVCacheSimple(), KVCacheSimple()]])
             #expect(throws: KVCacheError.self) { _ = try iterator.next() }
-            #expect(iterator.uids == uids)
+            #expect(iterator.ids == uids)
             #expect(model.prepareCacheOffsets.isEmpty)
             #expect(sampler.calls == 0)
             iterator.remove([uids[1]])
             let responses = try iterator.next()
-            #expect(responses.map(\.uid) == [uids[0]])
+            #expect(responses.map(\.id) == [uids[0]])
         }
     }
 
@@ -198,12 +198,12 @@ struct BatchTokenIteratorTests {
                 caches: [[RotatingKVCache(maxSize: 16)], [RotatingKVCache(maxSize: 8)]])
 
             #expect(throws: KVCacheError.self) { _ = try iterator.next() }
-            #expect(iterator.uids == active + queued)
+            #expect(iterator.ids == active + queued)
             #expect(sampler.calls == calls, "rejection must not draw from the shared random state")
 
             iterator.remove([queued[1]])
             let responses = try iterator.next()
-            #expect(responses.map(\.uid) == active + [queued[0]])
+            #expect(responses.map(\.id) == active + [queued[0]])
         }
     }
 
@@ -224,7 +224,7 @@ struct BatchTokenIteratorTests {
             var iterator = BatchTokenIterator(model: model, sampler: sampler)
             let uids = iterator.insert(prompts: [[1, 2], [3]])
             #expect(throws: KVCacheError.self) { _ = try iterator.next() }
-            #expect(iterator.uids == uids)
+            #expect(iterator.ids == uids)
             #expect(sampler.calls == 0)
         }
     }
@@ -242,7 +242,7 @@ struct BatchTokenIteratorTests {
                 var iterator = BatchTokenIterator(model: model, sampler: sampler)
                 let uids = iterator.insert(prompts: [[1]], caches: [[cache]])
                 #expect(throws: KVCacheError.self) { _ = try iterator.next() }
-                #expect(iterator.uids == uids)
+                #expect(iterator.ids == uids)
                 #expect(model.prepareCacheOffsets.isEmpty)
                 #expect(sampler.calls == 0)
             }
@@ -290,7 +290,7 @@ struct BatchTokenIteratorTests {
             #expect(throws: BatchTokenIterator.StateError.modelStateRequiresSingleRow) {
                 _ = try iterator.next()
             }
-            #expect(iterator.uids == active + queued)
+            #expect(iterator.ids == active + queued)
             iterator.remove(queued)
             tokens += try collect(&iterator, uids: active)[0]
             #expect(tokens == [4, 6, 9, 13, 2])
@@ -314,7 +314,7 @@ struct BatchTokenIteratorTests {
             #expect(throws: BatchTokenIterator.StateError.modelStateRequiresSingleRow) {
                 _ = try iterator.next()
             }
-            #expect(iterator.uids == uids)
+            #expect(iterator.ids == uids)
             iterator.remove([uids[1]])
             let tokens = try collect(&iterator, uids: [uids[0]])
             #expect(tokens == [[4, 6, 9]])
@@ -365,7 +365,7 @@ struct BatchTokenIteratorTests {
             #expect(throws: BatchTokenIterator.StateError.invalidatedByModelState) {
                 _ = try iterator.next()
             }
-            iterator.remove(iterator.uids)
+            iterator.remove(iterator.ids)
             _ = iterator.insert(prompts: [[7]])
             let tokens = try iterator.next().map(\.token)
             #expect(tokens == [8])
@@ -491,7 +491,7 @@ struct BatchTokenIteratorTests {
             steps.append(try iterator.next())
             steps.append(try iterator.next())
             let third = iterator.insert(prompts: [Self.prompts[2]], maxTokens: [3])
-            #expect(iterator.uids == first + third)
+            #expect(iterator.ids == first + third)
             while true {
                 let responses = try iterator.next()
                 if responses.isEmpty { break }
@@ -499,10 +499,10 @@ struct BatchTokenIteratorTests {
             }
 
             func tokens(_ uid: Int) -> [Int] {
-                steps.flatMap { $0.filter { $0.uid == uid } }.map(\.token)
+                steps.flatMap { $0.filter { $0.id == uid } }.map(\.token)
             }
-            func reasons(_ uid: Int) -> [BatchTokenIterator.FinishReason?] {
-                steps.flatMap { $0.filter { $0.uid == uid } }.map(\.finishReason)
+            func reasons(_ uid: Int) -> [GenerateStopReason?] {
+                steps.flatMap { $0.filter { $0.id == uid } }.map(\.finishReason)
             }
             #expect(tokens(first[0]) == Array(alone[0].prefix(3)))
             #expect(reasons(first[0]) == [nil, nil, .stop])
@@ -510,9 +510,9 @@ struct BatchTokenIteratorTests {
             #expect(reasons(first[1]) == [nil, nil, nil, nil, nil, .length])
             #expect(tokens(third[0]) == Array(alone[2].prefix(3)))
             #expect(reasons(third[0]) == [nil, nil, .length])
-            #expect(steps[2].map(\.uid) == first + third)
-            #expect(steps[3].map(\.uid) == [first[1], third[0]])
-            #expect(iterator.uids.isEmpty)
+            #expect(steps[2].map(\.id) == first + third)
+            #expect(steps[3].map(\.id) == [first[1], third[0]])
+            #expect(iterator.ids.isEmpty)
         }
     }
 
@@ -523,12 +523,12 @@ struct BatchTokenIteratorTests {
             var iterator = BatchTokenIterator(model: model, maxTokens: 4)
             let uids = iterator.insert(prompts: Self.prompts)
             iterator.remove([uids[1]])
-            #expect(iterator.uids == [uids[0], uids[2]])
+            #expect(iterator.ids == [uids[0], uids[2]])
             _ = try iterator.next()
             iterator.remove([uids[0]])
-            #expect(iterator.uids == [uids[2]])
+            #expect(iterator.ids == [uids[2]])
             let responses = try iterator.next()
-            #expect(responses.map(\.uid) == [uids[2]])
+            #expect(responses.map(\.id) == [uids[2]])
         }
     }
 
@@ -602,7 +602,7 @@ struct BatchTokenIteratorTests {
         var tokens = [Int: [Int]]()
         for _ in 0 ..< 2 {
             for response in try iterator.next() {
-                tokens[response.uid, default: []].append(response.token)
+                tokens[response.id, default: []].append(response.token)
             }
         }
         uids += iterator.insert(prompts: [prompts[2]])
@@ -610,7 +610,7 @@ struct BatchTokenIteratorTests {
             let responses = try iterator.next()
             if responses.isEmpty { break }
             for response in responses {
-                tokens[response.uid, default: []].append(response.token)
+                tokens[response.id, default: []].append(response.token)
             }
         }
         let actual = uids.map { tokens[$0] ?? [] }
@@ -1133,7 +1133,7 @@ private func collect(_ iterator: inout BatchTokenIterator, uids: [Int]) throws -
         let responses = try iterator.next()
         if responses.isEmpty { break }
         for response in responses {
-            results[response.uid, default: []].append(response.token)
+            results[response.id, default: []].append(response.token)
         }
     }
     return uids.map { results[$0] ?? [] }
@@ -1165,7 +1165,7 @@ extension BatchTokenIteratorTests {
             var output = [Int: [Int]]()
             for _ in 0 ..< 2 {
                 for response in try iterator.next() {
-                    output[response.uid, default: []].append(response.token)
+                    output[response.id, default: []].append(response.token)
                 }
             }
             uids += iterator.insert(
@@ -1173,16 +1173,16 @@ extension BatchTokenIteratorTests {
                 samplers: prompts.indices.dropFirst().map { sampler($0) })
             for _ in 0 ..< 2 {
                 for response in try iterator.next() {
-                    output[response.uid, default: []].append(response.token)
+                    output[response.id, default: []].append(response.token)
                 }
             }
             iterator.remove([uids[0]])
-            #expect(iterator.uids == Array(uids.dropFirst()))
+            #expect(iterator.ids == Array(uids.dropFirst()))
             while true {
                 let responses = try iterator.next()
                 if responses.isEmpty { break }
                 for response in responses {
-                    output[response.uid, default: []].append(response.token)
+                    output[response.id, default: []].append(response.token)
                 }
             }
             #expect(output[uids[0]] == Array(expected[0].prefix(4)))

@@ -26,15 +26,11 @@ public struct BatchTokenIterator {
 
     /// One decoded token of one row.
     public struct Response: Sendable, Equatable {
-        public let uid: Int
+        public let id: Int
         public let token: Int
-        /// Set on the row's last token: the stop token itself, or the last one within the limit.
-        public let finishReason: FinishReason?
-    }
-
-    public enum FinishReason: Sendable, Equatable {
-        case stop
-        case length
+        /// Set on the row's last token: `.stop` on the stop token itself, `.length` on the last
+        /// one within the limit.
+        public let finishReason: GenerateStopReason?
     }
 
     public enum StateError: Error, LocalizedError, Equatable {
@@ -59,7 +55,7 @@ public struct BatchTokenIterator {
     private let prefill: PrefillParameters
 
     private struct Row {
-        let uid: Int
+        let id: Int
         var sampler: LogitSampler
         var processor: LogitProcessor?
         let maxTokens: Int
@@ -73,7 +69,7 @@ public struct BatchTokenIterator {
     }
 
     private var pending: [Pending] = []
-    private var uidCount = 0
+    private var nextID = 0
 
     /// The rows being decoded.
     private var rows: [Row] = []
@@ -105,8 +101,8 @@ public struct BatchTokenIterator {
         self.prefill = prefill
     }
 
-    /// The uids of every row decoding or queued, in insertion order.
-    public var uids: [Int] { rows.map(\.uid) + pending.map(\.row.uid) }
+    /// The ids of every row decoding or queued, in insertion order.
+    public var ids: [Int] { rows.map(\.id) + pending.map(\.row.id) }
 
     /// Queues prompts; they are prefilled on the next ``next()``.
     ///
@@ -117,7 +113,7 @@ public struct BatchTokenIterator {
     ///     makes it, or `nil` for a fresh one. The batch keeps them; do not use them elsewhere.
     ///   - samplers: a sampler per prompt, or the iterator's
     ///   - processors: a processor per prompt, or a copy of the iterator's
-    /// - Returns: one uid per prompt, in order
+    /// - Returns: one id per prompt, in order
     public mutating func insert(
         prompts: [[Int]], maxTokens: [Int]? = nil, caches: [[KVCache]?]? = nil,
         samplers: [LogitSampler?]? = nil, processors: [LogitProcessor?]? = nil
@@ -127,7 +123,7 @@ public struct BatchTokenIterator {
         precondition(caches.map { $0.count == count } ?? true, "one cache per prompt")
         precondition(samplers.map { $0.count == count } ?? true, "one sampler per prompt")
         precondition(processors.map { $0.count == count } ?? true, "one processor per prompt")
-        var uids: [Int] = []
+        var ids: [Int] = []
         for (index, prompt) in prompts.enumerated() {
             precondition(!prompt.isEmpty, "a prompt needs at least one token")
             let limit = maxTokens?[index] ?? self.maxTokens
@@ -135,20 +131,20 @@ public struct BatchTokenIterator {
             var processor = processors?[index] ?? self.processor?.copy()
             processor?.prompt(MLXArray(prompt.map { Int32($0) }))
             let row = Row(
-                uid: uidCount, sampler: samplers?[index] ?? sampler, processor: processor,
+                id: nextID, sampler: samplers?[index] ?? sampler, processor: processor,
                 maxTokens: limit)
             pending.append(Pending(row: row, prompt: prompt, cache: caches?[index]))
-            uids.append(uidCount)
-            uidCount += 1
+            ids.append(nextID)
+            nextID += 1
         }
-        return uids
+        return ids
     }
 
     /// Drops rows, queued or decoding.
-    public mutating func remove(_ uids: [Int]) {
-        let removed = Set(uids)
-        pending.removeAll { removed.contains($0.row.uid) }
-        let keep = rows.indices.filter { !removed.contains(rows[$0].uid) }
+    public mutating func remove(_ ids: [Int]) {
+        let removed = Set(ids)
+        pending.removeAll { removed.contains($0.row.id) }
+        let keep = rows.indices.filter { !removed.contains(rows[$0].id) }
         if keep.count < rows.count {
             filter(keeping: keep)
         }
@@ -174,10 +170,10 @@ public struct BatchTokenIterator {
             var keep: [Int] = []
             for (index, token) in tokens.enumerated() {
                 rows[index].generated += 1
-                let reason: FinishReason? =
+                let reason: GenerateStopReason? =
                     stopTokens.contains(token)
                     ? .stop : rows[index].generated >= rows[index].maxTokens ? .length : nil
-                responses.append(Response(uid: rows[index].uid, token: token, finishReason: reason))
+                responses.append(Response(id: rows[index].id, token: token, finishReason: reason))
                 if reason == nil {
                     keep.append(index)
                 }
@@ -410,14 +406,14 @@ public func batchGenerate(
     var iterator = BatchTokenIterator(
         model: model, sampler: sampler, processor: processor, stopTokens: stopTokens,
         maxTokens: maxTokens, prefill: prefill)
-    let uids = iterator.insert(prompts: prompts, caches: caches)
-    var results = [Int: [Int]](uniqueKeysWithValues: uids.map { ($0, []) })
+    let ids = iterator.insert(prompts: prompts, caches: caches)
+    var results = [Int: [Int]](uniqueKeysWithValues: ids.map { ($0, []) })
     while true {
         let responses = try iterator.next()
         if responses.isEmpty { break }
         for response in responses where response.finishReason != .stop {
-            results[response.uid, default: []].append(response.token)
+            results[response.id, default: []].append(response.token)
         }
     }
-    return uids.map { results[$0] ?? [] }
+    return ids.map { results[$0] ?? [] }
 }
