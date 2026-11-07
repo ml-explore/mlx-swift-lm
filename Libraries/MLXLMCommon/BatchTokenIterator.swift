@@ -348,8 +348,10 @@ public struct BatchTokenIterator {
     ///   decoding or queued
     /// - Throws: ``StateError/invalidatedByModelState`` when the model returns state while
     ///   decoding several rows. An error from a batched forward invalidates the batch because
-    ///   its cache writes cannot be undone; remove all rows before resuming. `.failed` events
-    ///   from the throwing call are returned by the next one.
+    ///   its cache writes cannot be undone; remove all rows before resuming.
+    ///   `CancellationError` when a prefill stops because the current task was cancelled:
+    ///   admission stops before any sampling or decoding, and the queued rows that have not
+    ///   failed stay queued. `.failed` events from a throwing call are returned by the next one.
     public mutating func next() throws -> [BatchEvent]? {
         finalizeEnded()
         // Drain admission and decode temporaries, including rejected admissions.
@@ -365,7 +367,7 @@ public struct BatchTokenIterator {
             guard !rows.isEmpty || !pending.isEmpty else { return nil }
 
             // Every queued row either fails here or joins the rows.
-            var events = pending.isEmpty ? [] : admit()
+            var events = pending.isEmpty ? [] : try admit()
             if !rows.isEmpty {
                 do {
                     events += try decode()
@@ -412,7 +414,7 @@ public struct BatchTokenIterator {
     /// Prefills the queued prompts separately, in queue order, and joins the ones that can
     /// to the rows. Returns a `.failed` event for each one that cannot; the active rows and
     /// the other queued rows are unaffected by it.
-    private mutating func admit() -> [BatchEvent] {
+    private mutating func admit() throws -> [BatchEvent] {
         let queued = pending
         pending = []
         var events: [BatchEvent] = []
@@ -424,6 +426,16 @@ public struct BatchTokenIterator {
                     item, joining: admitted, admittedState: admittedState)
                 if rowState != nil { admittedState = rowState }
                 admitted.append(row)
+            } catch is CancellationError where Task.isCancelled {
+                // The task was cancelled: stop before sampling or decoding anything. Every row
+                // that has not failed goes back to the queue; the failures are returned by the
+                // next call.
+                let failed = Set(events.map(\.id))
+                pending = queued.filter { !failed.contains($0.row.id) }
+                undelivered = events
+                undeliveredEnded = ending
+                ending = []
+                throw CancellationError()
             } catch {
                 events.append(.failed(id: item.row.id, error: error))
                 end(item.row)

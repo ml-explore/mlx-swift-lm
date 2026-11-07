@@ -657,6 +657,40 @@ struct BatchTokenIteratorTests {
         _ = try BatchTokenIterator(model: model, parameters: GenerateParameters())
     }
 
+    @Test("A prefill stopped by task cancellation stops admission before any sampling")
+    func cancelledAdmissionStopsBeforeSampling() async throws {
+        try await Task {
+            try Device.withDefaultDevice(.cpu) {
+                // The first row prefills, the second fails to join before its prefill, and the
+                // third row's prefill sees the task cancelled.
+                final class Count { var value = 0 }
+                let prepares = Count()
+                let model = BatchTextOnlyModel(
+                    preparation: .tokens,
+                    prepareObserver: { _ in
+                        prepares.value += 1
+                        guard prepares.value == 2 else { return }
+                        withUnsafeCurrentTask { $0?.cancel() }
+                        throw CancellationError()
+                    })
+                let sampler = AdmissionCountingSampler()
+                var iterator = BatchTokenIterator(model: model, sampler: sampler)
+                let ids = iterator.insert(
+                    prompts: [[1], [2], [3], [4]],
+                    caches: [nil, [KVCacheSimple(), KVCacheSimple()], nil, nil])
+                #expect(throws: CancellationError.self) { _ = try iterator.next() }
+                #expect(sampler.calls == 0, "nothing is sampled after the cancellation")
+                #expect(model.nextTokenCalls == 1, "only the first row's prefill ran a forward")
+                #expect(prepares.value == 2, "the fourth row is not prefilled")
+                #expect(iterator.pendingIDs == [ids[0], ids[2], ids[3]])
+                // The failure from the cancelled call arrives with the next one.
+                let delivered = try iterator.next()
+                #expect(failures(delivered).map(\.id) == [ids[1]])
+                #expect(delivered?.count == 1)
+            }
+        }.value
+    }
+
     @Test("Failures from a step that then throws are returned by the next call")
     func failuresSurviveAThrowingStep() throws {
         try Device.withDefaultDevice(.cpu) {
