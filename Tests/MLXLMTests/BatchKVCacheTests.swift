@@ -2057,6 +2057,83 @@ struct BatchedRecurrentParityTests {
         let model = try tinyFalconH1()
         try expectMergedRowsMatchSingles(model, layers: { $0 is CacheList })
     }
+
+    /// Convolution and full-attention layers only: this file's row helpers do not cover the
+    /// rotating caches of LFM3's sliding layers, which `BatchRotatingKVCacheTests` tests.
+    @Test("Merged LFM3 prompts decode like separate sequences")
+    func lfm3() throws {
+        let model = try tinyLFM3()
+        try expectMergedRowsMatchSingles(model, layers: { $0 is MambaCache })
+    }
+
+    /// LFM2's convolution layers keep a rewind history whose length depends on the prompt, in
+    /// a `MambaCache` subclass. Merging it as a plain recurrent cache would stack histories of
+    /// different lengths, so its rows are refused until it has a batched form of its own.
+    @Test("LFM2's rewindable convolution rows are refused, not merged as plain recurrent state")
+    func lfm2ConvolutionRowsAreRefused() throws {
+        let model = try tinyLFM2()
+        let rows = try [[Int32(1), 2, 3], [4, 5, 6, 7, 8]].map { prompt in
+            let cache = try model.newCache(parameters: nil)
+            eval(model(MLXArray(prompt).reshaped([1, prompt.count]), cache: cache))
+            return cache
+        }
+        let convolution = try rows.map { try #require($0[0] as? RewindableConvolutionCache) }
+        #expect(throws: KVCacheError.self) { _ = try mergeCaches(convolution) }
+        #expect(throws: KVCacheError.self) {
+            try convolution[0].validateExtension(other: convolution[1])
+        }
+        #expect(throws: KVCacheError.self) { _ = try mergeCaches([MambaCache(), convolution[0]]) }
+        #expect(throws: KVCacheError.self) {
+            try MambaCache().validateExtension(other: convolution[0])
+        }
+    }
+}
+
+private func tinyLFM3() throws -> LFM3Model {
+    let configuration = try JSONDecoder().decode(
+        LFM3Configuration.self,
+        from: Data(
+            """
+            {
+              "model_type": "lfm3", "vocab_size": 64, "hidden_size": 32, "intermediate_size": 48,
+              "num_hidden_layers": 3, "num_attention_heads": 4, "num_key_value_heads": 2,
+              "head_dim": 16, "norm_eps": 1e-5, "conv_L_cache": 3, "conv_bias": false,
+              "sliding_window": 4, "use_sandwich_norm": true, "tie_word_embeddings": true,
+              "layer_types": ["conv", "full_attention", "conv"],
+              "rope_parameters": {
+                "full_attention": {
+                  "rope_type": "default", "rope_theta": 1000000.0, "partial_rotary_factor": 0.5
+                },
+                "sliding_attention": {"rope_type": "default", "rope_theta": 10000.0}
+              }
+            }
+            """.utf8))
+    return withRandomState(MLXRandom.RandomState(seed: 603)) {
+        let model = LFM3Model(configuration)
+        eval(model)
+        return model
+    }
+}
+
+private func tinyLFM2() throws -> LFM2Model {
+    let configuration = try JSONDecoder().decode(
+        LFM2Configuration.self,
+        from: Data(
+            """
+            {
+              "model_type": "lfm2", "vocab_size": 32, "hidden_size": 8, "num_hidden_layers": 2,
+              "num_attention_heads": 2, "num_key_value_heads": 1, "max_position_embeddings": 128,
+              "norm_eps": 1e-5, "conv_bias": false, "conv_L_cache": 3, "block_dim": 8,
+              "intermediate_size": 24, "block_multiple_of": 8, "block_ffn_dim_multiplier": 1.0,
+              "block_auto_adjust_ff_dim": false, "layer_types": ["conv", "full_attention"],
+              "rope_parameters": { "rope_theta": 10000000.0 }
+            }
+            """.utf8))
+    return withRandomState(MLXRandom.RandomState(seed: 604)) {
+        let model = LFM2Model(configuration)
+        eval(model)
+        return model
+    }
 }
 
 private func tinyMamba2() throws -> Mamba2Model {
