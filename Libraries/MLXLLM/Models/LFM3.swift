@@ -83,21 +83,7 @@ public class LFM3Model: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func validate(tokenizer: any Tokenizer) throws {
-        guard tokenizer.convertTokenToId("<|startoftext|>") == 124894,
-            tokenizer.convertTokenToId(".reduce") == 96744
-        else { return }
-        // Probe vocabulary entries affected by ignore_merges and code-point splitting.
-        for (text, pieces) in [
-            (".reduce", [".reduce"]), ("line.\r\nThis", ["line", ".čĊ", "This"]),
-        ] {
-            let expected = pieces.compactMap { tokenizer.convertTokenToId($0) }
-            guard expected.count == pieces.count,
-                !expected.contains(where: { $0 == tokenizer.unknownTokenId })
-            else { continue }
-            guard tokenizer.encode(text: text, addSpecialTokens: false) == expected else {
-                throw LFM3TokenizerError.incompatible
-            }
-        }
+        try LFM3ModelInner.validate(tokenizer: tokenizer)
     }
 }
 
@@ -129,13 +115,4 @@ extension LFM3Model {
     /// the template prefills an empty `<think></think>`. A tool call can also end
     /// the thinking block.
     public var reasoningConfig: ReasoningConfig? { QwenReasoningProtocol.tagged }
-}
-
-private enum LFM3TokenizerError: LocalizedError {
-    case incompatible
-
-    var errorDescription: String? {
-        "LFM3 requires a tokenizer that honors BPE ignore_merges and splits regexes by code point. "
-            + "Use a tokenizer containing swift-transformers fixes #397 and #398, or a compatible TokenizerLoader."
-    }
 }
