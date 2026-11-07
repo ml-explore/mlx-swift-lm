@@ -952,6 +952,55 @@ struct BatchTokenIteratorTests {
         }
     }
 
+    @Test(
+        "Each model family that opts in prefills resumably and matches single runs",
+        arguments: ResumablePrefillFamily.allCases)
+    func resumablePrefillFamilies(family: ResumablePrefillFamily) async throws {
+        let model = try await LLMTypeRegistry.shared.createModel(
+            configuration: Data(family.configuration.utf8), modelType: family.rawValue)
+        let resumable = try #require(model as? any ResumablePrefillModel, "\(family) opts in")
+        // On the default device: some families use Metal kernels. Both runs use the same ones.
+        do {
+            eval(model)
+            let prefill = PrefillParameters(stepSize: 4)
+            // A short row decodes while the long one is fed in chunks of 4, 4 and 2 tokens
+            // and then its final forward.
+            let prompts: [[Int]] = [[1, 2], Array(3 ..< 14)]
+            #expect(
+                resumable.prefillChunks(
+                    for: LMInput.Text(tokens: MLXArray(prompts[1].map { Int32($0) })),
+                    prefill: prefill) == [0 ..< 4, 4 ..< 8, 8 ..< 10])
+            let expected = try prompts.map { prompt in
+                let iterator = try TokenIterator(
+                    input: LMInput(tokens: MLXArray(prompt.map { Int32($0) })), model: model,
+                    processor: nil, sampler: ArgMaxSampler(), prefill: prefill, maxTokens: 6)
+                return Array(IteratorSequence(iterator))
+            }
+
+            var iterator = BatchTokenIterator(model: model, maxTokens: 6, prefill: prefill)
+            let ids = iterator.insert(prompts: prompts)
+            var progress: [String] = []
+            var output = [Int: [Int]]()
+            while let events = try iterator.next() {
+                for event in events {
+                    switch event {
+                    case .token(let id, let token): output[id, default: []].append(token)
+                    case .prefill(let id, let processed, let total):
+                        progress.append("\(id): \(processed)/\(total)")
+                    case .failed(_, let error): Issue.record("\(family): \(error)")
+                    case .finished: break
+                    }
+                }
+            }
+            #expect(ids.map { output[$0] ?? [] } == expected, "\(family)")
+            #expect(
+                progress == [
+                    "\(ids[0]): 2/2", "\(ids[1]): 4/11", "\(ids[1]): 8/11", "\(ids[1]): 10/11",
+                    "\(ids[1]): 11/11",
+                ], "\(family)")
+        }
+    }
+
     @Test("Cancellation between resumable prefill chunks leaves the row queued")
     func resumablePrefillCancellation() async throws {
         try await Task {
@@ -1268,6 +1317,61 @@ struct BatchTokenIteratorTests {
         #expect(
             sampler.sample(logProbabilities: logSoftmax(batch, axis: -1)).asArray(Int.self)
                 == [1, 0])
+    }
+}
+
+/// The model families besides Llama that opt into resumable prefill, by their `model_type`,
+/// each with a tiny configuration for random weights.
+enum ResumablePrefillFamily: String, CaseIterable, Sendable {
+    case qwen2, qwen3
+    case qwen3MoE = "qwen3_moe"
+    case phi, phi3, gemma, gemma2, starcoder2, cohere
+    case internlm2, granite, glm4, smollm3, olmo2, mixtral
+
+    var configuration: String {
+        // Keys each family does not read are ignored.
+        let common = """
+            "model_type": "\(rawValue)", "hidden_size": 32, "num_hidden_layers": 2,
+            "intermediate_size": 64, "num_attention_heads": 4, "num_key_value_heads": 2,
+            "head_dim": 8, "rms_norm_eps": 1e-5, "layer_norm_eps": 1e-5, "norm_epsilon": 1e-5,
+            "vocab_size": 64, "rope_theta": 10000.0, "max_position_embeddings": 128,
+            "tie_word_embeddings": false, "attention_bias": false, "mlp_bias": false
+            """
+        let extra: String
+        switch self {
+        case .qwen3:
+            extra = #""architectures": ["Qwen3ForCausalLM"]"#
+        case .qwen3MoE:
+            extra = """
+                "num_experts": 4, "num_experts_per_tok": 2, "decoder_sparse_step": 1,
+                "mlp_only_layers": [], "moe_intermediate_size": 32, "norm_topk_prob": true
+                """
+        case .mixtral:
+            extra = #""num_local_experts": 4, "num_experts_per_tok": 2"#
+        case .granite:
+            extra = """
+                "logits_scaling": 1.0, "attention_multiplier": 0.125, "embedding_multiplier": 1.0,
+                "residual_multiplier": 1.0
+                """
+        case .cohere:
+            extra = #""logit_scale": 0.0625, "use_qk_norm": false"#
+        case .starcoder2:
+            extra = #""use_bias": true"#
+        case .glm4, .phi:
+            extra = #""partial_rotary_factor": 0.5"#
+        case .internlm2:
+            extra = #""bias": false"#
+        case .gemma2:
+            extra = """
+                "attn_logit_softcapping": 50.0, "final_logit_softcapping": 30.0,
+                "query_pre_attn_scalar": 8.0
+                """
+        case .phi3:
+            extra = #""original_max_position_embeddings": 128"#
+        case .qwen2, .gemma, .smollm3, .olmo2:
+            extra = #""rope_traditional": false"#
+        }
+        return "{\(common), \(extra)}"
     }
 }
 

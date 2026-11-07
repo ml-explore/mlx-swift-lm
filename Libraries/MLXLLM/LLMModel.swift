@@ -90,3 +90,25 @@ extension LLMModel {
         DefaultMessageGenerator()
     }
 }
+
+// MARK: - Resumable prefill
+
+// Models that use the default `LLMModel` prefill and return no model state from their forward
+// pass, so their prefill chunks can be fed one per call. Each is checked against
+// `TokenIterator` in `BatchTokenIteratorTests.resumablePrefillFamilies`.
+extension LlamaModel: ResumablePrefillModel {}
+extension Qwen2Model: ResumablePrefillModel {}
+extension Qwen3Model: ResumablePrefillModel {}
+extension Qwen3MoEModel: ResumablePrefillModel {}
+extension PhiModel: ResumablePrefillModel {}
+extension Phi3Model: ResumablePrefillModel {}
+extension GemmaModel: ResumablePrefillModel {}
+extension Gemma2Model: ResumablePrefillModel {}
+extension Starcoder2Model: ResumablePrefillModel {}
+extension CohereModel: ResumablePrefillModel {}
+extension InternLM2Model: ResumablePrefillModel {}
+extension GraniteModel: ResumablePrefillModel {}
+extension GLM4Model: ResumablePrefillModel {}
+extension SmolLM3Model: ResumablePrefillModel {}
+extension Olmo2Model: ResumablePrefillModel {}
+extension MixtralModel: ResumablePrefillModel {}

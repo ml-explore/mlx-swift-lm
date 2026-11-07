@@ -351,11 +351,6 @@ extension LlamaModel: LoRAModel {
     }
 }
 
-// MARK: - Resumable prefill
-
-/// Llama uses the default ``LLMModel`` prefill, whose chunks carry no model state.
-extension LlamaModel: ResumablePrefillModel {}
-
 // MARK: - Chat conventions
 
 extension LlamaModel {
