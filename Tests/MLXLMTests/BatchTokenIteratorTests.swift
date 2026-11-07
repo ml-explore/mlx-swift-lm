@@ -956,8 +956,13 @@ struct BatchTokenIteratorTests {
         "Each model family that opts in prefills resumably and matches single runs",
         arguments: ResumablePrefillFamily.allCases)
     func resumablePrefillFamilies(family: ResumablePrefillFamily) async throws {
-        let model = try await LLMTypeRegistry.shared.createModel(
-            configuration: Data(family.configuration.utf8), modelType: family.rawValue)
+        // Fixed weights per family, so a near tie between the batched and single-row
+        // arithmetic cannot flip a greedy token on some runs and not others.
+        let seed = UInt64(ResumablePrefillFamily.allCases.firstIndex(of: family)! + 1100)
+        let model = try await withRandomState(MLXRandom.RandomState(seed: seed)) {
+            try await LLMTypeRegistry.shared.createModel(
+                configuration: Data(family.configuration.utf8), modelType: family.rawValue)
+        }
         let resumable = try #require(model as? any ResumablePrefillModel, "\(family) opts in")
         // On the default device: some families use Metal kernels. Both runs use the same ones.
         do {
