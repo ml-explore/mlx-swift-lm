@@ -77,8 +77,9 @@ public struct BatchTokenIterator {
 
     /// The rows being decoded.
     private var rows: [Row] = []
-    /// Their caches, one batched cache per layer.
-    private var cache: [KVCache] = []
+    /// Their caches, one batched cache per layer. Admission merges each layer into one and
+    /// throws `KVCacheError` for a layer without a batched form.
+    private var cache: [any BatchableKVCache] = []
     /// The tokens the next step feeds: each row's sampled token.
     private var nextTokens: MLXArray?
     private var state: LMOutput.State?

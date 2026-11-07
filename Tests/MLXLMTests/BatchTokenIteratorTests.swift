@@ -207,6 +207,28 @@ struct BatchTokenIteratorTests {
         }
     }
 
+    @Test(
+        "A model whose cache layer has no batched form is refused at admission by a throw",
+        arguments: [false, true])
+    func layerWithoutBatchedForm(nested: Bool) throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = BatchTextOnlyModel(
+                preparation: .tokens,
+                cacheFactory: {
+                    let chunked = ChunkedKVCache(chunkSize: 4)
+                    return [
+                        KVCacheSimple(), nested ? CacheList(KVCacheSimple(), chunked) : chunked,
+                    ]
+                })
+            let sampler = AdmissionCountingSampler()
+            var iterator = BatchTokenIterator(model: model, sampler: sampler)
+            let uids = iterator.insert(prompts: [[1, 2], [3]])
+            #expect(throws: KVCacheError.self) { _ = try iterator.next() }
+            #expect(iterator.uids == uids)
+            #expect(sampler.calls == 0)
+        }
+    }
+
     @Test("Supplied cache copies cannot erase custom types, including nested children")
     func suppliedCacheCopyTypes() throws {
         try Device.withDefaultDevice(.cpu) {
