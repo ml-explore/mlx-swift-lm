@@ -414,4 +414,118 @@ final class RotatingKVCacheRewindTests: XCTestCase {
             XCTAssertEqual(actual.1.asArray(Float.self), expected.1.asArray(Float.self))
         }
     }
+
+    // MARK: - In-place decode attention
+
+    private func keyRows(_ positions: Range<Int>) -> MLXArray {
+        let base = MLXArray(positions.map(Float.init)).reshaped(1, 1, positions.count, 1)
+        return sin(base * MLXArray([0.37, 0.71, 1.3, 2.9] as [Float]).reshaped(1, 1, 1, 4))
+    }
+
+    private func valueRows(_ positions: Range<Int>) -> MLXArray {
+        let base = MLXArray(positions.map(Float.init)).reshaped(1, 1, positions.count, 1)
+        return cos(base * MLXArray([0.23, 0.53, 1.1, 1.9] as [Float]).reshaped(1, 1, 1, 4))
+    }
+
+    private func query(_ count: Int) -> MLXArray {
+        MLXArray.ones([1, 1, count, 4]) * 1.5
+    }
+
+    private func viewAttention(
+        _ cache: RotatingKVCache, positions: Range<Int>,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode = .none
+    ) -> MLXArray {
+        let (keys, values) = cache.update(keys: keyRows(positions), values: valueRows(positions))
+        return MLXFast.scaledDotProductAttention(
+            queries: query(positions.count), keys: keys, values: values, scale: 1, mask: mask)
+    }
+
+    private func inPlaceAttention(
+        _ cache: RotatingKVCache, positions: Range<Int>,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode = .none
+    ) -> MLXArray {
+        attentionWithCacheUpdate(
+            queries: query(positions.count), keys: keyRows(positions),
+            values: valueRows(positions), cache: cache, scale: 1, mask: mask)
+    }
+
+    func testDecodeAttendsTheRingInPlaceLikeAReserveFreeCache() {
+        for keep in [0, 2] {
+            for step in [1, 4, 256] {
+                for reserve in [1, 5, 16] {
+                    let cache = RotatingKVCache(
+                        maxSize: 8, keep: keep, step: step, rewindCapacity: reserve)
+                    let reference = RotatingKVCache(maxSize: 8, keep: keep, step: step)
+                    var offset = 0
+                    let script =
+                        [1, 1, 9, 1, 3, 1, 1, 16, 1, 2, 1, 1] + Array(repeating: 1, count: 30)
+                    for count in script {
+                        let positions = offset ..< (offset + count)
+                        func prefillMask(_ cache: RotatingKVCache)
+                            -> MLXFast.ScaledDotProductAttentionMaskMode
+                        {
+                            count > 1
+                                ? cache.makeMask(n: count, windowSize: nil, returnArray: true)
+                                : .none
+                        }
+                        let actual = inPlaceAttention(
+                            cache, positions: positions, mask: prefillMask(cache))
+                        let expected = viewAttention(
+                            reference, positions: positions, mask: prefillMask(reference))
+                        XCTAssertTrue(
+                            allClose(actual, expected, atol: 1e-5).item(Bool.self),
+                            "keep=\(keep), step=\(step), reserve=\(reserve), offset=\(offset)")
+                        XCTAssertEqual(cache.offset, reference.offset)
+                        offset += count
+                    }
+                    XCTAssertEqual(cache.maxTrimCount, reserve)
+                }
+            }
+        }
+    }
+
+    func testInPlaceDecodeLeavesTheSameCacheAsTheViewPath() throws {
+        for keep in [0, 2] {
+            let inPlace = RotatingKVCache(maxSize: 8, keep: keep, step: 4, rewindCapacity: 5)
+            let view = RotatingKVCache(maxSize: 8, keep: keep, step: 4, rewindCapacity: 5)
+            var offset = 0
+            let script: [(write: Int, trim: Int)] =
+                [(9, 0), (1, 0), (1, 0)] + Array(repeating: (1, 0), count: 12)
+                + [(1, 3), (1, 0), (1, 5), (1, 0), (1, 0), (4, 2), (1, 0)]
+                + Array(repeating: (1, 0), count: 20) + [(1, 4)]
+            for (write, trim) in script {
+                let positions = offset ..< (offset + write)
+                let mask =
+                    write > 1
+                    ? inPlace.makeMask(n: write, windowSize: nil, returnArray: true) : .none
+                let actual = inPlaceAttention(inPlace, positions: positions, mask: mask)
+                let expected = viewAttention(view, positions: positions, mask: mask)
+                XCTAssertTrue(
+                    allClose(actual, expected, atol: 1e-5).item(Bool.self),
+                    "keep=\(keep), offset=\(offset)")
+                offset += write
+                XCTAssertEqual(inPlace.trim(trim), view.trim(trim))
+                offset -= trim
+                XCTAssertEqual(inPlace.metaState, view.metaState)
+                XCTAssertEqual(
+                    inPlace.state.map { $0.asArray(Float.self) },
+                    view.state.map { $0.asArray(Float.self) })
+                XCTAssertEqual(inPlace.maxTrimCount, view.maxTrimCount)
+            }
+        }
+    }
+
+    func testCallerMasksAndCachesWithoutReserveKeepTheViewPath() {
+        for reserve in [0, 4] {
+            let routed = RotatingKVCache(maxSize: 8, keep: 2, rewindCapacity: reserve)
+            let direct = RotatingKVCache(maxSize: 8, keep: 2, rewindCapacity: reserve)
+            for position in 0 ..< 30 {
+                let positions = position ..< (position + 1)
+                let mask = routed.makeMask(n: 1, windowSize: 4, returnArray: false)
+                let actual = inPlaceAttention(routed, positions: positions, mask: mask)
+                let expected = viewAttention(direct, positions: positions, mask: mask)
+                XCTAssertEqual(actual.asArray(Float.self), expected.asArray(Float.self))
+            }
+        }
+    }
 }
