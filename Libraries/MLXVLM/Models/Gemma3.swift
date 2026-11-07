@@ -190,7 +190,7 @@ private class Attention: Module {
     @ModuleInfo(key: "q_norm") var queryNorm: Gemma.RMSNorm
     @ModuleInfo(key: "k_norm") var keyNorm: Gemma.RMSNorm
 
-    @ModuleInfo var rope: OffsetLayer
+    @ModuleInfo var rope: RoPELayer
 
     init(config: Gemma3TextConfiguration, layerIdx: Int) {
         let dim = config.hiddenSize
@@ -247,13 +247,9 @@ private class Attention: Module {
         keys = keyNorm(keys)
 
         // Apply rotary position embedding
-        if let cache {
-            queries = rope(queries, offset: cache.offset)
-            keys = rope(keys, offset: cache.offset)
-        } else {
-            queries = rope(queries, offset: 0)
-            keys = rope(keys, offset: 0)
-        }
+        let offset = cache?.ropeOffset
+        queries = applyRotaryPosition(rope, to: queries, offset: offset)
+        keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
         let output = attentionWithCacheUpdate(
             queries: queries,
