@@ -495,7 +495,7 @@ final class GLM5NextTests: XCTestCase {
         try config.validateModelConfiguration()
         let model: any LanguageModel =
             base.modelType == "glm5_next" ? GLM5NextModel(config) : GLM5NextTextModel(config)
-        try loadWeights(
+        try await loadWeights(
             modelDirectory: directory, model: model,
             perLayerQuantization: base.perLayerQuantization)
 
@@ -503,7 +503,7 @@ final class GLM5NextTests: XCTestCase {
         // memory ticket. Unwired, a checkpoint this size is paged on every
         // decode step and decodes at about 1% of the wired rate.
         let weightBytes = model.parameters().flattened().reduce(0) { $0 + $1.1.nbytes }
-        let ticket = WiredSumPolicy().ticket(size: weightBytes, kind: .active)
+        let ticket = MLX.WiredSumPolicy().ticket(size: weightBytes, kind: .active)
         try await ticket.withWiredLimit {
             try runOracles(oracles, model: model)
         }
