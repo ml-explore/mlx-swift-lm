@@ -118,9 +118,50 @@ public protocol KVCache: Evaluatable {
 
     /// Clear transient cache metadata after generation.
     func finalize()
+
+    /// Keep only the rows at `batchIndices`, in that order. Batched caches only.
+    func filter(batchIndices: MLXArray)
+
+    /// Append the rows of `other`, a batched cache of this type. Batched caches only.
+    func extend(other: any KVCache)
+
+    /// Check that <doc:/documentation/MLXLMCommon/KVCache/extend(other:)> can append `other` without changing either cache.
+    ///
+    /// Admission validates every layer before extending any layer or sampling tokens.
+    /// Custom batched caches must implement this contract to accept new rows.
+    /// - Throws: An error when the types, settings, or storage layouts are incompatible.
+    func validateExtension(other: any KVCache) throws
+
+    /// The row at `index` as a single-sequence cache. Batched caches only.
+    func extract(_ index: Int) -> any KVCache
+
+    /// The rows of `caches`, single-sequence caches of exactly this type, as one batched cache.
+    ///
+    /// - Throws: `KVCacheError` when this type has no batched form or a row cannot be batched.
+    static func merge(_ caches: [any KVCache]) throws -> any KVCache
 }
 
 extension KVCache {
+    public func filter(batchIndices: MLXArray) {
+        preconditionFailure("\(Self.self) is not a batched cache")
+    }
+
+    public func extend(other: any KVCache) {
+        preconditionFailure("\(Self.self) is not a batched cache")
+    }
+
+    public func validateExtension(other: any KVCache) throws {
+        throw KVCacheError(message: "\(Self.self) does not support checked batch extension")
+    }
+
+    public func extract(_ index: Int) -> any KVCache {
+        preconditionFailure("\(Self.self) is not a batched cache")
+    }
+
+    public static func merge(_ caches: [any KVCache]) throws -> any KVCache {
+        throw KVCacheError(message: "\(Self.self) has no batched form")
+    }
+
     public static var serializedClassName: String? { nil }
 
     public static func restore(state: [MLXArray], metaState: [String]) throws -> any KVCache {
@@ -299,6 +340,26 @@ open class BaseKVCache: KVCache {
 
     open func finalize() {}
 
+    open func filter(batchIndices: MLXArray) {
+        preconditionFailure("\(Self.self) is not a batched cache")
+    }
+
+    open func extend(other: any KVCache) {
+        preconditionFailure("\(Self.self) is not a batched cache")
+    }
+
+    open func validateExtension(other: any KVCache) throws {
+        throw KVCacheError(message: "\(Self.self) does not support checked batch extension")
+    }
+
+    open func extract(_ index: Int) -> any KVCache {
+        preconditionFailure("\(Self.self) is not a batched cache")
+    }
+
+    open class func merge(_ caches: [any KVCache]) throws -> any KVCache {
+        throw KVCacheError(message: "\(Self.self) has no batched form")
+    }
+
     /// Default implementation for caches without special mask requirements
     open func makeMask(
         n: Int, windowSize: Int?, returnArray: Bool
@@ -321,7 +382,8 @@ public func createCausalMask(
     n: Int,
     offset: Int,
     windowSize: Int? = nil,
-    lengths: MLXArray? = nil
+    lengths: MLXArray? = nil,
+    leftPadding: MLXArray? = nil
 ) -> MLXArray {
     var rinds = MLXArray(Int32(0) ..< Int32(offset + n))
     var linds = offset != 0 ? MLXArray(Int32(offset) ..< Int32(offset + n)) : rinds
@@ -336,6 +398,11 @@ public func createCausalMask(
     if var lengths {
         lengths = lengths[0..., .newAxis, .newAxis, .newAxis]
         mask = mask & (rinds .< lengths)
+    }
+
+    // Row `b` attends only positions at or after `leftPadding[b]`.
+    if let leftPadding {
+        mask = mask & (rinds .>= leftPadding[0..., .newAxis, .newAxis, .newAxis])
     }
 
     return mask
@@ -547,6 +614,11 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
         return trimmed
     }
 
+    /// ``merge(_:)-swift.type.method`` for rows typed as `KVCache`; exactly `KVCacheSimple` rows.
+    public override class func merge(_ caches: [any KVCache]) throws -> any KVCache {
+        merge(try batchRows(caches, of: KVCacheSimple.self))
+    }
+
     /// Convert to a quantized cache for maximum efficiency.
     ///
     /// Use `updateQuantized()` and `quantizedScaledDotProductAttention()` for zero-overhead operation.
@@ -683,6 +755,9 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     package var capacityOrigin = CapacityOrigin.modelNative
 
     package var preservedPrefixTokens: Int { keep }
+
+    /// The number of positions the buffer grows by.
+    package var allocationStep: Int { step }
 
     public override var maxSize: Int? { maxCacheSize }
 
@@ -988,6 +1063,11 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
                 self.wrappedFlag = nil
             }
         }
+    }
+
+    /// ``merge(_:)-swift.type.method`` for rows typed as `KVCache`.
+    public override class func merge(_ caches: [any KVCache]) throws -> any KVCache {
+        try merge(try batchRows(caches, of: RotatingKVCache.self))
     }
 
     public override var isTrimmable: Bool {
@@ -1588,13 +1668,20 @@ public class ArraysCache: BaseKVCache {
         state: [MLXArray], metaState: [String]
     ) throws -> any KVCache {
         let cache = ArraysCache(size: 0)
-        cache.restoreFromMetaState(state: state, savedMetaState: metaState)
+        try cache.restoreFromMetaState(state: state, savedMetaState: metaState)
         return cache
     }
 
     fileprivate var cache: [MLXArray?]
     internal var leftPadding: MLXArray?
     internal var lengths: MLXArray?
+    /// The rows an empty cache stands for when no array records them, as after a merge of
+    /// empty rows. mlx-lm and mlx-vlm record them as zero left padding
+    /// (https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1301-L1304);
+    /// here, as in mlx-vlm's `make_mask` (#L1285-L1293), padding takes precedence over
+    /// lengths in ``makeMask(N:)``, so zero padding would hide the lengths of a later ragged
+    /// prefill. Kept in memory only; see ``metaState``.
+    internal var emptyRowCount: Int?
 
     public init(size: Int, leftPadding: [Int]? = nil) {
         self.cache = Array(repeating: nil, count: size)
@@ -1631,25 +1718,89 @@ public class ArraysCache: BaseKVCache {
         new.offset = self.offset
         new.leftPadding = self.leftPadding
         new.lengths = self.lengths
+        new.emptyRowCount = self.emptyRowCount
     }
 
     internal var batchSize: Int {
-        cache.lazy.compactMap { $0?.dim(0) }.first ?? leftPadding?.size ?? lengths?.size ?? 1
+        cache.lazy.compactMap { $0?.dim(0) }.first ?? leftPadding?.size ?? lengths?.size
+            ?? emptyRowCount ?? 1
     }
 
     /// In-place filter to keep just the given indices in the cache
-    public func filter(batchIndices: MLXArray) {
+    public override func filter(batchIndices: MLXArray) {
         cache = cache.map { c in
             c?[batchIndices]
         }
         leftPadding = leftPadding?[batchIndices]
         lengths = lengths?[batchIndices]
+        emptyRowCount = batchIndices.size
+    }
+
+    public override func extend(other: any KVCache) {
+        guard let other = other as? ArraysCache else {
+            preconditionFailure("\(Self.self) can only be extended with an ArraysCache")
+        }
+        extend(other: other)
+    }
+
+    public override func validateExtension(other: any KVCache) throws {
+        guard type(of: self) == ArraysCache.self || type(of: self) == MambaCache.self,
+            type(of: self) == type(of: other), let other = other as? ArraysCache,
+            slotCount == other.slotCount
+        else {
+            throw KVCacheError(
+                message: "Recurrent batches must share one exact type and slot count")
+        }
+        for row in [self, other] {
+            guard row.lengths == nil, row.cache.allSatisfy({ $0 == nil || $0!.ndim > 0 }) else {
+                throw KVCacheError(message: "Recurrent batches need finalized, row-shaped state")
+            }
+            let count = row.batchSize
+            guard row.cache.allSatisfy({ $0 == nil || $0!.dim(0) == count }),
+                row.leftPadding.map({ $0.ndim == 1 && $0.size == count }) ?? true
+            else {
+                throw KVCacheError(message: "Recurrent batch state must agree on the row count")
+            }
+        }
+        for (own, added) in zip(cache, other.cache) {
+            if let own, let added,
+                own.dtype != added.dtype || own.shape.dropFirst() != added.shape.dropFirst()
+            {
+                throw KVCacheError(message: "Recurrent batches must share each state slot's layout")
+            }
+        }
+    }
+
+    /// The row at `index`, as a ``MambaCache`` when this is one.
+    public override func extract(_ index: Int) -> any KVCache {
+        let row = self is MambaCache ? MambaCache() : ArraysCache(size: slotCount)
+        for slot in 0 ..< slotCount {
+            row[slot] = self[slot]?[index ..< index + 1]
+        }
+        row.offset = offset
+        row.leftPadding = leftPadding?[index ..< index + 1]
+        row.lengths = lengths?[index ..< index + 1]
+        return row
+    }
+
+    /// ``merge(_:)-swift.type.method`` for rows typed as `KVCache`; rows of exactly this class.
+    public override class func merge(_ caches: [any KVCache]) throws -> any KVCache {
+        guard Self.self == ArraysCache.self || Self.self == MambaCache.self else {
+            throw KVCacheError(message: "\(Self.self) must implement its own batched form")
+        }
+        let rows = try batchRows(caches, of: Self.self)
+        try ArraysCache.validateMerge(rows)
+        return merge(rows)
     }
 
     /// In-place extend this cache with the other cache
     public func extend(other: ArraysCache) {
         let aBatch = batchSize
         let bBatch = other.batchSize
+        // Record rows even when neither side has arrays or masking metadata yet. A side
+        // without a slot's array gets zeros, as mlx-vlm's `cat` gives it:
+        // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1244-L1261
+        emptyRowCount = aBatch + bBatch
 
         func concatenate(_ a: MLXArray?, _ b: MLXArray?) -> MLXArray? {
             guard let example = a ?? b else {
@@ -1668,6 +1819,11 @@ public class ArraysCache: BaseKVCache {
         }
         leftPadding = concatenate(leftPadding, other.leftPadding)
         lengths = concatenate(lengths, other.lengths)
+        // One position counter for the batch, the longest row's, as `merge` keeps it. A side
+        // with no rows has no position to contribute.
+        if bBatch > 0 {
+            offset = aBatch > 0 ? max(offset, other.offset) : other.offset
+        }
     }
 
     public override func prepare(lengths: [Int]?) {
@@ -1679,6 +1835,7 @@ public class ArraysCache: BaseKVCache {
     }
 
     public override func finalize() {
+        emptyRowCount = batchSize
         lengths = nil
         leftPadding = nil
     }
@@ -1728,6 +1885,10 @@ public class ArraysCache: BaseKVCache {
 
     /// metaState format: [slotCount, presentSlots, leftPadding?, lengths?]
     /// Legacy format (BaseKVCache default): [""]
+    ///
+    /// The row count is not saved: the state arrays, padding or lengths carry it. A batch of
+    /// several rows with none of them (its row count kept in memory only) is refused by
+    /// ``savePromptCache(url:cache:metadata:state:)``.
     public override var metaState: [String] {
         get {
             let leftPaddingState = Self.serializeMetadata(leftPadding)
@@ -1754,16 +1915,23 @@ public class ArraysCache: BaseKVCache {
     }
 
     /// Restore from saved metaState + state arrays. Handles both new (slot-aware) and legacy formats.
-    internal func restoreFromMetaState(state: [MLXArray], savedMetaState: [String]) {
+    internal func restoreFromMetaState(state: [MLXArray], savedMetaState: [String]) throws {
+        // No format has more than four fields.
+        guard savedMetaState.count <= 4 else {
+            throw KVCacheError(message: "Unrecognized recurrent cache metadata")
+        }
         // Detect new format: first element parses as int (slotCount), second element is present slots
         if savedMetaState.count >= 2, let slotCount = Int(savedMetaState[0]) {
+            guard slotCount >= 0 else {
+                throw KVCacheError(message: "Corrupt recurrent cache slot count")
+            }
             let presentSlots =
                 savedMetaState[1].isEmpty
                 ? [] : savedMetaState[1].split(separator: ",").compactMap { Int($0) }
 
             self.cache = Array(repeating: nil, count: slotCount)
             for (arrayIdx, slotIdx) in presentSlots.enumerated()
-            where slotIdx < slotCount && arrayIdx < state.count {
+            where slotIdx >= 0 && slotIdx < slotCount && arrayIdx < state.count {
                 self.cache[slotIdx] = state[arrayIdx]
             }
             self.leftPadding = Self.metadataArray(savedMetaState, at: 2)
@@ -1792,7 +1960,7 @@ public class MambaCache: ArraysCache {
         state: [MLXArray], metaState: [String]
     ) throws -> any KVCache {
         let cache = MambaCache()
-        cache.restoreFromMetaState(state: state, savedMetaState: metaState)
+        try cache.restoreFromMetaState(state: state, savedMetaState: metaState)
         return cache
     }
 
@@ -2087,6 +2255,26 @@ public class CacheList: BaseKVCache {
         caches.forEach { $0.finalize() }
     }
 
+    /// The mask of the first descendant with per-row positions, so a batched list excludes
+    /// its rows' left padding; otherwise the default.
+    public override func makeMask(
+        n: Int, windowSize: Int?, returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        if let child = positionedDescendant {
+            return child.makeMask(n: n, windowSize: windowSize, returnArray: returnArray)
+        }
+        return super.makeMask(n: n, windowSize: windowSize, returnArray: returnArray)
+    }
+
+    /// The first child, or child of a nested list, with per-row positions.
+    private var positionedDescendant: (any KVCache)? {
+        for child in caches {
+            if child is any BatchPositionedKVCache { return child }
+            if let nested = (child as? CacheList)?.positionedDescendant { return nested }
+        }
+        return nil
+    }
+
     public override var isTrimmable: Bool {
         isTrimmable(after: 0)
     }
@@ -2111,6 +2299,45 @@ public class CacheList: BaseKVCache {
 
     /// Internal accessor for child caches (used by serialization and policy reporting).
     internal var children: [KVCache] { caches }
+
+    /// Keeps only the rows at `batchIndices`, in that order, in every child.
+    public override func filter(batchIndices: MLXArray) {
+        for child in caches {
+            child.filter(batchIndices: batchIndices)
+        }
+    }
+
+    /// Appends the rows of `other`, a `CacheList` of the same layout, child by child.
+    public override func extend(other: any KVCache) {
+        guard let other = other as? CacheList, other.caches.count == caches.count else {
+            preconditionFailure(
+                "A CacheList can only be extended with a CacheList of the same layout")
+        }
+        for (child, added) in zip(caches, other.caches) {
+            child.extend(other: added)
+        }
+    }
+
+    public override func validateExtension(other: any KVCache) throws {
+        guard type(of: self) == CacheList.self, type(of: other) == CacheList.self,
+            let other = other as? CacheList, other.caches.count == caches.count
+        else {
+            throw KVCacheError(message: "Composite batches must share one exact type and layout")
+        }
+        for (child, added) in zip(caches, other.caches) {
+            try child.validateExtension(other: added)
+        }
+    }
+
+    /// The row at `index` as a composite of single-sequence caches.
+    public override func extract(_ index: Int) -> any KVCache {
+        CacheList(caches: caches.map { $0.extract(index) })
+    }
+
+    /// ``merge(_:)-swift.type.method`` for rows typed as `KVCache`.
+    public override class func merge(_ caches: [any KVCache]) throws -> any KVCache {
+        try merge(try batchRows(caches, of: CacheList.self))
+    }
 
     // MARK: - Serialization
 
@@ -2223,6 +2450,28 @@ public struct PromptCacheSnapshot {
     }
 }
 
+/// Why `cache`, or a recurrent cache inside it, cannot be saved: zero rows, or several rows
+/// that neither state arrays nor padding or lengths record (a merge of empty rows), so a
+/// load would restore one row. `nil` when it can be saved.
+private func unsaveableRecurrentRows(_ cache: KVCache) -> String? {
+    if let arrays = cache as? ArraysCache {
+        if arrays.batchSize == 0 {
+            // It holds arrays no input can continue from.
+            return "A cache filtered to zero rows cannot be saved"
+        }
+        if arrays.batchSize > 1, arrays.state.isEmpty, arrays.leftPadding == nil,
+            arrays.lengths == nil
+        {
+            return "A recurrent batch of several rows cannot be saved before it holds state"
+        }
+        return nil
+    }
+    if let list = cache as? CacheList {
+        return list.children.lazy.compactMap(unsaveableRecurrentRows).first
+    }
+    return nil
+}
+
 /// Save a pre-computed prompt cache to a file.
 ///
 /// - Parameters:
@@ -2239,6 +2488,9 @@ public func savePromptCache(
     let stateArrays = try promptCacheStateArrays(state, userMetadata: metadata)
     guard stateArrays.isEmpty || !cache.isEmpty else {
         throw KVCacheError(message: "Model state requires at least one prompt cache")
+    }
+    if let reason = cache.lazy.compactMap(unsaveableRecurrentRows).first {
+        throw KVCacheError(message: reason)
     }
 
     let cacheClasses = try cache.map {

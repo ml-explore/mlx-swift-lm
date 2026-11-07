@@ -260,6 +260,8 @@ extension CacheLayerKind {
         switch cache {
         case let rotating as RotatingKVCache:
             self = .rotatingAttention(maxSize: rotating.maxSize ?? 0, keep: rotating.keepCount)
+        case let batch as BatchRotatingKVCache:
+            self = .rotatingAttention(maxSize: batch.maxSize ?? 0, keep: 0)
         case is MambaCache:
             self = .stateSpace
         case let list as CacheList:
