@@ -138,6 +138,21 @@ public enum JSONValue: Hashable, Codable, Sendable {
         }
     }
 
+    /// Like `sendableValue`, but `.null` becomes `Optional.none`: swift-jinja reads that as
+    /// null and throws on `NSNull`.
+    var templateValue: any Sendable {
+        switch self {
+        case .null:
+            return (any Sendable)?.none
+        case .array(let value):
+            return value.map { $0.templateValue }
+        case .object(let value):
+            return value.mapValues { $0.templateValue }
+        default:
+            return sendableValue
+        }
+    }
+
     /// Convert to JSON Schema representation
     public var asSchema: [String: any Sendable] {
         switch self {
