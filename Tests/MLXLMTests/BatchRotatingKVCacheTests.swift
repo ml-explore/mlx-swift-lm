@@ -11,9 +11,21 @@ import Testing
 @Suite(.serialized)
 struct BatchRotatingKVCacheTests {
 
-    @Test("Rotating merge dispatches through the KVCache type")
+    @Test("Rotating merge dispatches through the BatchableKVCache type")
     func protocolSurface() throws {
         #expect(try mergeCaches([RotatingKVCache(maxSize: 8)]) is BatchRotatingKVCache)
+    }
+
+    @Test("A rotating row takes no row operations; its batch does")
+    func batchableConformance() throws {
+        #expect(!(RotatingKVCache(maxSize: 8) as any KVCache is any BatchableKVCache))
+        let batch = try BatchRotatingKVCache.merge([RotatingKVCache(maxSize: 8)])
+        #expect(batch is BatchRotatingKVCache)
+        #expect(throws: KVCacheError.self) { _ = try BatchRotatingKVCache.merge([any KVCache]()) }
+        #expect(throws: KVCacheError.self) {
+            _ = try BatchRotatingKVCache.merge([KVCacheSimple()])
+        }
+        #expect(throws: KVCacheError.self) { _ = try mergeCaches([batch]) }
     }
 
     @Test(

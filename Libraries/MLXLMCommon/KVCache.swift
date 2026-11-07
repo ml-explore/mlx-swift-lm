@@ -1010,11 +1010,6 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         }
     }
 
-    /// ``merge(_:)-swift.type.method`` for rows typed as `KVCache`.
-    public override class func merge(_ caches: [any KVCache]) throws -> any KVCache {
-        try merge(try batchRows(caches, of: RotatingKVCache.self))
-    }
-
     public override var isTrimmable: Bool {
         isTrimmable(after: 0)
     }

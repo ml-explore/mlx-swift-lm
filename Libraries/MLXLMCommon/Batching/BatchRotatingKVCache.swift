@@ -10,7 +10,7 @@ import MLX
 /// padding of ``BatchKVCache`` with the window of ``RotatingKVCache``. Every row keeps
 /// its last ``maxSize`` positions. Unlike ``RotatingKVCache`` it has no pinned prefix
 /// (`keep`) and no rewind reserve.
-public final class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
+public final class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache, BatchableKVCache {
     /// Each row's left padding, shape `[B]`: the padding positions the buffer still holds.
     /// Writes consume the oldest positions first, so it falls to zero as the window fills
     /// (mlx-lm lets it go negative; this keeps a count, so a later ragged prefill or
@@ -300,7 +300,7 @@ public final class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
     }
 
     /// Keeps only the rows at `batchIndices`, in that order.
-    public override func filter(batchIndices: MLXArray) {
+    public func filter(batchIndices: MLXArray) {
         let rows = batchIndices.asArray(Int32.self)
         guard !rows.isEmpty else {
             keys = nil
@@ -325,7 +325,7 @@ public final class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
 
     /// Appends the rows of `other`, which must be prefilled or empty like this cache's and
     /// share the window, step and capacity origin.
-    public override func extend(other: any KVCache) {
+    public func extend(other: any KVCache) {
         guard let other = other as? BatchRotatingKVCache else {
             preconditionFailure(
                 "BatchRotatingKVCache can only be extended with a BatchRotatingKVCache")
@@ -333,7 +333,7 @@ public final class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
         extend(other: other)
     }
 
-    public override func validateExtension(other: any KVCache) throws {
+    public func validateExtension(other: any KVCache) throws {
         guard let other = other as? BatchRotatingKVCache,
             other.window == window, other.step == step, other.capacityOrigin == capacityOrigin
         else {
@@ -417,7 +417,7 @@ public final class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
 
     /// The row at `index` in temporal order without its left padding, as a
     /// ``RotatingKVCache`` with this cache's window, step and capacity origin.
-    public override func extract(_ index: Int) -> any KVCache {
+    public func extract(_ index: Int) -> any KVCache {
         // An array index past the rows would read another row's metadata; check it first, as
         // mlx-vlm's BatchKVCache.extract does:
         // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1730-L1736
@@ -513,6 +513,12 @@ public final class BatchRotatingKVCache: BaseKVCache, BatchPositionedKVCache {
             mask = MLX.roll(mask, shift: position + 1, axis: -1)
         }
         return .array(mask)
+    }
+
+    /// The rows of `caches`, exactly `RotatingKVCache` rows, as one batch. See
+    /// ``RotatingKVCache/merge(_:)``.
+    public static func merge(_ caches: [any KVCache]) throws -> any BatchableKVCache {
+        try RotatingKVCache.merge(try batchRows(caches, of: RotatingKVCache.self))
     }
 
     public override func copy() -> any KVCache {
