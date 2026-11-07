@@ -338,15 +338,19 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
         offset = end
     }
 
-    /// The row at `index` without its left padding, as a ``KVCacheSimple``.
+    /// The row at `index` without its left padding, as a ``KVCacheSimple``. A row whose
+    /// padding covers every written position comes back empty, as mlx-vlm's slice does.
     public func extract(_ index: Int) -> any KVCache {
         // mlx-vlm checks the row index first too:
         // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1730-L1736
         precondition(
             leftPaddingValues.indices.contains(index), "BatchKVCache row index out of range")
+        precondition(
+            rightPadding == nil,
+            "BatchKVCache.extract takes finalized rows; finalize a ragged prefill first")
         let cache = KVCacheSimple()
         let padding = Int(leftPaddingValues[index])
-        if let keys, let values {
+        if let keys, let values, padding < offset {
             cache.keys = MLX.contiguous(keys[index ..< index + 1, 0..., padding ..< offset, 0...])
             cache.values = MLX.contiguous(
                 values[index ..< index + 1, 0..., padding ..< offset, 0...])
@@ -358,7 +362,9 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
     /// The rows of `caches`, exactly `KVCacheSimple` rows, as one batch. See
     /// ``KVCacheSimple/merge(_:)``.
     public static func merge(_ caches: [any KVCache]) throws -> any BatchableKVCache {
-        KVCacheSimple.merge(try batchRows(caches, of: KVCacheSimple.self))
+        let rows = try batchRows(caches, of: KVCacheSimple.self)
+        try validateBatchKVRows(rows.map { ($0.keys, $0.values, $0.offset) })
+        return BatchKVCache(merging: rows)
     }
 
     /// The rows of `caches` as one batch, left-padded to the longest row.
@@ -415,13 +421,19 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
 extension KVCacheSimple {
     /// The rows of `caches` as one batch, left-padded so every row ends at the
     /// longest row's position. Port of mlx-lm's `KVCache.merge`. Every cache
-    /// must be exactly a `KVCacheSimple`; empty caches become empty rows.
+    /// must be exactly a `KVCacheSimple` holding one row of one layout; empty
+    /// caches become empty rows. ``BatchKVCache/merge(_:)`` throws where this stops.
     public static func merge(_ caches: [KVCacheSimple]) -> BatchKVCache {
         precondition(!caches.isEmpty, "merge needs a cache")
         // Exact type: a ChunkedKVCache can report an offset beyond the arrays it holds.
         precondition(
             caches.allSatisfy { type(of: $0) == KVCacheSimple.self },
             "KVCacheSimple.merge takes exactly KVCacheSimple rows")
+        do {
+            try validateBatchKVRows(caches.map { ($0.keys, $0.values, $0.offset) })
+        } catch {
+            preconditionFailure("KVCacheSimple.merge: \(error.localizedDescription)")
+        }
         return BatchKVCache(merging: caches)
     }
 }

@@ -218,6 +218,67 @@ struct BatchKVCacheTests {
                 "BatchKVCache row index out of range"))
     }
 
+    @Test("extract returns an empty row when its padding covers every written position")
+    func extractPaddingOnlyRow() throws {
+        let cache = BatchKVCache(leftPadding: [4, 0])
+        let kv = makeDistinctKV(batchSize: 2, heads: 2, seqLen: 1, headDim: 4)
+        _ = cache.update(keys: kv.0, values: kv.1)
+
+        let padded = try #require(cache.extract(0) as? KVCacheSimple)
+        #expect(padded.offset == 0)
+        #expect(padded.keys == nil)
+        #expect(padded.values == nil)
+        let written = cache.extract(1)
+        #expect(written.offset == 1)
+        #expect(maxAbsDifference(try #require(written.state.first), kv.0[1 ..< 2]) == 0)
+    }
+
+    @Test("extract refuses a ragged prefill before finalize")
+    func extractBeforeFinalize() async throws {
+        let result = try await #require(
+            processExitsWith: .failure, observing: [\.standardErrorContent]
+        ) {
+            Device.withDefaultDevice(.cpu) {
+                let cache = BatchKVCache(leftPadding: [0, 0])
+                cache.prepare(lengths: [1, 3])
+                let kv = makeKV(batchSize: 2, heads: 1, seqLen: 3, headDim: 1)
+                _ = cache.update(keys: kv.0, values: kv.1)
+                _ = cache.extract(0)
+            }
+        }
+        #expect(
+            String(decoding: result.standardErrorContent, as: UTF8.self).contains(
+                "BatchKVCache.extract takes finalized rows"))
+    }
+
+    @Test("merge throws for rows it cannot stack, also a single row")
+    func mergeRefusesMismatchedRows() throws {
+        func row(
+            heads: Int = 2, headDim: Int = 4, rows: Int = 1, dtype: DType = .float32
+        ) -> KVCacheSimple {
+            let cache = KVCacheSimple()
+            let kv = makeKV(batchSize: rows, heads: heads, seqLen: 3, headDim: headDim)
+            _ = cache.update(keys: kv.0.asType(dtype), values: kv.1.asType(dtype))
+            return cache
+        }
+        // Rows of one class that disagree on layout, also behind an empty first row.
+        let mismatched: [[any KVCache]] = [
+            [row(), row(headDim: 8)],
+            [KVCacheSimple(), row(), row(headDim: 8)],
+            [row(), row(heads: 4)],
+            [row(), row(dtype: .float16)],
+        ]
+        for rows in mismatched {
+            #expect(throws: KVCacheError.self) { _ = try mergeCaches(rows) }
+        }
+        // A cache holding two rows is not a row, also alone: admission merges one at a time.
+        #expect(throws: KVCacheError.self) { _ = try mergeCaches([row(rows: 2)]) }
+        #expect(throws: KVCacheError.self) { _ = try mergeCaches([row(), row(rows: 2)]) }
+
+        let merged = try mergeCaches([KVCacheSimple(), row(), row()])
+        #expect((merged as? BatchKVCache)?.batchSize == 3)
+    }
+
     @Test("finalize keeps every row's tokens when the buffer has spare capacity")
     func finalizeWithSpareCapacity() throws {
         let cache = BatchKVCache(leftPadding: [0, 0])

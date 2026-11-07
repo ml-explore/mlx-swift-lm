@@ -321,11 +321,23 @@ public func createCausalMask(
     n: Int,
     offset: Int,
     windowSize: Int? = nil,
+    lengths: MLXArray? = nil
+) -> MLXArray {
+    createCausalMask(
+        n: n, offset: offset, windowSize: windowSize, lengths: lengths, leftPadding: nil)
+}
+
+/// ``createCausalMask(n:offset:windowSize:lengths:)`` for a left-padded batch: row `b` also
+/// masks the keys before `leftPadding[b]`.
+func createCausalMask(
+    n: Int,
+    offset: Int,
+    windowSize: Int? = nil,
     lengths: MLXArray? = nil,
-    leftPadding: MLXArray? = nil
+    leftPadding: MLXArray?
 ) -> MLXArray {
     var rinds = MLXArray(Int32(0) ..< Int32(offset + n))
-    var linds = offset != 0 ? MLXArray(Int32(offset) ..< Int32(offset + n)) : rinds
+    var linds = offset != 0 ? rinds[offset...] : rinds
     linds = linds[0..., .newAxis]
     rinds = rinds[.newAxis]
     var mask = linds .>= rinds
@@ -339,7 +351,6 @@ public func createCausalMask(
         mask = mask & (rinds .< lengths)
     }
 
-    // Row `b` attends only positions at or after `leftPadding[b]`.
     if let leftPadding {
         mask = mask & (rinds .>= leftPadding[0..., .newAxis, .newAxis, .newAxis])
     }

@@ -23,6 +23,9 @@ public protocol BatchableKVCache: KVCache {
     func validateExtension(other: any KVCache) throws
 
     /// The row at `index` as a single-sequence cache.
+    ///
+    /// The batch must be finalized: extracting during a ragged prefill, before `finalize()`
+    /// moves its right padding, stops with a precondition failure.
     func extract(_ index: Int) -> any KVCache
 
     /// The rows of `caches`, single-sequence caches of one layer, as a batch of this type.
@@ -68,6 +71,19 @@ func batchRows<T: KVCache>(_ caches: [any KVCache], of _: T.Type) throws -> [T] 
             throw KVCacheError(message: "\(type(of: cache)) has no batched form")
         }
         return row
+    }
+}
+
+/// Check that `rows`, single-sequence rows of one attention layer with `end` positions
+/// written, can be stacked into one batch: each holds paired 4-D keys and values with one row,
+/// and every row that holds keys matches the heads, widths and dtype of the first one that
+/// does. Reads only array metadata.
+func validateBatchKVRows(_ rows: [(keys: MLXArray?, values: MLXArray?, end: Int)]) throws {
+    let reference = rows.first { $0.keys != nil } ?? (nil, nil, 0)
+    for row in rows {
+        try validateBatchKVExtension(
+            keys: reference.keys, values: reference.values, batchSize: 1, end: reference.end,
+            otherKeys: row.keys, otherValues: row.values, otherBatchSize: 1, otherEnd: row.end)
     }
 }
 
