@@ -9,6 +9,18 @@ import Testing
 
 @Suite("KV-cache configuration")
 struct KVCacheConfigurationTests {
+
+    @Test func modelCacheAdoptsSingleAndBatchedRowsAtOnePosition() {
+        Device.withDefaultDevice(.cpu) {
+            let single = KVCacheSimple()
+            let kv = makePositionKV(positions: 0 ..< 3, heads: 1, headDim: 4)
+            _ = single.update(keys: kv.0, values: kv.1)
+            let batch = KVCacheSimple.merge([single])
+            let storage = KVCacheStorage([single, batch], plan: .disabled)
+            #expect(storage.processedTokenCount == 3)
+            #expect(storage.nativeAttentionOffsetsAreAligned)
+        }
+    }
     @Test func typedPresetsExposeStableAlgorithmIdentity() {
         let quality = KVCacheConfiguration(
             strategy: .turboQuant(.qualityFirst))
