@@ -3,27 +3,67 @@
 import Foundation
 import MLX
 
+/// A cache that holds the rows of a batch, with the row operations continuous batching needs.
+///
+/// Port of the row operations of mlx-lm's batch caches (`filter`, `extend`, `extract` and
+/// `merge`). Single-sequence caches such as ``KVCacheSimple`` do not conform:
+/// ``mergeCaches(_:)`` turns their rows into the batched cache of their kind, which does.
+public protocol BatchableKVCache: KVCache {
+    /// Keep only the rows at `batchIndices`, in that order.
+    func filter(batchIndices: MLXArray)
+
+    /// Append the rows of `other`, a batch of this type that ``validateExtension(other:)``
+    /// accepted.
+    func extend(other: any KVCache)
+
+    /// Check that ``extend(other:)`` can append `other` without changing either cache.
+    ///
+    /// Admission validates every layer before extending any layer or sampling tokens.
+    /// - Throws: An error when the types, settings, or storage layouts are incompatible.
+    func validateExtension(other: any KVCache) throws
+
+    /// The row at `index` as a single-sequence cache.
+    func extract(_ index: Int) -> any KVCache
+
+    /// The rows of `caches`, single-sequence caches of one layer, as a batch of this type.
+    ///
+    /// - Throws: `KVCacheError` when there are no rows, when a row is not exactly the class
+    ///   this batch takes, or when a row cannot be batched.
+    static func merge(_ caches: [any KVCache]) throws -> any BatchableKVCache
+}
+
 /// The rows of `caches`, single-sequence caches of one layer, as one batched cache.
 ///
-/// Port of mlx-lm's `_merge_caches` for one layer: the rows merge on their exact class, so a
-/// `ChunkedKVCache` or an unsupported compressed cache is refused rather than treated as
-/// the class it subclasses. Empty caches merge into an empty batch with one row each.
+/// Port of mlx-lm's `_merge_caches` for one layer. A cache that is its own batch merges
+/// through its own class; a ``KVCacheSimple`` row merges into a ``BatchKVCache``. Each batch
+/// takes rows of exactly its class, so a `ChunkedKVCache` or an unsupported compressed cache
+/// is refused rather than treated as the class it subclasses. Empty caches merge into an
+/// empty batch with one row each.
 ///
 /// - Throws: `KVCacheError` when the type has no batched form, when the rows do not share
 ///   one type, or when a rotating cache keeps a prefix or a rewind reserve.
-public func mergeCaches(_ caches: [any KVCache]) throws -> any KVCache {
+public func mergeCaches(_ caches: [any KVCache]) throws -> any BatchableKVCache {
     guard let first = caches.first else {
         throw KVCacheError(message: "merge needs a cache")
     }
     guard caches.allSatisfy({ type(of: $0) == type(of: first) }) else {
         throw KVCacheError(message: "Rows of a batch must share one cache type")
     }
-    return try type(of: first).merge(caches)
+    let batch: any BatchableKVCache.Type
+    switch first {
+    case let own as any BatchableKVCache: batch = type(of: own)
+    case is KVCacheSimple: batch = BatchKVCache.self
+    default: throw KVCacheError(message: "\(type(of: first)) has no batched form")
+    }
+    return try batch.merge(caches)
 }
 
 /// `caches` as rows of exactly `T`, for a `merge` that takes only its own class.
 func batchRows<T: KVCache>(_ caches: [any KVCache], of _: T.Type) throws -> [T] {
-    try caches.map { cache in
+    guard !caches.isEmpty else {
+        throw KVCacheError(message: "merge needs a cache")
+    }
+    return try caches.map { cache in
         guard type(of: cache) == T.self, let row = cache as? T else {
             throw KVCacheError(message: "\(type(of: cache)) has no batched form")
         }

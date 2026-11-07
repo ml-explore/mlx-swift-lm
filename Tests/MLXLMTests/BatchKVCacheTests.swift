@@ -74,7 +74,7 @@ struct BatchKVCacheTests {
         }
     }
 
-    @Test("The row methods and merge dispatch through the KVCache type")
+    @Test("The row methods and merge dispatch through the BatchableKVCache type")
     func protocolSurface() throws {
         let rows: [any KVCache] = [KVCacheSimple(), KVCacheSimple()]
         let batch = try mergeCaches(rows)
@@ -113,9 +113,25 @@ struct BatchKVCacheTests {
             prepared.prepare(lengths: [1, 2])
             #expect(throws: KVCacheError.self) { try full.validateExtension(other: prepared) }
 
-            #expect(throws: KVCacheError.self) {
-                try BaseKVCache().validateExtension(other: full)
-            }
+            // A cache without a batched form has no extension check to call; admission
+            // refuses it when it merges the rows.
+            #expect(!(BaseKVCache() as any KVCache is any BatchableKVCache))
+            #expect(throws: KVCacheError.self) { _ = try mergeCaches([BaseKVCache()]) }
+        }
+    }
+
+    @Test("Only batched caches take row operations; merging any other cache throws")
+    func batchableConformance() throws {
+        let singles: [any KVCache] = [KVCacheSimple(), ChunkedKVCache(chunkSize: 4)]
+        for cache in singles {
+            #expect(!(cache is any BatchableKVCache), "\(type(of: cache))")
+        }
+        #expect(BatchKVCache(leftPadding: [0]) as any KVCache is any BatchableKVCache)
+        #expect(throws: KVCacheError.self) { _ = try mergeCaches([ChunkedKVCache(chunkSize: 4)]) }
+        #expect(throws: KVCacheError.self) { _ = try BatchKVCache.merge([any KVCache]()) }
+        // A batch is not a row: merging it again throws instead of nesting batches.
+        #expect(throws: KVCacheError.self) {
+            _ = try mergeCaches([BatchKVCache(leftPadding: [0])])
         }
     }
 

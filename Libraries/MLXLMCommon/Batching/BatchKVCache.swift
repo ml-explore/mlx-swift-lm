@@ -21,7 +21,7 @@ import MLX
 /// built from them on demand, so a decode step advances positions without a
 /// kernel per layer, and a batch whose rows carry no padding decodes one token
 /// with no mask at all.
-public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
+public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableKVCache {
     /// Each row's left padding, shape `[B]`.
     public private(set) var leftPadding: MLXArray
 
@@ -218,7 +218,7 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
     }
 
     /// Keeps only the rows at `batchIndices`, in that order.
-    public override func filter(batchIndices: MLXArray) {
+    public func filter(batchIndices: MLXArray) {
         let rows = batchIndices.asArray(Int32.self).map { Int($0) }
         guard !rows.isEmpty else {
             keys = nil
@@ -252,14 +252,14 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
         setLeftPadding(padding)
     }
 
-    public override func extend(other: any KVCache) {
+    public func extend(other: any KVCache) {
         guard let other = other as? BatchKVCache else {
             preconditionFailure("BatchKVCache can only be extended with a BatchKVCache")
         }
         extend(other: other)
     }
 
-    public override func validateExtension(other: any KVCache) throws {
+    public func validateExtension(other: any KVCache) throws {
         guard let other = other as? BatchKVCache else {
             throw KVCacheError(message: "BatchKVCache can only append a BatchKVCache")
         }
@@ -339,7 +339,7 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
     }
 
     /// The row at `index` without its left padding, as a ``KVCacheSimple``.
-    public override func extract(_ index: Int) -> any KVCache {
+    public func extract(_ index: Int) -> any KVCache {
         // mlx-vlm checks the row index first too:
         // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1730-L1736
         precondition(
@@ -353,6 +353,12 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache {
             cache.offset = offset - padding
         }
         return cache
+    }
+
+    /// The rows of `caches`, exactly `KVCacheSimple` rows, as one batch. See
+    /// ``KVCacheSimple/merge(_:)``.
+    public static func merge(_ caches: [any KVCache]) throws -> any BatchableKVCache {
+        KVCacheSimple.merge(try batchRows(caches, of: KVCacheSimple.self))
     }
 
     /// The rows of `caches` as one batch, left-padded to the longest row.
