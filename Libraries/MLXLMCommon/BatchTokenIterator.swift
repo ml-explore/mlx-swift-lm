@@ -612,9 +612,13 @@ public func batchGenerate(
         for event in events {
             switch event {
             case .token(let id, let token):
+                // Every returned token reaches the row's processor, as emitted.
+                iterator.recordEmittedToken(id: id, token: token)
                 results[id, default: []].append(token)
             case .failed(_, let error):
-                iterator.remove(iterator.ids)
+                // Every row, including the ones that ended this step, so each processor is
+                // finalized once.
+                iterator.remove(ids)
                 throw error
             case .prefill, .finished:
                 break

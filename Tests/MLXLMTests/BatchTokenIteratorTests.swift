@@ -490,6 +490,36 @@ struct BatchTokenIteratorTests {
         }
     }
 
+    @Test("batchGenerate records each token it returns, then finalizes every row once")
+    func batchGenerateRecordsReturnedTokens() throws {
+        try Device.withDefaultDevice(.cpu) {
+            // Each step samples the fed token plus one: [9] stops on 11 after one token and
+            // [5] runs to the limit of 3.
+            let log = RecordingProcessorLog()
+            let tokens = try batchGenerate(
+                model: BatchTextOnlyModel(preparation: .tokens), prompts: [[9], [5]],
+                maxTokens: 3, stopTokens: [11],
+                processor: RecordingProcessor(name: "row", log: log))
+            #expect(tokens == [[10], [6, 7, 8]])
+            // The stop token 11 is not returned, so it is not recorded.
+            #expect(
+                log.entries == [
+                    "emit row 10", "emit row 6", "emit row 7", "finalize row", "emit row 8",
+                    "finalize row",
+                ])
+
+            // A row that fails to join still finalizes every processor once.
+            let failing = RecordingProcessorLog()
+            #expect(throws: KVCacheError.self) {
+                _ = try batchGenerate(
+                    model: BatchTextOnlyModel(preparation: .tokens), prompts: [[9], [5]],
+                    caches: [nil, [KVCacheSimple(), KVCacheSimple()]],
+                    processor: RecordingProcessor(name: "row", log: failing))
+            }
+            #expect(failing.entries == ["finalize row", "finalize row"])
+        }
+    }
+
     @Test("Recorded tokens reach a row's processor before its one finalization")
     func emissionAndFinalization() throws {
         try Device.withDefaultDevice(.cpu) {
