@@ -51,6 +51,10 @@ public enum BatchEvent: Sendable {
 /// more prompts makes the next call return events again. Drive it with
 /// `while let events = try iterator.next() { … }`.
 ///
+/// The caller decides which tokens reach its consumer and reports each one with
+/// ``recordEmittedToken(id:token:)``. A row's processor is finalized once: at the start of the
+/// ``next()`` call after the row's terminal event, or when the row is removed.
+///
 /// One sampler draws the whole `[B, V]` batch when every row shares one; otherwise each row
 /// is sampled on its own, so a row with a seeded sampler draws the tokens it would draw
 /// alone. Logit processors run per row.
@@ -117,6 +121,17 @@ public struct BatchTokenIterator {
     private var invalidatedByModelState = false
     /// `.failed` events from a ``next()`` call that then threw, returned by the next call.
     private var undelivered: [BatchEvent] = []
+
+    /// A row's processor kept after the row ended, until it is finalized.
+    private typealias Ended = (id: Int, processor: LogitProcessor)
+    /// The processors of the rows whose terminal events the last ``next()`` returned. They are
+    /// finalized at the start of the next call, so the caller can first record the tokens it
+    /// delivered from that step.
+    private var ended: [Ended] = []
+    /// The processors of the rows ending in the current ``next()`` call.
+    private var ending: [Ended] = []
+    /// The processors of the rows in `undelivered`.
+    private var undeliveredEnded: [Ended] = []
 
     /// - Parameters:
     ///   - model: the model
@@ -195,13 +210,63 @@ public struct BatchTokenIterator {
             samplers: [sampler], processors: [processor])[0]
     }
 
-    /// Drops rows, queued or decoding. A removed row gets no terminal event.
+    /// Drops rows, queued or decoding, and finalizes their processors now
+    /// (`LogitProcessor.finalizeGeneration()`). A removed row gets no terminal event.
+    ///
+    /// Removing a row that ended in the last step finalizes its processor now instead of at the
+    /// next ``next()``. Ids that were never inserted or are already finalized are ignored.
     public mutating func remove(_ ids: [Int]) {
         let removed = Set(ids)
+        for item in pending where removed.contains(item.row.id) {
+            var processor = item.row.processor
+            processor?.finalizeGeneration()
+        }
         pending.removeAll { removed.contains($0.row.id) }
+        for index in rows.indices where removed.contains(rows[index].id) {
+            rows[index].processor?.finalizeGeneration()
+        }
         let keep = rows.indices.filter { !removed.contains(rows[$0].id) }
         if keep.count < rows.count {
             filter(keeping: keep)
+        }
+        func finalizeRemoved(_ list: inout [Ended]) {
+            for var entry in list where removed.contains(entry.id) {
+                entry.processor.finalizeGeneration()
+            }
+            list.removeAll { removed.contains($0.id) }
+        }
+        finalizeRemoved(&ended)
+        finalizeRemoved(&undeliveredEnded)
+    }
+
+    /// Records that the caller delivered `token` from row `id`: forwards it to the row's
+    /// processor (`LogitProcessor.didEmit(token:)`), as ``TokenIterator/recordEmittedToken(_:)``
+    /// does for one sequence.
+    ///
+    /// Call it for every token you deliver, including a stop token you choose to deliver, and
+    /// only for those. A row that ended keeps its processor until the next ``next()`` call,
+    /// which finalizes it, so record the tokens from one step before asking for the next.
+    /// Ids that are neither decoding nor ended in the last step are ignored.
+    public mutating func recordEmittedToken(id: Int, token: Int) {
+        if let index = rows.firstIndex(where: { $0.id == id }) {
+            rows[index].processor?.didEmit(token: token)
+        } else if let index = ended.firstIndex(where: { $0.id == id }) {
+            ended[index].processor.didEmit(token: token)
+        }
+    }
+
+    /// Finalizes the processors of the rows that ended in the last step.
+    private mutating func finalizeEnded() {
+        for var entry in ended {
+            entry.processor.finalizeGeneration()
+        }
+        ended = []
+    }
+
+    /// Keeps `row`'s processor, if it has one, until the step reporting its end is handled.
+    private mutating func end(_ row: Row) {
+        if let processor = row.processor {
+            ending.append((row.id, processor))
         }
     }
 
@@ -211,6 +276,9 @@ public struct BatchTokenIterator {
     /// carry on: its supplied cache does not match the batch (`KVCacheError`), its prefill
     /// throws, or the model's state allows one row only (``StateError/modelStateRequiresSingleRow``).
     ///
+    /// The processors of rows that ended in the previous step are finalized first
+    /// (`LogitProcessor.finalizeGeneration()`), once each; see ``recordEmittedToken(id:token:)``.
+    ///
     /// - Returns: the step's events, in batch order and never empty, or `nil` when no row is
     ///   decoding or queued
     /// - Throws: ``StateError/invalidatedByModelState`` when the model returns state while
@@ -218,25 +286,34 @@ public struct BatchTokenIterator {
     ///   its cache writes cannot be undone; remove all rows before resuming. `.failed` events
     ///   from the throwing call are returned by the next one.
     public mutating func next() throws -> [BatchEvent]? {
+        finalizeEnded()
         // Drain admission and decode temporaries, including rejected admissions.
-        try autoreleasepool {
+        return try autoreleasepool {
             if !undelivered.isEmpty {
                 let events = undelivered
+                ended = undeliveredEnded
                 undelivered = []
+                undeliveredEnded = []
                 return events
             }
             guard !invalidatedByModelState else { throw StateError.invalidatedByModelState }
             guard !rows.isEmpty || !pending.isEmpty else { return nil }
 
             // Every queued row either fails here or joins the rows.
-            let events = pending.isEmpty ? [] : admit()
-            guard !rows.isEmpty else { return events }
-            do {
-                return events + (try decode())
-            } catch {
-                undelivered = events
-                throw error
+            var events = pending.isEmpty ? [] : admit()
+            if !rows.isEmpty {
+                do {
+                    events += try decode()
+                } catch {
+                    undelivered = events
+                    undeliveredEnded = ending
+                    ending = []
+                    throw error
+                }
             }
+            ended = ending
+            ending = []
+            return events
         }
     }
 
@@ -249,12 +326,14 @@ public struct BatchTokenIterator {
             let id = rows[index].id
             if stopTokens.contains(token) {
                 events.append(.finished(id: id, reason: .stop, stopToken: token))
+                end(rows[index])
                 continue
             }
             rows[index].generated += 1
             events.append(.token(id: id, token: token))
             if rows[index].generated >= rows[index].maxTokens {
                 events.append(.finished(id: id, reason: .length, stopToken: nil))
+                end(rows[index])
             } else {
                 keep.append(index)
             }
@@ -282,6 +361,7 @@ public struct BatchTokenIterator {
                 admitted.append(row)
             } catch {
                 events.append(.failed(id: item.row.id, error: error))
+                end(item.row)
             }
         }
         guard !admitted.isEmpty else { return events }
@@ -301,6 +381,7 @@ public struct BatchTokenIterator {
                 return joined
             }
         } catch {
+            for row in admitted { end(row.row) }
             return events + admitted.map { .failed(id: $0.row.id, error: error) }
         }
 

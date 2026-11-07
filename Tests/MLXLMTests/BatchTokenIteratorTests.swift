@@ -490,6 +490,59 @@ struct BatchTokenIteratorTests {
         }
     }
 
+    @Test("Recorded tokens reach a row's processor before its one finalization")
+    func emissionAndFinalization() throws {
+        try Device.withDefaultDevice(.cpu) {
+            // Each step samples the fed token plus one: a stops on 11 after one token, b runs
+            // to its two-token limit, c is removed while decoding and d cannot join.
+            let log = RecordingProcessorLog()
+            let model = BatchTextOnlyModel(preparation: .tokens)
+            var iterator = BatchTokenIterator(model: model, stopTokens: [11])
+            let ids = iterator.insert(
+                prompts: [[9], [5], [3], [7]], maxTokens: [8, 2, 8, 8],
+                caches: [nil, nil, nil, [KVCacheSimple(), KVCacheSimple()]],
+                processors: ["a", "b", "c", "d"].map {
+                    RecordingProcessor(name: $0, log: log) as LogitProcessor?
+                })
+            let (a, b, c, d) = (ids[0], ids[1], ids[2], ids[3])
+
+            let first = try iterator.next()
+            #expect(failures(first).map(\.id) == [d])
+            #expect(tokens(first) == [10, 6, 4])
+            for case .token(let id, let token) in first ?? [] {
+                iterator.recordEmittedToken(id: id, token: token)
+            }
+            #expect(log.entries == ["emit a 10", "emit b 6", "emit c 4"])
+            iterator.remove([c])
+            #expect(log.entries.last == "finalize c", "remove finalizes at once")
+            iterator.recordEmittedToken(id: c, token: 5)
+            #expect(log.entries.last == "finalize c", "a removed row records nothing")
+
+            // d failed in the previous step, so this call finalizes it first.
+            let second = try iterator.next()
+            #expect(log.entries.last == "finalize d")
+            #expect(
+                finishes(second) == [
+                    BatchFinish(id: a, reason: .stop, stopToken: 11),
+                    BatchFinish(id: b, reason: .length, stopToken: nil),
+                ])
+            #expect(tokens(second) == [7])
+            // The caller delivers b's last token, but not a's stop token.
+            iterator.recordEmittedToken(id: b, token: 7)
+            #expect(log.entries.last == "emit b 7", "an ended row records until the next call")
+
+            #expect(try iterator.next() == nil)
+            #expect(
+                log.entries == [
+                    "emit a 10", "emit b 6", "emit c 4", "finalize c", "finalize d", "emit b 7",
+                    "finalize a", "finalize b",
+                ])
+            #expect(try iterator.next() == nil)
+            iterator.remove(ids)
+            #expect(log.entries.count == 8, "each row is finalized once")
+        }
+    }
+
     @Test("Failures from a step that then throws are returned by the next call")
     func failuresSurviveAThrowingStep() throws {
         try Device.withDefaultDevice(.cpu) {
@@ -1220,6 +1273,22 @@ enum CacheAdmissionMismatch: Sendable, CaseIterable {
             [CacheList(KVCacheSimple(), CacheList(KVCacheSimple(), RotatingKVCache(maxSize: 16)))]
         }
     }
+}
+
+private final class RecordingProcessorLog: @unchecked Sendable {
+    var entries: [String] = []
+}
+
+/// Logs the emission hooks of one row; sampling passes through.
+private struct RecordingProcessor: LogitProcessor {
+    let name: String
+    let log: RecordingProcessorLog
+
+    mutating func prompt(_ prompt: MLXArray) {}
+    func process(logits: MLXArray) -> MLXArray { logits }
+    mutating func didSample(token: MLXArray) {}
+    mutating func didEmit(token: Int) { log.entries.append("emit \(name) \(token)") }
+    mutating func finalizeGeneration() { log.entries.append("finalize \(name)") }
 }
 
 private final class AdmissionCountingSampler: LogitSampler {
