@@ -161,6 +161,21 @@ final class ModelComponentTests: XCTestCase {
         XCTAssertEqual(model.parameters().flattened().map(\.0), parameters)
     }
 
+    func testOnDemandComponentLoadsThroughSymlinkedDirectory() throws {
+        let checkpoint = try writeCheckpoint()
+        defer { try? FileManager.default.removeItem(at: checkpoint.directory) }
+        let link = checkpoint.directory.deletingLastPathComponent()
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: link) }
+        try FileManager.default.createSymbolicLink(
+            at: link, withDestinationURL: checkpoint.directory)
+
+        let model = Captioner()
+        try loadWeights(modelDirectory: link, model: model, quantization: quantization)
+        XCTAssertFalse(model.vision.isLoaded)
+        try assertParameters(of: model.vision.load(), match: checkpoint.visual)
+    }
+
     func testMemoryFootprintIncludesPublishedOnDemandTensors() throws {
         let checkpoint = try writeCheckpoint()
         defer { try? FileManager.default.removeItem(at: checkpoint.directory) }

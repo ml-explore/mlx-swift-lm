@@ -146,6 +146,37 @@ final class ModelConversionTests: XCTestCase {
         XCTAssertFalse(fileExists("model.safetensors.index.json", in: outputDirectory))
     }
 
+    func testConversionReadsSymlinkedDirectoriesAndCopiesSidecarContents() throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = directory.appendingPathComponent("model")
+        let tokenizer = directory.appendingPathComponent("tokenizer")
+        let output = directory.appendingPathComponent("output")
+        for path in [model, tokenizer, output] {
+            try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
+        }
+        try save(
+            arrays: ["weight": MLXArray.ones([2, 2])],
+            url: model.appendingPathComponent("model.safetensors"))
+        let blob = directory.appendingPathComponent("tokenizer-blob")
+        try write("tokenizer data", to: blob)
+        try FileManager.default.createSymbolicLink(
+            at: tokenizer.appendingPathComponent("tokenizer.json"), withDestinationURL: blob)
+        let modelLink = directory.appendingPathComponent("model-link")
+        let tokenizerLink = directory.appendingPathComponent("tokenizer-link")
+        try FileManager.default.createSymbolicLink(at: modelLink, withDestinationURL: model)
+        try FileManager.default.createSymbolicLink(at: tokenizerLink, withDestinationURL: tokenizer)
+
+        try validateConvertibleWeights(in: modelLink)
+        try copyModelConversionFiles(
+            modelDirectory: modelLink, tokenizerDirectory: tokenizerLink, to: output)
+        try FileManager.default.removeItem(at: blob)
+        XCTAssertEqual(
+            try String(
+                contentsOf: output.appendingPathComponent("tokenizer.json"), encoding: .utf8),
+            "tokenizer data")
+    }
+
     func testRemoveExistingModelWeightsClearsStaleOutputArtifacts() throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
