@@ -22,15 +22,14 @@ import MLXLMCommon
 import MLXNN
 
 // MARK: - Llama-4 Attention Scaling
-//
-// Identical to Mistral3Text.swift's helper but kept private here to keep the
-// file self-contained — the existing helper there is `private` so it cannot be
-// reused.
 
 private func nlsLlama4AttentionScale(
     start: Int, stop: Int, beta: Float, maxPositionEmbeddings: Int
 ) -> MLXArray {
-    let positions = arange(start, stop)
+    var positions = arange(start, stop)
+    if start < 0 {
+        positions = MLX.maximum(positions, MLXArray(Int32(0)))
+    }
     let scaling =
         1 + beta
         * MLX.log(
@@ -207,8 +206,6 @@ public class NemotronLabsDiffusionEncoder: Module {
     ) -> MLXArray {
         var h = embedTokens(inputs)
 
-        let offset = cache?[0].offset ?? 0
-
         let mask: MLXFast.ScaledDotProductAttentionMaskMode
         if bidirectional {
             // Diffusion mode: full attention.
@@ -223,12 +220,20 @@ public class NemotronLabsDiffusionEncoder: Module {
             let beta = ropeParams["llama_4_scaling_beta"]?.asFloat(),
             let origMax = ropeParams["original_max_position_embeddings"]?.asInt()
         {
-            attnScale = nlsLlama4AttentionScale(
-                start: offset,
-                stop: offset + inputs.dim(1),
-                beta: beta,
-                maxPositionEmbeddings: origMax
-            ).asType(h.dtype)
+            switch cache?.first?.ropeOffset ?? .scalar(0) {
+            case .scalar(let offset):
+                attnScale = nlsLlama4AttentionScale(
+                    start: offset,
+                    stop: offset + inputs.dim(1),
+                    beta: beta,
+                    maxPositionEmbeddings: origMax
+                ).asType(h.dtype)
+            case .batch(let offsets):
+                attnScale = batchedLlama4AttentionScale(
+                    offsets: offsets, length: inputs.dim(1), beta: beta,
+                    maxPositionEmbeddings: origMax
+                ).asType(h.dtype)
+            }
         } else {
             attnScale = MLXArray.ones([inputs.dim(1), 1]).asType(h.dtype)
         }
