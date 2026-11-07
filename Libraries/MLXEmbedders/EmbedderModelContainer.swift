@@ -102,6 +102,18 @@ public final class EmbedderModelContainer: ModelMemoryReporting {
         try await context.read { try $0.model.memory() }
     }
 
+    /// Evict cached on-demand components. Their next use loads them again.
+    ///
+    /// Uses `ModelComponentsProviding.evict(_:)` with serialized access to the model.
+    ///
+    /// - Returns: The components whose cached modules were evicted.
+    @discardableResult
+    public func evict(_ components: Set<ModelComponent>) async -> Set<ModelComponent> {
+        await context.read { context in
+            (context.model as? any ModelComponentsProviding)?.evict(components) ?? []
+        }
+    }
+
     /// The resolved local model directory for the loaded container.
     public var modelDirectory: URL {
         get async throws {
