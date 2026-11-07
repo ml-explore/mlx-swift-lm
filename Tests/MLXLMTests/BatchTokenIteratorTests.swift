@@ -520,6 +520,22 @@ struct BatchTokenIteratorTests {
         }
     }
 
+    @Test("batchGenerate finalizes every row once when the batch throws")
+    func batchGenerateFinalizesOnThrow() throws {
+        try Device.withDefaultDevice(.cpu) {
+            // Two rows decoding together make the model return state, which invalidates the
+            // batch and makes next() throw.
+            let log = RecordingProcessorLog()
+            #expect(throws: BatchTokenIterator.StateError.invalidatedByModelState) {
+                _ = try batchGenerate(
+                    model: BatchTextOnlyModel(preparation: .tokens, emitsBatchState: true),
+                    prompts: [[1, 3], [7]],
+                    processor: RecordingProcessor(name: "row", log: log))
+            }
+            #expect(log.entries == ["finalize row", "finalize row"])
+        }
+    }
+
     @Test("Recorded tokens reach a row's processor before its one finalization")
     func emissionAndFinalization() throws {
         try Device.withDefaultDevice(.cpu) {

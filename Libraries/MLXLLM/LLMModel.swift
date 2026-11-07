@@ -40,7 +40,7 @@ extension LLMModel {
             processed = try prefill.forEachChunk(
                 total: y.tokens.size, reserving: prefillReservation(prefill)
             ) { range in
-                state = prefillChunk(y, range: range, cache: cache, state: state)
+                state = feedPrefillChunk(y, range: range, cache: cache, state: state)
             }
 
             // Single sync after the loop to flush any remaining async work.
@@ -61,8 +61,17 @@ extension LLMModel {
             total: prompt.tokens.size, reserving: prefillReservation(prefill))
     }
 
-    /// One chunk of ``prepare(_:cache:state:prefill:)``; see ``ResumablePrefillModel``.
-    public func prefillChunk(
+    /// One chunk of ``prepare(_:cache:state:prefill:)``, for a model whose chunks carry no
+    /// model state; see ``ResumablePrefillModel``.
+    public func prefillChunk(_ prompt: LMInput.Text, range: Range<Int>, cache: [KVCache]) {
+        let state = feedPrefillChunk(prompt, range: range, cache: cache, state: nil)
+        precondition(
+            state?.isEmpty != false,
+            "\(Self.self) returns model state from its prefill chunks, so it cannot resume them")
+    }
+
+    /// Feeds one chunk of the prompt and returns the model state for the next chunk.
+    private func feedPrefillChunk(
         _ prompt: LMInput.Text, range: Range<Int>, cache: [KVCache], state: LMOutput.State?
     ) -> LMOutput.State? {
         let output = self(prompt[.newAxis, range], cache: cache.isEmpty ? nil : cache, state: state)

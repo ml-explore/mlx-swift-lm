@@ -142,7 +142,6 @@ public struct BatchTokenIterator {
         let prompt: LMInput.Text
         let chunks: [Range<Int>]
         var next = 0
-        var state: LMOutput.State?
     }
 
     /// A queued row prefilled into its own cache, ready to join the batch.
@@ -458,9 +457,8 @@ public struct BatchTokenIterator {
             }
             if resume.next < resume.chunks.count {
                 let range = resume.chunks[resume.next]
-                try autoreleasepool {
-                    resume.state = model.prefillChunk(
-                        resume.prompt, range: range, cache: resume.cache, state: resume.state)
+                autoreleasepool {
+                    model.prefillChunk(resume.prompt, range: range, cache: resume.cache)
                     eval(resume.cache)
                     // As PrefillParameters.forEachChunk does after each chunk.
                     Memory.clearCache()
@@ -814,6 +812,9 @@ public func batchGenerate(
         model: model, sampler: sampler, processor: processor, stopTokens: stopTokens,
         maxTokens: maxTokens, prefill: prefill)
     let ids = iterator.insert(prompts: prompts, caches: caches)
+    // On every exit, including a throw from next(): every row, including the ones that ended
+    // in the last step, so each processor is finalized once.
+    defer { iterator.remove(ids) }
     var results = [Int: [Int]](uniqueKeysWithValues: ids.map { ($0, []) })
     while let events = try iterator.next() {
         for event in events {
@@ -823,9 +824,6 @@ public func batchGenerate(
                 iterator.recordEmittedToken(id: id, token: token)
                 results[id, default: []].append(token)
             case .failed(_, let error):
-                // Every row, including the ones that ended this step, so each processor is
-                // finalized once.
-                iterator.remove(ids)
                 throw error
             case .prefill, .finished:
                 break
