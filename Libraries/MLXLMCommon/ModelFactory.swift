@@ -118,6 +118,8 @@ public protocol GenericModelFactory<ContextType, ContainerType>: Sendable {
     /// load level load of a ``ResolvedModelConfiguration`` (urls) into a
     /// ``ContextType``.  This is typically `struct` that holds the values
     /// needed to run inference in the model and is _not_ `Sendable`.
+    /// If the factory loads a tokenizer, call the model's
+    /// `validate(tokenizer:)` before returning the context.
     func _load(
         configuration: ResolvedModelConfiguration,
         tokenizerLoader: any TokenizerLoader

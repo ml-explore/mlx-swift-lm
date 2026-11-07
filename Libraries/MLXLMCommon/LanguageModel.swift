@@ -6,6 +6,10 @@ import MLXNN
 
 /// Abstract form of a model that processes language.
 public protocol BaseLanguageModel: Module {
+    /// Check whether the loaded tokenizer meets this model's requirements.
+    /// The default implementation accepts any tokenizer.
+    func validate(tokenizer: any Tokenizer) throws
+
     /// Serialized namespaces whose tensors this model never loads, such as the target model in
     /// a checkpoint that a drafter shares with it. The loader does not read them.
     ///
@@ -59,6 +63,8 @@ public protocol ModelConversionMetadataProvider {
 }
 
 extension BaseLanguageModel {
+    public func validate(tokenizer: any Tokenizer) throws {}
+
     public var excludedCheckpointNamespaces: [String] { [] }
 
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {

@@ -653,9 +653,11 @@ public actor EmbeddingGemma2Embedding: MultimodalEmbedding {
             excludedComponents: configuration.excludedComponents, componentLoading: componentLoading
         )
         try Swift.Task.checkCancellation()
+        let tokenizer = try await tokenizerLoader.load(from: configuration.tokenizerDirectory)
+        try model.validate(tokenizer: tokenizer)
         self.model = model
         self.modelDirectory = modelDirectory
-        self.tokenizer = try await tokenizerLoader.load(from: configuration.tokenizerDirectory)
+        self.tokenizer = tokenizer
         var modalities: Set<Modality> = [.text]
         if model.supportedComponents.contains(.vision) {
             modalities.insert(.image)
