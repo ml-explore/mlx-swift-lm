@@ -70,6 +70,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
     var processor: LogitProcessor?
     let sampler: LogitSampler
+    let logProbabilityTopK: Int?
+
+    /// Log probabilities for the token returned by the most recent ``next()`` call.
+    public private(set) var lastLogProbabilities: DeferredTokenLogProbabilities?
 
     /// Sampler handed to ``MTPDrafterModel/draftBlock``: the base sampler,
     /// wrapped to mask suppressed token IDs when the target has any.
@@ -86,6 +90,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     public let blockSize: Int
 
     private var pendingTokens = [Int]()
+    /// The verifier's log probabilities for `pendingTokens`, when requested.
+    private var pendingLogProbabilities = [DeferredTokenLogProbabilities]()
     private var pendingIndex = 0
     /// Number of pending tokens already represented by `mainCache`. The last
     /// verifier sample is not committed until a later forward pass.
@@ -208,6 +214,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             .makeState(parameters: parameters)
 
         self.sampler = parameters.sampler()
+        self.logProbabilityTopK = parameters.logProbabilities.map { Swift.max($0, 0) }
         try components.validate(parameters: parameters)
         self.processor = components.logitProcessor(parameters: parameters, model: mainModel)
         // Draft proposals bypass the iterator's processor chain, so suppressed
@@ -352,6 +359,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             // equivalent autoregressive run, violating speculative
             // decoding's bit-exact-equivalence-to-greedy guarantee.
             pendingTokens.append(token.item(Int.self))
+            recordLogProbabilities(of: [token], sampledFrom: [logits])
 
             // the model reported per-chunk progress; the bonus forward above
             // consumed the remainder of the prompt
@@ -414,11 +422,14 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 // to the first speculateRound.
                 pendingTokens.append(token.item(Int.self))
                 pendingTokens.append(newToken.item(Int.self))
+                recordLogProbabilities(
+                    of: [token, newToken], sampledFrom: [logits, newLogits])
                 committedPendingTokenCount = 1
             } else {
                 // Prefill state already carried drafter keys; the single
                 // bonus is the input to the first speculateRound.
                 pendingTokens.append(token.item(Int.self))
+                recordLogProbabilities(of: [token], sampledFrom: [logits])
             }
         }
 
@@ -511,8 +522,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
             let draftBudget = Swift.min(remaining - 1, blockSize - 1)
             guard draftBudget > 0 else {
-                if let token = passthroughStep(maintainingDrafterState: true) {
-                    pendingTokens.append(token)
+                if let step = passthroughStep(maintainingDrafterState: true) {
+                    pendingTokens.append(step.token)
+                    if let logProbabilities = step.logProbabilities {
+                        pendingLogProbabilities.append(logProbabilities)
+                    }
                 }
                 return
             }
@@ -640,6 +654,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         var accepted = 0
         var finalToken: MLXArray?
+        var emittedTokens = [MLXArray]()
+        var emittedLogits = [MLXArray]()
         for i in 0 ..< numDraft {
             var logits = mainLogits[0..., verifyStart + i, 0...]
             logits = processor?.process(logits: logits) ?? logits
@@ -648,6 +664,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             let targetTokenValue = targetToken.item(Int.self)
             processor?.didSample(token: targetToken)
             pendingTokens.append(targetTokenValue)
+            emittedTokens.append(targetToken)
+            emittedLogits.append(logits)
             guard targetTokenValue == draftTokensList[i] else {
                 finalToken = targetToken
                 break
@@ -664,8 +682,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             eval(bonus)
             processor?.didSample(token: bonus)
             pendingTokens.append(bonus.item(Int.self))
+            emittedTokens.append(bonus)
+            emittedLogits.append(logits)
             finalToken = bonus
         }
+        recordLogProbabilities(of: emittedTokens, sampledFrom: emittedLogits)
         let emittedFinalToken = finalToken!
         committedPendingTokenCount = accepted
 
@@ -774,7 +795,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// preserving an exact continuation at the final target boundary.
     private mutating func passthroughStep(
         maintainingDrafterState: Bool = false
-    ) -> Int? {
+    ) -> (token: Int, logProbabilities: DeferredTokenLogProbabilities?)? {
         if let maxTokens, tokenCount >= maxTokens { return nil }
 
         var stepState = mainState
@@ -820,7 +841,38 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         y = .init(tokens: token)
         kvCachePlan.apply(to: mainCacheStorage)
-        return tokenInt
+        return (
+            tokenInt,
+            DeferredTokenLogProbabilities.recording(
+                [token], sampledFrom: [logits], topK: logProbabilityTopK
+            ).first
+        )
+    }
+
+    /// Records the verifier's log probabilities for tokens just queued in `pendingTokens`.
+    private mutating func recordLogProbabilities(
+        of tokens: [MLXArray], sampledFrom logits: [MLXArray]
+    ) {
+        pendingLogProbabilities += DeferredTokenLogProbabilities.recording(
+            tokens, sampledFrom: logits, topK: logProbabilityTopK)
+    }
+
+    /// Returns the next queued token and makes its log probabilities current.
+    private mutating func dequeuePendingToken() -> Int {
+        lastLogProbabilities =
+            logProbabilityTopK == nil ? nil : pendingLogProbabilities[pendingIndex]
+        let token = pendingTokens[pendingIndex]
+        pendingIndex += 1
+        telemetry.recordGeneratedToken()
+        return token
+    }
+
+    /// Generates the next token with the main model alone and makes its log probabilities current.
+    private mutating func emitPassthroughStep() -> Int? {
+        guard let step = passthroughStep() else { return nil }
+        lastLogProbabilities = step.logProbabilities
+        telemetry.recordGeneratedToken()
+        return step.token
     }
 
     public mutating func next() -> Int? {
@@ -836,41 +888,26 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // run. Rounds that flip passthrough mid-stream always clear the buffer
         // first, so this reordering is a no-op for them.
         if pendingIndex < pendingTokens.count {
-            let token = pendingTokens[pendingIndex]
-            pendingIndex += 1
-            telemetry.recordGeneratedToken()
-            return token
+            return dequeuePendingToken()
         }
 
         if passthrough {
-            if let token = passthroughStep() {
-                telemetry.recordGeneratedToken()
-                return token
-            }
-            return nil
+            return emitPassthroughStep()
         }
 
         // Run a new speculation round (may transition to passthrough).
         pendingTokens.removeAll(keepingCapacity: true)
+        pendingLogProbabilities.removeAll(keepingCapacity: true)
         pendingIndex = 0
         committedPendingTokenCount = 0
         autoreleasepool { speculateRound() }
 
         if pendingTokens.isEmpty {
             // speculateRound chose passthrough -- fall through.
-            if passthrough {
-                if let token = passthroughStep() {
-                    telemetry.recordGeneratedToken()
-                    return token
-                }
-            }
-            return nil
+            return passthrough ? emitPassthroughStep() : nil
         }
 
-        let token = pendingTokens[pendingIndex]
-        pendingIndex += 1
-        telemetry.recordGeneratedToken()
-        return token
+        return dequeuePendingToken()
     }
 
 }
