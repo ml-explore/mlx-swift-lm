@@ -18,6 +18,13 @@ public struct PrefillParameters: Sendable {
     /// Ceiling on tokens evaluated per prefill forward. `nil` lets each model pick
     /// its own default (512 for the generic path; the Gemma 3 text path uses a
     /// smaller, tuned chunk).
+    ///
+    /// When ``BatchTokenIterator`` prefills a queued prompt one chunk per step while other
+    /// rows decode, this sets the balance between them. Smaller chunks give the decoding
+    /// rows shorter gaps between tokens but admit the new prompt more slowly, mainly because
+    /// small chunks use the GPU less efficiently. The balance depends on the GPU and the
+    /// model; the default of 512 was chosen on an Apple M5 Max. DecodeBench's `arrival`
+    /// mode (`Benchmarks/DecodeBench`) measures both sides on other hardware.
     public var stepSize: Int?
 
     /// How the prompt is divided into forwards. See ``Chunking``.
