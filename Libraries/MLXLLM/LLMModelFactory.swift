@@ -91,6 +91,7 @@ public enum LLMTypeRegistry {
         "glm4": create(GLM4Configuration.self, GLM4Model.init),
         "glm4_moe": create(GLM4MoEConfiguration.self, GLM4MoEModel.init),
         "glm4_moe_lite": create(GLM4MoELiteConfiguration.self, GLM4MoELiteModel.init),
+        "ricursive": create(RicursiveConfiguration.self, RicursiveModel.init),
         "acereason": create(Qwen2Configuration.self, Qwen2Model.init),
         "falcon_h1": create(FalconH1Configuration.self, FalconH1Model.init),
         "bitnet": create(BitnetConfiguration.self, BitnetModel.init),

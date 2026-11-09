@@ -51,6 +51,13 @@ LLMRegistry.gemma3_1B_qat_4bit    // mlx-community/gemma-3-1b-it-qat-4bit
 LLMRegistry.gemma3n_E4B_it_lm_4bit // mlx-community/gemma-3n-E4B-it-lm-4bit
 ```
 
+### Ricursive
+
+```swift
+// model_type: "ricursive"
+// Ripple-65B; load an MLX conversion by id or path
+```
+
 ### Phi
 
 ```swift
