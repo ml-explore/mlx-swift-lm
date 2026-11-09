@@ -40,6 +40,9 @@ Compatible checkpoint tensors map directly. Other eligible tables use temporary 
 with one copy per load and additional disk space. Loading peak memory can remain unchanged.
 Select ``EmbeddingStoragePolicy/resident`` to keep normal MLX storage.
 
+A table that a checkpoint splits by rows into several tensors can use ``ShardedEmbedding``.
+List its ``ShardedEmbedding/shards`` as input-only tables, and each shard is stored the same way.
+
 > Important: Do not rewrite or truncate checkpoint files while the model is in use.
 > Use ``EmbeddingStoragePolicy/resident`` if files must change in place.
 

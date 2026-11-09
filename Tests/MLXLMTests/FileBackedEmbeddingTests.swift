@@ -36,6 +36,16 @@ final class FileBackedEmbeddingTests: XCTestCase {
         }
     }
 
+    private final class ShardedModel: Module, BaseLanguageModel, InputOnlyEmbeddingsProviding {
+        var inputOnlyEmbeddings: [Embedding] { table.shards }
+        @ModuleInfo(key: "table") var table: ShardedEmbedding
+
+        init(_ table: ShardedEmbedding) {
+            _table.wrappedValue = table
+            super.init()
+        }
+    }
+
     private final class CustomEmbedding: QuantizedEmbedding {}
 
     private func embedding(
@@ -617,6 +627,66 @@ final class FileBackedEmbeddingTests: XCTestCase {
         try FileManager.default.removeItem(at: url)
         assertIdentical(mapped, source)
         assertIdentical(mapped + 1, source + 1)
+    }
+
+    func testShardedTableMapsEveryShardAndMatchesOneTable() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("model.safetensors")
+        let rowCounts = [100, 57, 100]
+        let values = withRandomState(MLXRandom.RandomState(seed: 7)) {
+            MLXRandom.normal([257, 256]).asType(.bfloat16)
+        }
+        let quantization = BaseConfiguration.Quantization(groupSize: 64, bits: 8)
+        let reference = QuantizedEmbedding(weight: values, groupSize: 64, bits: 8)
+        var start = 0
+        let source = ShardedModel(
+            ShardedEmbedding(
+                shards: rowCounts.map { count in
+                    defer { start += count }
+                    return QuantizedEmbedding(
+                        weight: values[start ..< start + count], groupSize: 64, bits: 8)
+                }))
+        try save(
+            arrays: Dictionary(uniqueKeysWithValues: source.parameters().flattened()), url: url)
+
+        func placeholder() -> ShardedModel {
+            ShardedModel(ShardedEmbedding(rowCounts: rowCounts, dimensions: 256))
+        }
+        let storage = try XCTUnwrap(
+            CheckpointTensorStorage(
+                model: placeholder(), policy: .automatic, urls: [url],
+                quantization: .init(quantization: quantization, perLayerQuantization: [:])))
+        XCTAssertEqual(storage.mappings.count, rowCounts.count * 3)
+
+        let indices = [
+            MLXArray(Int32(0)), MLXArray([0, 99, 100, 156, 157, 256, 100, 0]),
+            MLXArray([256, 157, 156, 99, 3, 200]).reshaped(2, 3),
+        ]
+        for policy in [EmbeddingStoragePolicy.automatic, .resident] {
+            let model = placeholder()
+            try loadWeights(
+                modelDirectory: directory, model: model, quantization: quantization,
+                embeddingStorage: policy)
+            for shard in model.table.shards {
+                XCTAssertEqual(shard is FileBackedQuantizedEmbedding, policy == .automatic)
+            }
+            for index in indices {
+                assertIdentical(model.table(index), reference(index))
+            }
+        }
+
+        let floating = ShardedModel(
+            ShardedEmbedding(shards: [
+                Embedding(weight: values[..<100]), Embedding(weight: values[100...]),
+            ]))
+        floating.freeze()
+        XCTAssertEqual(try prepareEmbeddingStorage(in: floating, directory: directory), 2)
+        XCTAssertTrue(floating.table.shards.allSatisfy { $0 is FileBackedEmbedding })
+        let index = MLXArray([0, 99, 100, 256])
+        assertIdentical(floating.table(index), values.take(index, axis: 0))
     }
 }
 #endif
