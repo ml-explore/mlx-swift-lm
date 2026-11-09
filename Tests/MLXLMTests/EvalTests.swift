@@ -231,6 +231,50 @@ public class EvalTests: XCTestCase {
         }
     }
 
+    func testSpeculativeLogProbabilitiesMatchTheMainModelDecodingAlone() throws {
+        let main = makeQualityGateLlamaModel()
+        let stranger = makeQualityGateLlamaModel(seed: 19)
+        let prompt = LMInput(tokens: MLXArray([1, 2, 3]))
+
+        let pairs: [(draft: LlamaModel, repetitionPenalty: Float?)] = [
+            (main, nil), (stranger, nil), (stranger, 1.3),
+        ]
+        for (draft, repetitionPenalty) in pairs {
+            let parameters = GenerateParameters(
+                maxTokens: 12, temperature: 0, logProbabilities: 5,
+                repetitionPenalty: repetitionPenalty)
+            var plain = try TokenIterator(input: prompt, model: main, parameters: parameters)
+            var speculative = try SpeculativeTokenIterator(
+                input: prompt, mainModel: main, draftModel: draft,
+                parameters: parameters, numDraftTokens: 3)
+
+            while let token = plain.next() {
+                let expected = try XCTUnwrap(plain.lastLogProbabilities).materialize()
+                XCTAssertEqual(speculative.next(), token)
+                let actual = try XCTUnwrap(speculative.lastLogProbabilities).materialize()
+
+                XCTAssertEqual(actual.chosen.token, token)
+                XCTAssertEqual(
+                    actual.chosen.logProbability, expected.chosen.logProbability, accuracy: 1e-4)
+                XCTAssertEqual(
+                    actual.topLogProbabilities.map(\.token),
+                    expected.topLogProbabilities.map(\.token))
+                for (a, e) in zip(actual.topLogProbabilities, expected.topLogProbabilities) {
+                    XCTAssertEqual(a.logProbability, e.logProbability, accuracy: 1e-4)
+                }
+            }
+            XCTAssertNil(speculative.next())
+
+            let telemetry = try XCTUnwrap(speculative.speculativeDecodingTelemetry)
+            if draft === main {
+                XCTAssertEqual(telemetry.acceptedDraftTokenCount, telemetry.draftTokenCount)
+            } else {
+                XCTAssertGreaterThan(telemetry.acceptedDraftTokenCount, 0)
+                XCTAssertLessThan(telemetry.acceptedDraftTokenCount, telemetry.draftTokenCount)
+            }
+        }
+    }
+
     func testLogProbabilityReportingPreservesSeededSampling() throws {
         let model = makeQualityGateLlamaModel()
         let input = LMInput(text: .init(tokens: MLXArray([1, 2, 3])))

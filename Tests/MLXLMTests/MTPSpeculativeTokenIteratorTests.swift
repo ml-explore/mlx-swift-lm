@@ -707,6 +707,48 @@ func testMTPIteratorUsesSingleStepWhenOnlyOneTokenRemains() throws {
     #expect(cache.offset == 4)
 }
 
+@Test(
+    "MTP reports the verifier's log probabilities for each emitted token only",
+    arguments: [
+        // Prefill bonus 5, two accepted drafts, correction 7; verify row 9 is never emitted.
+        ([0, 0, 5, 5, 5, 7, 9], false, 8, [5, 5, 5, 7]),
+        // One slot left after the bonus: a single target-only step.
+        ([0, 0, 5, 11], false, 2, [5, 11]),
+        // Missing drafter state: sticky passthrough.
+        ([0, 0, 5, 11, 12], true, 3, [5, 11, 12]),
+    ] as [([Int32], Bool, Int, [Int])])
+func testMTPIteratorReportsLogProbabilitiesForEmittedTokens(
+    logitTokens: [Int32], omitDrafterState: Bool, maxTokens: Int, expected: [Int]
+) throws {
+    for logProbabilities in [nil, 2] as [Int?] {
+        let main = MockMainModel(nextLogitTokens: logitTokens)
+        main.omitDrafterState = omitDrafterState
+        var iter = try MTPSpeculativeTokenIterator(
+            input: LMInput(tokens: MLXArray([Int32(1), 2, 3])), mainModel: main,
+            drafter: MockDrafter(draftedTokenValue: 5), mainCache: nil,
+            parameters: GenerateParameters(
+                maxTokens: maxTokens, logProbabilities: logProbabilities),
+            blockSize: 4)
+
+        var tokens = [Int]()
+        for _ in expected.indices {
+            let next = iter.next()
+            let token = try #require(next)
+            tokens.append(token)
+            guard logProbabilities != nil else {
+                #expect(iter.lastLogProbabilities == nil)
+                continue
+            }
+            let values = try #require(iter.lastLogProbabilities).materialize()
+            #expect(values.chosen.token == token)
+            #expect(values.chosen.logProbability > -1e-3)
+            #expect(values.topLogProbabilities.map(\.token).first == token)
+            #expect(values.topLogProbabilities.count == 2)
+        }
+        #expect(tokens == expected)
+    }
+}
+
 // MARK: - LogitProcessor emit-only invariant
 
 /// Reference-backed processor proving verifier logic does not rely on an
