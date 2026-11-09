@@ -685,6 +685,13 @@ public struct BatchTokenIterator {
                 }
                 return copy
             } ?? model.newCache(parameters: cacheParameters)
+        // A supplied cache with fewer layers than the model would have the model index layers
+        // it lacks, so the first row's is checked against a fresh cache; later rows match it.
+        if item.cache != nil, rows.isEmpty, admitted.isEmpty,
+            rowCache.count < (try model.newCache(parameters: cacheParameters).count)
+        {
+            throw KVCacheError(message: "A supplied cache needs a layer for every model layer")
+        }
         let layerCount = rows.isEmpty ? admitted.first?.cache.count ?? rowCache.count : cache.count
         guard rowCache.count == layerCount else {
             throw KVCacheError(message: "Every row must share the active cache's layer count")

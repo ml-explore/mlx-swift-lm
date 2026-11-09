@@ -172,6 +172,29 @@ struct BatchTokenIteratorTests {
         }
     }
 
+    @Test("A first row whose supplied cache lacks the model's layers fails before its prefill")
+    func firstRowLayerCount() throws {
+        try Device.withDefaultDevice(.cpu) {
+            // Two layers; the first row supplies one.
+            let model = tinyLlama()
+            let alone = Array(
+                IteratorSequence(
+                    try TokenIterator(
+                        input: LMInput(tokens: MLXArray([Int32(4), 5])), model: model,
+                        processor: nil, sampler: ArgMaxSampler(), prefill: .init(), maxTokens: 3)))
+            var iterator = BatchTokenIterator(model: model, maxTokens: 3)
+            let short = iterator.insert(prompt: [1, 2, 3], cache: [KVCacheSimple()])
+            let valid = iterator.insert(prompt: [4, 5])
+            var events: [BatchEvent] = []
+            while let step = try iterator.next() { events += step }
+            #expect(failures(events).map(\.id) == [short])
+            #expect(failures(events).allSatisfy { $0.error is KVCacheError })
+            // The row queued after it is admitted and decodes as it does alone.
+            #expect(tokens(events) == alone)
+            #expect(tokenIDs(events).allSatisfy { $0 == valid })
+        }
+    }
+
     @Test("A queued row with a different layer count fails before its prompt is prefilled")
     func pendingLayerCounts() throws {
         try Device.withDefaultDevice(.cpu) {
