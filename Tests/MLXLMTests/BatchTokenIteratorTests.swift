@@ -1026,6 +1026,23 @@ struct BatchTokenIteratorTests {
         }.value
     }
 
+    @Test("Chunks written in place keep the cache's buffer: the chunk markers hold no view of it")
+    func resumablePrefillReusesCacheBuffer() throws {
+        let model = InPlaceChunkModel()
+        // Chunks of 2 into one 256-position buffer, with no reallocation.
+        let prefill = PrefillParameters(stepSize: 2)
+        let prompt = Array(1 ..< 11)
+        let chunks = model.prefillChunks(
+            for: LMInput.Text(tokens: MLXArray(prompt.map { Int32($0) })), prefill: prefill)
+        var iterator = BatchTokenIterator(model: model, maxTokens: 1, prefill: prefill)
+        iterator.insert(prompt: prompt)
+        while try iterator.next() != nil {}
+        // The buffer before every chunk after the first: one allocation, written in place.
+        #expect(chunks.count > 2)
+        #expect(model.keyBuffers.count == chunks.count - 1)
+        #expect(Set(model.keyBuffers).count == 1, "\(model.keyBuffers)")
+    }
+
     @Test("A model whose chunks leave cache writes lazy resumes after a cancelled step")
     func resumablePrefillLazyChunks() async throws {
         // Carries the iterator from the cancelled task to a fresh one; they run in turn.
@@ -1555,6 +1572,48 @@ enum BatchPrefixCacheKind: Sendable, CaseIterable {
             _ = attention.update(keys: keys, values: keys)
             return [CacheList(arrays, CacheList(attention, mamba))]
         }
+    }
+}
+
+/// A resumable model with one attention layer, written in place by each chunk. Before every
+/// chunk after the first it records where the cache's key buffer lives.
+private final class InPlaceChunkModel: Module, ResumablePrefillModel {
+    private(set) var keyBuffers: [Int] = []
+
+    func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
+        .tokens(input.text)
+    }
+
+    func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        let length = input.tokens.dim(-1)
+        if let cache { write(cache, count: length) }
+        return LMOutput(logits: MLXArray.zeros([input.tokens.dim(0), length, 8]))
+    }
+
+    func newCache(parameters: GenerateParameters?) -> [KVCache] { [KVCacheSimple()] }
+
+    func prefillChunks(for prompt: LMInput.Text, prefill: PrefillParameters) -> [Range<Int>] {
+        prefill.chunkRanges(total: prompt.tokens.size)
+    }
+
+    func prefillChunk(_ prompt: LMInput.Text, range: Range<Int>, cache: [KVCache]) {
+        if let keys = cache[0].innerState().first {
+            eval(keys)
+            keyBuffers.append(
+                keys.asData(access: .noCopy).data.withUnsafeBytes {
+                    Int(bitPattern: $0.baseAddress)
+                })
+        }
+        write(cache, count: range.count)
+    }
+
+    private func write(_ cache: [KVCache], count: Int) {
+        let keys = MLXArray.ones([1, 2, count, 64])
+        _ = cache[0].update(keys: keys, values: keys)
     }
 }
 

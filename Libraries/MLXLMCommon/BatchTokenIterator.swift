@@ -148,11 +148,10 @@ public struct BatchTokenIterator {
         let prompt: LMInput.Text
         let chunks: [Range<Int>]
         var next = 0
-        /// Markers of the last chunk, waited on after the next chunk is submitted, so at most
-        /// two chunks are in flight: one element of each cache array the chunk wrote, reduced
-        /// to a scalar of its own. Not the cache arrays themselves: a cache that writes in
-        /// place rebinds those objects to the next chunk's result.
-        var submitted: [MLXArray] = []
+        /// The last chunk's marker, waited on after the next chunk is submitted, so at most two
+        /// chunks are in flight. Not the cache arrays themselves: a cache that writes in place
+        /// rebinds those objects to the next chunk's result. See `chunkMarker`.
+        var submitted: MLXArray?
     }
 
     /// A queued row prefilled into its own cache, ready to join the batch.
@@ -474,10 +473,10 @@ public struct BatchTokenIterator {
                     // then wait for the previous one: the CPU builds the next chunk's graph
                     // while the GPU evaluates this one, with at most two chunks in flight.
                     let state = resume.cache.flatMap { $0.innerState() }
-                    let markers = state.map { $0.reshaped([-1])[..<1].sum() }
-                    asyncEval(state + markers)
-                    eval(resume.submitted)
-                    resume.submitted = markers
+                    let marker = Self.chunkMarker(state)
+                    asyncEval(state + [marker])
+                    if let previous = resume.submitted { eval(previous) }
+                    resume.submitted = marker
                     // As PrefillParameters.forEachChunk does after each chunk.
                     Memory.clearCache()
                 }
@@ -502,6 +501,17 @@ public struct BatchTokenIterator {
             end(item.row)
             return [.failed(id: id, error: error)]
         }
+    }
+
+    /// A small array of its own that is ready once the chunk's cache writes, `state`, are: the
+    /// first element of each, copied together. It must not be a view of a cache buffer, which
+    /// would keep the buffer alive and stop the next chunk from writing it in place (MLX
+    /// returns its input from a reduction over one element, and from a concatenation of one
+    /// array, so a constant element makes the concatenation copy).
+    private static func chunkMarker(_ state: [MLXArray]) -> MLXArray {
+        concatenated(
+            state.map { $0.reshaped([-1])[..<1].asType(.float32) }
+                + [MLXArray.zeros([1], dtype: .float32)])
     }
 
     /// Feeds every row its next token and reports the tokens, finishing the rows that end.
