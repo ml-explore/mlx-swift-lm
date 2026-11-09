@@ -894,6 +894,13 @@ public actor EmbeddingGemma2Embedding: MultimodalEmbedding {
     }
 }
 
+extension EmbeddingGemma2Embedding: ModelMemoryReporting {
+    /// Measure the model's tensor buffers, including the media encoders that have loaded.
+    public func memory() throws -> ModelMemory {
+        try model.memory()
+    }
+}
+
 extension EmbeddingGemma2Embedding.Input.Part {
     fileprivate var text: String? {
         if case .text(let text) = self { text } else { nil }
