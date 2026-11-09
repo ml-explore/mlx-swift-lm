@@ -504,14 +504,18 @@ public struct BatchTokenIterator {
     }
 
     /// A small array of its own that is ready once the chunk's cache writes, `state`, are: the
-    /// first element of each, copied together. It must not be a view of a cache buffer, which
-    /// would keep the buffer alive and stop the next chunk from writing it in place (MLX
-    /// returns its input from a reduction over one element, and from a concatenation of one
-    /// array, so a constant element makes the concatenation copy).
+    /// first element of the last one, copied. It is evaluated in the same `asyncEval` as
+    /// `state`, on the same stream, and MLX gives every array of one async evaluation on a
+    /// stream the same event, signaled after all of that evaluation's work there, so waiting
+    /// on the marker waits on every write. One element keeps it to a few ops per chunk. It
+    /// must not be a view of a cache buffer, which would keep the buffer alive and stop the
+    /// next chunk from writing it in place (MLX returns its input from a reduction over one
+    /// element, and from a concatenation of one array, so a constant element makes the
+    /// concatenation copy).
     private static func chunkMarker(_ state: [MLXArray]) -> MLXArray {
-        concatenated(
-            state.map { $0.reshaped([-1])[..<1].asType(.float32) }
-                + [MLXArray.zeros([1], dtype: .float32)])
+        guard let last = state.last else { return MLXArray.zeros([1]) }
+        let element = last.reshaped([-1])[..<1]
+        return concatenated([element, MLXArray.zeros([1], dtype: element.dtype)])
     }
 
     /// Feeds every row its next token and reports the tokens, finishing the rows that end.
