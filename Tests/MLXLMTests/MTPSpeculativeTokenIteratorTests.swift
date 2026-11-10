@@ -707,6 +707,48 @@ func testMTPIteratorUsesSingleStepWhenOnlyOneTokenRemains() throws {
     #expect(cache.offset == 4)
 }
 
+@Test(
+    "MTP reports the verifier's log probabilities for each emitted token only",
+    arguments: [
+        // Prefill bonus 5, two accepted drafts, correction 7; verify row 9 is never emitted.
+        ([0, 0, 5, 5, 5, 7, 9], false, 8, [5, 5, 5, 7]),
+        // One slot left after the bonus: a single target-only step.
+        ([0, 0, 5, 11], false, 2, [5, 11]),
+        // Missing drafter state: sticky passthrough.
+        ([0, 0, 5, 11, 12], true, 3, [5, 11, 12]),
+    ] as [([Int32], Bool, Int, [Int])])
+func testMTPIteratorReportsLogProbabilitiesForEmittedTokens(
+    logitTokens: [Int32], omitDrafterState: Bool, maxTokens: Int, expected: [Int]
+) throws {
+    for logProbabilities in [nil, 2] as [Int?] {
+        let main = MockMainModel(nextLogitTokens: logitTokens)
+        main.omitDrafterState = omitDrafterState
+        var iter = try MTPSpeculativeTokenIterator(
+            input: LMInput(tokens: MLXArray([Int32(1), 2, 3])), mainModel: main,
+            drafter: MockDrafter(draftedTokenValue: 5), mainCache: nil,
+            parameters: GenerateParameters(
+                maxTokens: maxTokens, logProbabilities: logProbabilities),
+            blockSize: 4)
+
+        var tokens = [Int]()
+        for _ in expected.indices {
+            let next = iter.next()
+            let token = try #require(next)
+            tokens.append(token)
+            guard logProbabilities != nil else {
+                #expect(iter.lastLogProbabilities == nil)
+                continue
+            }
+            let values = try #require(iter.lastLogProbabilities).materialize()
+            #expect(values.chosen.token == token)
+            #expect(values.chosen.logProbability > -1e-3)
+            #expect(values.topLogProbabilities.map(\.token).first == token)
+            #expect(values.topLogProbabilities.count == 2)
+        }
+        #expect(tokens == expected)
+    }
+}
+
 // MARK: - LogitProcessor emit-only invariant
 
 /// Reference-backed processor proving verifier logic does not rely on an
@@ -1277,6 +1319,70 @@ private func runGreedy(
     var tokens = [Int]()
     while let token = iter.next() { tokens.append(token) }
     return tokens
+}
+
+private struct SequentialGreedyVerificationProcessor: LogitProcessor {
+    private(set) var sampledTokens = [Int]()
+    mutating func prompt(_ prompt: MLXArray) {}
+    func process(logits: MLXArray) -> MLXArray { logits }
+    mutating func didSample(token: MLXArray) {
+        sampledTokens.append(token.item(Int.self))
+    }
+}
+
+@Test(arguments: [2, 4, 8], [1, 2, 5, 13, 48])
+func testMTPBatchedGreedyTokenAndCacheParity(blockSize: Int, stopAfter: Int) throws {
+    let prompt: [Int32] = [1, 2, 3]
+    let script = mixedAcceptanceScript(drafted: 7)
+    let model = PositionScriptedMainModel(
+        script: script, slidingWindow: 8, wideSlidingWindow: 64)
+    let referenceModel = PositionScriptedMainModel(
+        script: script, slidingWindow: 8, wideSlidingWindow: 64)
+    let parameters = GenerateParameters(maxTokens: 48, temperature: 0, logProbabilities: 2)
+    var batched = try MTPSpeculativeTokenIterator(
+        input: LMInput(tokens: MLXArray(prompt)), mainModel: model,
+        drafter: MockDrafter(), parameters: parameters, blockSize: blockSize)
+    var sequential = try MTPSpeculativeTokenIterator(
+        input: LMInput(tokens: MLXArray(prompt)), mainModel: referenceModel,
+        drafter: MockDrafter(), parameters: parameters, blockSize: blockSize)
+    sequential._setProcessorForTesting(SequentialGreedyVerificationProcessor())
+
+    func expectCacheParity() {
+        #expect(
+            batched.mainCacheStorage.processedTokenCount
+                == sequential.mainCacheStorage.processedTokenCount)
+        for (actual, expected) in zip(batched.mainCache, sequential.mainCache) {
+            #expect(actual.offset == expected.offset)
+            #expect(actual.state.count == expected.state.count)
+            for (actualArray, expectedArray) in zip(actual.state, expected.state) {
+                #expect(actualArray.shape == expectedArray.shape)
+                #expect(actualArray.asArray(Float.self) == expectedArray.asArray(Float.self))
+            }
+        }
+    }
+
+    var tokens = [Int]()
+    for _ in 0 ..< stopAfter {
+        let nextBatched = batched.next()
+        let nextSequential = sequential.next()
+        let token = try #require(nextBatched)
+        #expect(token == nextSequential)
+        let logProbabilities = try #require(batched.lastLogProbabilities).materialize()
+        #expect(logProbabilities.chosen.token == token)
+        #expect(logProbabilities == sequential.lastLogProbabilities?.materialize())
+        tokens.append(token)
+        #expect(batched.speculativeDecodingTelemetry == sequential.speculativeDecodingTelemetry)
+        expectCacheParity()
+    }
+    batched.finalizeGeneration()
+    sequential.finalizeGeneration()
+    expectCacheParity()
+    #expect(batched.passthroughReason == nil)
+    #expect(sequential.passthroughReason == nil)
+    #expect(model.verifyChunkLengths == referenceModel.verifyChunkLengths)
+    let processor = try #require(
+        sequential._processorForTesting as? SequentialGreedyVerificationProcessor)
+    #expect(processor.sampledTokens.starts(with: tokens.dropFirst()))
 }
 
 // MARK: - A snapshot the consumer cannot place is refused at prefill too
