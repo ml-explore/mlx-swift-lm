@@ -358,8 +358,10 @@ final class RicursivePytorchParityTests: XCTestCase {
             let matches = zip(tokens, expected).filter { $0 == $1 }.count
             let result = Row(
                 length: prompt.size, steps: expected.count,
-                firstMismatch: zip(tokens, expected).enumerated().first { $0.element.0 != $0.element.1 }?
-                    .offset,
+                firstMismatch: zip(tokens, expected).enumerated().first {
+                    $0.element.0 != $0.element.1
+                }?
+                .offset,
                 matchingTokens: matches,
                 meanKL: divergences.reduce(0, +) / Float(divergences.count),
                 maxLogitDifference: worst,
