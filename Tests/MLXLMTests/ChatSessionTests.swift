@@ -1423,7 +1423,7 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertLessThan(count, 1000)
     }
 
-    func testTokenObservationRejectsActiveSpeculationButAllowsMemoryFallback() async throws {
+    func testTokenObservationReportsProcessedValuesWithAndWithoutSpeculation() async throws {
         for fallback in [false, true] {
             let session = ChatSession(
                 model(),
@@ -1436,15 +1436,18 @@ public class ChatSessionTests: XCTestCase {
                 components: GenerationComponents { ForceTokenProcessor(token: 1) })
             let warm = try await collectGeneration(session.streamDetails(to: "warm"))
             XCTAssertEqual(warm.info.generationTokenCount, 3)
-            do {
-                let result = try await collectObservedGeneration(
-                    session.observe(
-                        to: "test", using: .logProbabilities(topCount: 1)))
-                XCTAssertTrue(fallback)
-                XCTAssertEqual(result.probabilities.count, result.info.generationTokenCount)
-                XCTAssertEqual(result.probabilities.count, 3)
-            } catch ChatSession.ObservationError.unsupportedSpeculativeDecoding {
-                XCTAssertFalse(fallback)
+            let result = try await collectObservedGeneration(
+                session.observe(
+                    to: "test", using: .logProbabilities(topCount: 1)))
+            XCTAssertEqual(
+                result.info.speculativeDecodingFallbackReason,
+                fallback ? .memoryBudgetExceeded : nil)
+            XCTAssertEqual(result.info.speculativeDecodingTelemetry == nil, fallback)
+            XCTAssertEqual(result.probabilities.count, result.info.generationTokenCount)
+            XCTAssertEqual(result.probabilities.count, 3)
+            for values in result.probabilities {
+                XCTAssertEqual(values.chosen, .init(token: 1, logProbability: 0))
+                XCTAssertEqual(values.topLogProbabilities, [values.chosen])
             }
             let resumed = try await collectGeneration(session.streamDetails(to: "resume"))
             XCTAssertEqual(resumed.info.generationTokenCount, 3)

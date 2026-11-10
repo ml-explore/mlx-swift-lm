@@ -1001,26 +1001,11 @@ public final class ChatSession {
         }
     }
 
-    /// Errors from a generation observation request.
-    public enum ObservationError: LocalizedError {
-        /// The selected speculative iterator cannot report token log probabilities.
-        case unsupportedSpeculativeDecoding
-
-        public var errorDescription: String? {
-            switch self {
-            case .unsupportedSpeculativeDecoding:
-                "Token log probabilities are unavailable with active speculative decoding. Use standard decoding for observation."
-            }
-        }
-    }
-
     /// Stream details through a fresh composed handler for each generation pass.
     ///
     /// The transformer configures a copy of the session's parameters for this
     /// request, including automatic tool restarts. Its output must forward all
     /// base generation events so the session can maintain its transcript and cache.
-    /// Log-probability reporting with active speculative decoding throws
-    /// ``ObservationError/unsupportedSpeculativeDecoding``.
     public func observe<T: GenerationTransformer>(
         to prompt: String,
         role: Chat.Message.Role = .user,
@@ -1033,7 +1018,7 @@ public final class ChatSession {
             messages: [
                 .init(role: role, content: prompt, images: images, videos: videos, audios: audios)
             ],
-            transformer: transformer, requiresLogProbabilitySupport: true
+            transformer: transformer
         ) { $0 }
     }
 
@@ -1045,9 +1030,7 @@ public final class ChatSession {
         to messages: consuming [Chat.Message],
         using transformer: T
     ) -> AsyncThrowingStream<T.Handler.Output, Error> {
-        streamMap(
-            messages: messages, transformer: transformer, requiresLogProbabilitySupport: true
-        ) { $0 }
+        streamMap(messages: messages, transformer: transformer) { $0 }
     }
 
     /// Identifies one response created by this session.
@@ -1150,7 +1133,6 @@ public final class ChatSession {
         messages: consuming [Chat.Message],
         failOnRejectedToolCall: Bool = false,
         transformer: T,
-        requiresLogProbabilitySupport: Bool = false,
         transform: @Sendable @escaping (T.Handler.Output) -> R?
     ) -> AsyncThrowingStream<R, Error> {
         let (stream, continuation) = AsyncThrowingStream<R, Error>.makeStream()
@@ -1763,12 +1745,6 @@ public final class ChatSession {
                                     components: components
                                 )
 
-                                if requiresLogProbabilitySupport,
-                                    generateParameters.logProbabilities != nil
-                                {
-                                    throw ObservationError.unsupportedSpeculativeDecoding
-                                }
-
                                 generation = startGeneration(iterator)
                             } catch MTPInitializationError.unsupportedSpeculativeCache {
                                 mtpDrafterContinuation = nil
@@ -1818,12 +1794,6 @@ public final class ChatSession {
                                     speculativeDecodingFallbackReason = .memoryBudgetExceeded
                                     generation = try defaultGeneration()
                                 } else {
-                                    if requiresLogProbabilitySupport,
-                                        generateParameters.logProbabilities != nil
-                                    {
-                                        throw ObservationError.unsupportedSpeculativeDecoding
-                                    }
-
                                     if cachedDraftContainer == nil {
                                         await loadedDraftModel.update { storedDraftModel in
                                             if storedDraftModel == nil {
