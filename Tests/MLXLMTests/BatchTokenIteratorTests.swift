@@ -988,13 +988,57 @@ struct BatchTokenIteratorTests {
 
             iterator.remove([ids[0]])
             #expect(iterator.ids == [ids[1]])
-            let replacement = layer.innerState()
-            try #require(replacement.count == 2)
-            for array in replacement {
-                var available = false
-                #expect(_mlx_array_is_available(&available, array.ctx) == 0)
-                #expect(available == trim)
+            try expectEvaluatedBatchCache(layer, evaluated: trim)
+        }
+    }
+
+    @Test("Resize callback decides once per operation", arguments: [false, true])
+    func batchResizeCallback(useParameters: Bool) throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = BatchUniformLogitModel(dtype: .float32)
+            var shouldClear = false
+            var decisions: [Bool] = []
+            let decide = {
+                decisions.append(shouldClear)
+                return shouldClear
             }
+            var iterator: BatchTokenIterator
+            if useParameters {
+                iterator = try BatchTokenIterator(
+                    model: model, parameters: .init(maxTokens: 8, temperature: 0),
+                    clearCacheAfterBatchResize: true, shouldClearCacheAfterBatchResize: decide)
+            } else {
+                iterator = BatchTokenIterator(
+                    model: model, maxTokens: 8, shouldClearCacheAfterBatchResize: decide)
+            }
+
+            let ids = iterator.insert(prompts: [[1, 2], [3, 4, 5]], maxTokens: [3, 8])
+            #expect(tokenIDs(try iterator.next()) == ids)
+            #expect(decisions.isEmpty)
+
+            let third = iterator.insert(prompt: [6])
+            #expect(tokenIDs(try iterator.next()) == ids + [third])
+            #expect(decisions == [false])
+
+            // A join and a length-limited row leaving in one step share one decision.
+            let fourth = iterator.insert(prompt: [7, 8])
+            let events = try iterator.next()
+            #expect(tokenIDs(events) == ids + [third, fourth])
+            #expect(finishes(events) == [BatchFinish(id: ids[0], reason: .length, stopToken: nil)])
+            #expect(decisions == [false, false])
+            let layer = try #require(model.lastBatchCache)
+            try expectEvaluatedBatchCache(layer, evaluated: false)
+
+            shouldClear = true
+            iterator.remove([third, fourth])
+            #expect(iterator.ids == [ids[1]])
+            #expect(decisions == [false, false, true])
+            try expectEvaluatedBatchCache(layer, evaluated: true)
+
+            #expect(tokenIDs(try iterator.next()) == [ids[1]])
+            iterator.remove([ids[1]])
+            #expect(iterator.ids.isEmpty)
+            #expect(decisions == [false, false, true])
         }
     }
 
@@ -1947,6 +1991,19 @@ private func collect(_ iterator: inout BatchTokenIterator, uids: [Int]) throws -
 /// The step's `.token` values, in batch order; empty for `nil`.
 private func tokens(_ events: [BatchEvent]?) -> [Int] {
     (events ?? []).compactMap { if case .token(_, let token) = $0 { token } else { nil } }
+}
+
+private func expectEvaluatedBatchCache(
+    _ cache: BatchKVCache, evaluated: Bool, sourceLocation: SourceLocation = #_sourceLocation
+) throws {
+    let buffers = cache.innerState()
+    try #require(buffers.count == 2, sourceLocation: sourceLocation)
+    for buffer in buffers {
+        var available = false
+        #expect(
+            _mlx_array_is_available(&available, buffer.ctx) == 0, sourceLocation: sourceLocation)
+        #expect(available == evaluated, sourceLocation: sourceLocation)
+    }
 }
 
 /// The ids of the step's `.token` events, in batch order; empty for `nil`.

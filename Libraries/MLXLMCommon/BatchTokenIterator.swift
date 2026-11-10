@@ -56,7 +56,8 @@ public enum BatchEvent: Sendable {
 /// never mistaken for idle. `PrefillParameters.progress` still reports each chunk.
 ///
 /// The iterator clears MLX's buffer cache after each prefill chunk, as single-row prefill does.
-/// Callers can opt in to clearing it after a join or removal rebuilds an active batch.
+/// Callers can opt in to clearing it after a join or removal rebuilds an active batch,
+/// or supply a callback to decide at runtime.
 /// The buffer cache is shared by all models in the process.
 ///
 /// ``next()`` returns the step's ``BatchEvent``s, or `nil` when the iterator is idle: no row
@@ -125,7 +126,7 @@ public struct BatchTokenIterator {
     private let stopTokens: Set<Int>
     private let maxTokens: Int
     private let prefill: PrefillParameters
-    private let clearCacheAfterBatchResize: Bool
+    private let shouldClearCacheAfterBatchResize: (() -> Bool)?
 
     private struct Row {
         let id: Int
@@ -204,11 +205,15 @@ public struct BatchTokenIterator {
     ///   - clearCacheAfterBatchResize: evaluate replacement KV buffers and clear MLX's
     ///     process-wide buffer pool when rows join an active batch or some active rows leave.
     ///     Defaults to `false`.
+    ///   - shouldClearCacheAfterBatchResize: a synchronous callback that overrides the
+    ///     Boolean when supplied. Called once after a step or removal rebuilds a live
+    ///     batch. Return `true` to evaluate its replacement buffers and clear the pool.
     public init(
         model: any LanguageModel, sampler: LogitSampler = ArgMaxSampler(),
         processor: LogitProcessor? = nil, stopTokens: Set<Int> = [], maxTokens: Int = 128,
         prefill: PrefillParameters = .init(),
-        clearCacheAfterBatchResize: Bool = false
+        clearCacheAfterBatchResize: Bool = false,
+        shouldClearCacheAfterBatchResize: (() -> Bool)? = nil
     ) {
         self.model = model
         self.sampler = sampler
@@ -216,7 +221,8 @@ public struct BatchTokenIterator {
         self.stopTokens = stopTokens
         self.maxTokens = maxTokens
         self.prefill = prefill
-        self.clearCacheAfterBatchResize = clearCacheAfterBatchResize
+        self.shouldClearCacheAfterBatchResize =
+            shouldClearCacheAfterBatchResize ?? (clearCacheAfterBatchResize ? { true } : nil)
     }
 
     /// An iterator configured from `parameters`, as ``TokenIterator`` is for one sequence.
@@ -226,6 +232,7 @@ public struct BatchTokenIterator {
     /// a stop token or is removed. Fresh rows' caches come from
     /// ``LanguageModel/newCache(parameters:)``, so a `kvCache` capacity gives every attention
     /// layer a rotating cache of that size. Prompts are prefilled with `parameters.prefill`.
+    /// The resize-clearing callback takes precedence over the Boolean when supplied.
     ///
     /// - Throws: ``ParameterError`` for a setting batched generation does not support:
     ///   `maxKVSize`, a capacity with a pinned prefix, a rewind reserve, a cache strategy other
@@ -233,7 +240,8 @@ public struct BatchTokenIterator {
     ///   invalid cache configuration.
     public init(
         model: any LanguageModel, parameters: GenerateParameters, stopTokens: Set<Int> = [],
-        clearCacheAfterBatchResize: Bool = false
+        clearCacheAfterBatchResize: Bool = false,
+        shouldClearCacheAfterBatchResize: (() -> Bool)? = nil
     ) throws {
         guard parameters.maxKVSize == nil else { throw ParameterError.maxKVSize }
         guard parameters.logProbabilities == nil else { throw ParameterError.logProbabilities }
@@ -251,7 +259,8 @@ public struct BatchTokenIterator {
             model: model, sampler: parameters.sampler(), processor: parameters.processor(),
             stopTokens: stopTokens, maxTokens: parameters.maxTokens ?? .max,
             prefill: parameters.prefill,
-            clearCacheAfterBatchResize: clearCacheAfterBatchResize)
+            clearCacheAfterBatchResize: clearCacheAfterBatchResize,
+            shouldClearCacheAfterBatchResize: shouldClearCacheAfterBatchResize)
         cacheParameters = configuration == nil ? nil : parameters
     }
 
@@ -643,7 +652,7 @@ public struct BatchTokenIterator {
             for (layer, added) in zip(cache, batch.cache) {
                 layer.extend(other: added)
             }
-            batchCacheNeedsTrim = clearCacheAfterBatchResize
+            batchCacheNeedsTrim = shouldClearCacheAfterBatchResize != nil
             rows += batch.rows
             nextTokens = concatenated([nextTokens!, batch.nextTokens!])
         }
@@ -827,7 +836,7 @@ public struct BatchTokenIterator {
         for layer in cache {
             layer.filter(batchIndices: indices)
         }
-        batchCacheNeedsTrim = clearCacheAfterBatchResize
+        batchCacheNeedsTrim = shouldClearCacheAfterBatchResize != nil
         nextTokens = nextTokens?[indices]
     }
 
@@ -836,7 +845,7 @@ public struct BatchTokenIterator {
         batchCacheNeedsTrim = false
         guard !invalidatedByModelState else { return }
         let state = cache.flatMap { $0.innerState() }
-        guard !state.isEmpty else { return }
+        guard !state.isEmpty, shouldClearCacheAfterBatchResize?() == true else { return }
         eval(state)
         Memory.clearCache()
     }
