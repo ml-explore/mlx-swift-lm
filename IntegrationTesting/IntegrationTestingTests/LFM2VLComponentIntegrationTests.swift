@@ -3,6 +3,7 @@
 import CoreImage
 import Foundation
 import HuggingFace
+import IntegrationTestHelpers
 import MLX
 import MLXHuggingFace
 import MLXLMCommon
@@ -11,16 +12,24 @@ import MLXVLM
 import Testing
 import Tokenizers
 
-@Suite(.serialized)
-struct LFM2VLComponentIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct LFM2VLComponentIntegrationTests {}
+}
+
+extension ModelLoadingSuite.LFM2VLComponentIntegrationTests {
     @Test func firstImageMatchesImmediateLoading() async throws {
         let downloader: any Downloader = #hubDownloader()
         let tokenizerLoader: any TokenizerLoader = #huggingFaceTokenizerLoader()
-        let context = try await VLMModelFactory.shared.load(
-            from: downloader, using: tokenizerLoader,
-            configuration: .init(
-                id: "mlx-community/LFM2-VL-1.6B-4bit",
-                revision: "be587c055231b0905e846f2c99803dd6d7f33a7a"))
+        let configuration = ModelConfiguration(
+            id: "mlx-community/LFM2-VL-1.6B-4bit",
+            revision: "be587c055231b0905e846f2c99803dd6d7f33a7a")
+        // A key of its own: the test needs a fresh model whose vision tower is not loaded yet.
+        let context = try await TestModelManager.shared.load(
+            TestModelManager.key("lfm2vl-lazy-components", configuration)
+        ) {
+            try await VLMModelFactory.shared.load(
+                from: downloader, using: tokenizerLoader, configuration: configuration)
+        }
         let model = try #require(context.model as? LFM2VL)
         let holder = try #require(model.onDemandComponents.first)
         let parameters = model.parameters().flattened().map(\.0)

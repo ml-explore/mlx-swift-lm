@@ -40,6 +40,8 @@ extension ModelLoadingSuite.CoherenceIntegrationTests {
 
     @Test func weightProgressLoadsAndGenerates() async throws {
         let recorder = WeightProgressRecorder()
+        // Loads outside the manager to observe progress, so free the resident model first.
+        await TestModelManager.shared.unload()
         let container = try await LLMModelFactory.shared.loadContainer(
             from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
             configuration: LLMRegistry.llama3_2_1B_4bit,

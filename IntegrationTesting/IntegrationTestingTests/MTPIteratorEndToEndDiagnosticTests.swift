@@ -50,10 +50,6 @@ private struct EmissionLog: LogitProcessor {
 private let target31BModelId = "mlx-community/gemma-4-31b-it-8bit"
 private let drafter31BModelId = "mlx-community/gemma-4-31B-it-assistant-bf16"
 
-private func gemma31BEnabled() -> Bool {
-    Memory.memoryLimit > 35 * 1024 * 1024 * 1024
-}
-
 /// Pinned checkpoint revisions matching the weights that were live when the
 /// Rung 4 `drafter_block` fixtures were generated. Kept in sync with
 /// `MTPRung4TokenParityTests` so this diagnostic suite exercises the same
@@ -66,8 +62,10 @@ private let drafter31BRevision = "28e92270316e89288579ec59c17939541d9ca433"
 /// `MTPAcceptanceRateTests` / `MTPQuantizationOnsetTests`. This keeps a cold CI
 /// run from spending its entire time budget downloading the pair; warm the
 /// cache out-of-band (or run locally after a first fetch) to exercise them.
+/// Also requires enough memory for the pair. Gate every 31B test on this.
 private let has31BPair: Bool =
-    hfSnapshotDir(modelId: target31BModelId, revision: target31BRevision) != nil
+    gemma31BEnabled()
+    && hfSnapshotDir(modelId: target31BModelId, revision: target31BRevision) != nil
     && hfSnapshotDir(modelId: drafter31BModelId, revision: drafter31BRevision) != nil
 
 /// Shared downloader for the 31B target+drafter pair. Fetches to the local
@@ -128,8 +126,7 @@ private func loadTargetAndDrafterUncached(
 // MARK: - 31B end-to-end iterator exercise
 
 extension ModelLoadingSuite {
-    @Suite(.serialized, .enabled(if: gemma31BEnabled()))
-    struct MTPIteratorEndToEndDiagnosticTests {}
+    @Suite(.serialized) struct MTPIteratorEndToEndDiagnosticTests {}
 }
 
 extension ModelLoadingSuite.MTPIteratorEndToEndDiagnosticTests {

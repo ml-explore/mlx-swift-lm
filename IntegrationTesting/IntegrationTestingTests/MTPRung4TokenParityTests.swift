@@ -54,10 +54,6 @@ private func sharedBoundDrafter() async throws -> Rung4BoundDrafter {
 private let rung4DrafterModelId = "mlx-community/gemma-4-31B-it-assistant-bf16"
 private let rung4TargetModelId = "mlx-community/gemma-4-31b-it-8bit"
 
-private func gemma31BEnabled() -> Bool {
-    Memory.memoryLimit > 35 * 1024 * 1024 * 1024
-}
-
 /// Pinned checkpoint revisions matching the weights that were live when the
 /// `drafter_block` fixtures were generated. Pinning keeps the bit-exact
 /// parity assertions reproducible as the published checkpoints move.

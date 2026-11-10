@@ -3,6 +3,7 @@
 import Foundation
 import HuggingFace
 import IntegrationTestHelpers
+import MLX
 import MLXHuggingFace
 import MLXLMCommon
 import Testing
@@ -13,6 +14,12 @@ let models = IntegrationTestModels(
     downloader: #hubDownloader(),
     tokenizerLoader: #huggingFaceTokenizerLoader()
 )
+
+/// True when the GPU can hold the Gemma 4 31B 8-bit target (~31 GB) and its drafter.
+/// Every test that loads the 31B target must be gated on this.
+func gemma31BEnabled() -> Bool {
+    Memory.memoryLimit > 35 * 1024 * 1024 * 1024
+}
 
 /// A test Suite that is serialized.  All inner types
 /// will be serialized with respect to each other.
