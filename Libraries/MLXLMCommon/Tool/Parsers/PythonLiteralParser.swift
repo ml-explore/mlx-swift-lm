@@ -108,11 +108,27 @@ struct PythonLiteralParser {
         guard let quote = current, quote == "'" || quote == "\"" else { return nil }
         advance()
 
+        // A triple-quoted string may span lines and ends at the next three quotes.
+        let isTripleQuoted = startsWith(quote, count: 2)
+        if isTripleQuoted {
+            advance()
+            advance()
+        }
+
         var result = ""
         while let character = current {
             advance()
 
-            if character == quote { return result }
+            if character == quote {
+                guard isTripleQuoted else { return result }
+                if startsWith(quote, count: 2) {
+                    advance()
+                    advance()
+                    return result
+                }
+                result.append(character)
+                continue
+            }
             guard character == "\\" else {
                 result.append(character)
                 continue
@@ -222,6 +238,11 @@ struct PythonLiteralParser {
         if let integer = Int(normalizedNumber) { return integer }
         if let number = Double(normalizedNumber), number.isFinite { return number }
         return nil
+    }
+
+    /// Whether the next `count` characters are all `character`.
+    private func startsWith(_ character: Character, count: Int) -> Bool {
+        source[index...].prefix(count).elementsEqual(repeatElement(character, count: count))
     }
 
     private mutating func skipWhitespace() {
