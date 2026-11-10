@@ -106,25 +106,6 @@ extension RicursiveConfiguration: ModelConfigurationValidating {
     }
 }
 
-/// The reference norm: float32 variance and rescale, then `weight` in the input precision.
-/// Unlike Gemma's norm the stored weight is the scale itself, not `scale - 1`.
-private final class RicursiveRMSNorm: Module, UnaryLayer {
-    let weight: MLXArray
-    let eps: Float
-
-    init(dimensions: Int, eps: Float) {
-        self.weight = MLXArray.ones([dimensions])
-        self.eps = eps
-    }
-
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let value = x.asType(.float32)
-        let variance = (value * value).mean(axis: -1, keepDims: true)
-        let normalized = value * (1 / sqrt(variance + eps))
-        return weight * normalized.asType(x.dtype)
-    }
-}
-
 private final class RicursiveAttention: Module {
     let nHeads: Int
     let nKVHeads: Int
@@ -140,8 +121,8 @@ private final class RicursiveAttention: Module {
     @ModuleInfo(key: "v_proj") var valueProj: Linear
     @ModuleInfo(key: "o_proj") var outputProj: Linear
     @ModuleInfo(key: "g_proj") var gateProj: Linear?
-    @ModuleInfo(key: "q_norm") var queryNorm: RicursiveRMSNorm
-    @ModuleInfo(key: "k_norm") var keyNorm: RicursiveRMSNorm
+    @ModuleInfo(key: "q_norm") var queryNorm: RMSNorm
+    @ModuleInfo(key: "k_norm") var keyNorm: RMSNorm
     @ParameterInfo(key: "value_res_lambda") var valueResidualLambda: MLXArray?
 
     init(_ config: RicursiveConfiguration, layer: Int) {
@@ -165,8 +146,8 @@ private final class RicursiveAttention: Module {
         _outputProj.wrappedValue = Linear(nHeads * headDim, dim, bias: false)
         _gateProj.wrappedValue =
             config.useGatedAttention ? Linear(dim, nHeads * headDim, bias: false) : nil
-        _queryNorm.wrappedValue = RicursiveRMSNorm(dimensions: headDim, eps: config.rmsNormEps)
-        _keyNorm.wrappedValue = RicursiveRMSNorm(dimensions: headDim, eps: config.rmsNormEps)
+        _queryNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
+        _keyNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
         _valueResidualLambda.wrappedValue = config.useValueResidual ? MLXArray.zeros([1]) : nil
         super.init()
     }
@@ -273,20 +254,20 @@ private final class RicursiveBlock: Module {
 
     @ModuleInfo(key: "self_attn") var selfAttention: RicursiveAttention
     @ModuleInfo var mlp: RicursiveMLP
-    @ModuleInfo(key: "input_layernorm") var inputNorm: RicursiveRMSNorm
-    @ModuleInfo(key: "post_attention_layernorm") var postAttentionNorm: RicursiveRMSNorm
-    @ModuleInfo(key: "pre_feedforward_layernorm") var preFeedforwardNorm: RicursiveRMSNorm
-    @ModuleInfo(key: "post_feedforward_layernorm") var postFeedforwardNorm: RicursiveRMSNorm
+    @ModuleInfo(key: "input_layernorm") var inputNorm: RMSNorm
+    @ModuleInfo(key: "post_attention_layernorm") var postAttentionNorm: RMSNorm
+    @ModuleInfo(key: "pre_feedforward_layernorm") var preFeedforwardNorm: RMSNorm
+    @ModuleInfo(key: "post_feedforward_layernorm") var postFeedforwardNorm: RMSNorm
 
     init(_ config: RicursiveConfiguration, layer: Int) {
         isSliding = config.isSliding(layer: layer)
         let (dim, eps) = (config.hiddenSize, config.rmsNormEps)
         _selfAttention.wrappedValue = RicursiveAttention(config, layer: layer)
         _mlp.wrappedValue = RicursiveMLP(config)
-        _inputNorm.wrappedValue = RicursiveRMSNorm(dimensions: dim, eps: eps)
-        _postAttentionNorm.wrappedValue = RicursiveRMSNorm(dimensions: dim, eps: eps)
-        _preFeedforwardNorm.wrappedValue = RicursiveRMSNorm(dimensions: dim, eps: eps)
-        _postFeedforwardNorm.wrappedValue = RicursiveRMSNorm(dimensions: dim, eps: eps)
+        _inputNorm.wrappedValue = RMSNorm(dimensions: dim, eps: eps)
+        _postAttentionNorm.wrappedValue = RMSNorm(dimensions: dim, eps: eps)
+        _preFeedforwardNorm.wrappedValue = RMSNorm(dimensions: dim, eps: eps)
+        _postFeedforwardNorm.wrappedValue = RMSNorm(dimensions: dim, eps: eps)
         super.init()
     }
 
@@ -310,7 +291,7 @@ private final class RicursiveBackbone: Module {
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo var layers: [RicursiveBlock]
-    @ModuleInfo var norm: RicursiveRMSNorm
+    @ModuleInfo var norm: RMSNorm
 
     init(_ config: RicursiveConfiguration) {
         self.config = config
@@ -321,7 +302,7 @@ private final class RicursiveBackbone: Module {
         _layers.wrappedValue = (0 ..< config.hiddenLayers).map {
             RicursiveBlock(config, layer: $0)
         }
-        _norm.wrappedValue = RicursiveRMSNorm(
+        _norm.wrappedValue = RMSNorm(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
         super.init()
     }
@@ -365,7 +346,7 @@ public final class RicursiveModel: Module, LLMModel {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        lmHead(model(inputs, cache: cache))
+        projectLogits(hiddenStates(inputs, cache: cache))
     }
 
     public var loraLayers: [Module] { model.layers }
@@ -388,27 +369,14 @@ public final class RicursiveModel: Module, LLMModel {
             return cache
         }
     }
+}
 
-    /// Fills the cache through the backbone only, so the 100K-wide `lm_head` runs for the
-    /// last token alone. The default chunk matches mlx-lm's 2048. Chunks may exceed the
-    /// sliding window: `RotatingKVCache` keeps the extra rows for the chunk and masks by window.
-    public func prepare(
-        _ input: LMInput, cache: [KVCache], state _: LMOutput.State? = nil,
-        prefill: PrefillParameters = .init()
-    ) throws -> PrepareResult {
-        let y = input.text
-        guard y.tokens.size > 0 else {
-            return .tokens(y)
-        }
-        let processed = try prefill.forEachChunk(
-            total: y.tokens.size,
-            defaultStepSize: Self.defaultPrefillChunkSize
-        ) { range in
-            _ = model(y[.newAxis, range].tokens, cache: cache)
-            asyncEval(cache)
-        }
-        return .tokens(y[processed...])
+extension RicursiveModel: HiddenStateLanguageModel {
+    package func hiddenStates(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        model(inputs, cache: cache)
     }
 
-    private static let defaultPrefillChunkSize = 2048
+    package func projectLogits(_ hiddenStates: MLXArray) -> MLXArray {
+        lmHead(hiddenStates)
+    }
 }
