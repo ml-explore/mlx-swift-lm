@@ -389,7 +389,7 @@ package final class KVCacheStorage {
             assert(
                 attentionPositions.allSatisfy { $0 == positions },
                 "Attention cache row positions diverged before storage adoption")
-            return max(0, positions.max() ?? 0)
+            return attentionPositions.map { max(0, $0.max() ?? 0) }.min() ?? 0
         }
 
         // Compatibility for recurrent-only caches created by older call sites
