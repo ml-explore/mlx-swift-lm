@@ -15,6 +15,24 @@ enum MTPInitializationError: Error, LocalizedError {
     }
 }
 
+func batchedGreedyMTPVerification(
+    logits: MLXArray, draftTokens: MLXArray
+) -> (tokens: [Int], accepted: Int, finalToken: MLXArray) {
+    let targetTokens = argMax(logits, axis: -1)
+    // Materialize drafts and target samples together with one GPU readback.
+    let tokens = concatenated([draftTokens.asType(targetTokens.dtype), targetTokens])
+        .asArray(Int.self)
+    let numDraft = draftTokens.size
+    var accepted = 0
+    while accepted < numDraft, tokens[accepted] == tokens[numDraft + accepted] {
+        accepted += 1
+    }
+    return (
+        Array(tokens[numDraft ..< (numDraft + accepted + 1)]), accepted,
+        targetTokens[accepted].reshaped([1])
+    )
+}
+
 /// Generator of tokens using MTP (Multi-Token Prediction) speculative
 /// decoding.
 ///
@@ -649,45 +667,59 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         let mainLogits = mainResult.logits
         mainState = mainResult.state
 
-        eval(flatDraftTokens)
-        let draftTokensList = flatDraftTokens.asArray(Int.self)
-
         var accepted = 0
-        var finalToken: MLXArray?
-        var emittedTokens = [MLXArray]()
-        var emittedLogits = [MLXArray]()
-        for i in 0 ..< numDraft {
-            var logits = mainLogits[0..., verifyStart + i, 0...]
+        let emittedFinalToken: MLXArray
+        // Other processors can depend on didSample updates between rows.
+        if sampler is ArgMaxSampler, processor == nil || processor is SuppressTokensProcessor {
+            var logits = mainLogits[0, verifyStart ..< (verifyStart + numDraft + 1), 0...]
             logits = processor?.process(logits: logits) ?? logits
-            let targetToken = sampler.sample(logits: logits)
-            eval(targetToken)
-            let targetTokenValue = targetToken.item(Int.self)
-            processor?.didSample(token: targetToken)
-            pendingTokens.append(targetTokenValue)
-            emittedTokens.append(targetToken)
-            emittedLogits.append(logits)
-            guard targetTokenValue == draftTokensList[i] else {
-                finalToken = targetToken
-                break
-            }
-            accepted += 1
-        }
+            let result = batchedGreedyMTPVerification(
+                logits: logits, draftTokens: flatDraftTokens)
+            pendingTokens.append(contentsOf: result.tokens)
+            accepted = result.accepted
+            recordLogProbabilities(
+                of: [MLXArray(result.tokens)], sampledFrom: [logits[0 ..< (accepted + 1)]])
+            emittedFinalToken = result.finalToken
+        } else {
+            eval(flatDraftTokens)
+            let draftTokensList = flatDraftTokens.asArray(Int.self)
 
-        // Only the all-accepted path samples the bonus row. On rejection the
-        // mismatching target sample above is already the emitted correction.
-        if finalToken == nil {
-            var logits = mainLogits[0..., verifyStart + accepted, 0...]
-            logits = processor?.process(logits: logits) ?? logits
-            let bonus = sampler.sample(logits: logits)
-            eval(bonus)
-            processor?.didSample(token: bonus)
-            pendingTokens.append(bonus.item(Int.self))
-            emittedTokens.append(bonus)
-            emittedLogits.append(logits)
-            finalToken = bonus
+            var finalToken: MLXArray?
+            var emittedTokens = [MLXArray]()
+            var emittedLogits = [MLXArray]()
+            for i in 0 ..< numDraft {
+                var logits = mainLogits[0..., verifyStart + i, 0...]
+                logits = processor?.process(logits: logits) ?? logits
+                let targetToken = sampler.sample(logits: logits)
+                eval(targetToken)
+                let targetTokenValue = targetToken.item(Int.self)
+                processor?.didSample(token: targetToken)
+                pendingTokens.append(targetTokenValue)
+                emittedTokens.append(targetToken)
+                emittedLogits.append(logits)
+                guard targetTokenValue == draftTokensList[i] else {
+                    finalToken = targetToken
+                    break
+                }
+                accepted += 1
+            }
+
+            // Only the all-accepted path samples the bonus row. On rejection the
+            // mismatching target sample above is already the emitted correction.
+            if finalToken == nil {
+                var logits = mainLogits[0..., verifyStart + accepted, 0...]
+                logits = processor?.process(logits: logits) ?? logits
+                let bonus = sampler.sample(logits: logits)
+                eval(bonus)
+                processor?.didSample(token: bonus)
+                pendingTokens.append(bonus.item(Int.self))
+                emittedTokens.append(bonus)
+                emittedLogits.append(logits)
+                finalToken = bonus
+            }
+            recordLogProbabilities(of: emittedTokens, sampledFrom: emittedLogits)
+            emittedFinalToken = finalToken!
         }
-        recordLogProbabilities(of: emittedTokens, sampledFrom: emittedLogits)
-        let emittedFinalToken = finalToken!
         committedPendingTokenCount = accepted
 
         proposedCount += numDraft
