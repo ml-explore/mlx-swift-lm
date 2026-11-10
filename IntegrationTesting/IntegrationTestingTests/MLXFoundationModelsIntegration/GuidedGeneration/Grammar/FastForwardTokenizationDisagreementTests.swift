@@ -103,8 +103,11 @@ import MLXLMCommon
 @testable import MLXFoundationModels
 @testable import MLXGuidedGeneration
 
-@Suite(.serialized)
-struct FastForwardTokenizationDisagreementTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct FastForwardTokenizationDisagreementTests {}
+}
+
+extension ModelLoadingSuite.FastForwardTokenizationDisagreementTests {
 
     private enum MissingSeedError: Error {
         /// Raised when Gemma's tokenizer has no id for the seed character.

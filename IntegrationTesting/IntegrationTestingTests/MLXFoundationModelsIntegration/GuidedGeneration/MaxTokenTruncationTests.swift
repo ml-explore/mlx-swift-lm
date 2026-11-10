@@ -12,8 +12,11 @@ import FoundationModels
 
 /// Tests that guided generation surfaces typed errors when maxTokens is
 /// exhausted before the grammar reaches an accepting state.
-@Suite(.serialized, .timeLimit(.minutes(5)))
-struct MaxTokenTruncationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(5))) struct MaxTokenTruncationTests {}
+}
+
+extension ModelLoadingSuite.MaxTokenTruncationTests {
 
     // MARK: - Incomplete Output Detection
 

@@ -1,20 +1,15 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
-import HuggingFace
 import IntegrationTestHelpers
-import MLXHuggingFace
 import MLXLMCommon
 import Testing
-import Tokenizers
 
-private let models = IntegrationTestModels(
-    downloader: #hubDownloader(),
-    tokenizerLoader: #huggingFaceTokenizerLoader()
-)
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct SteeringIntegrationTests {}
+}
 
-@Suite(.serialized)
-struct SteeringIntegrationTests {
+extension ModelLoadingSuite.SteeringIntegrationTests {
     @Test(
         .timeLimit(.minutes(2)),
         arguments: [

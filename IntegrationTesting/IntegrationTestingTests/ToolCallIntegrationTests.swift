@@ -1,20 +1,17 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
-import HuggingFace
 import IntegrationTestHelpers
-import MLXHuggingFace
+import MLX
+import MLXLLM
 import MLXLMCommon
 import Testing
-import Tokenizers
 
-private let models = IntegrationTestModels(
-    downloader: #hubDownloader(),
-    tokenizerLoader: #huggingFaceTokenizerLoader()
-)
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct ToolCallIntegrationTests {}
+}
 
-@Suite(.serialized)
-struct ToolCallIntegrationTests {
+extension ModelLoadingSuite.ToolCallIntegrationTests {
 
     // MARK: - LFM2
 

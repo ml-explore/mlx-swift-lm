@@ -62,20 +62,37 @@ private let drafter31BRevision = "28e92270316e89288579ec59c17939541d9ca433"
 /// `MTPAcceptanceRateTests` / `MTPQuantizationOnsetTests`. This keeps a cold CI
 /// run from spending its entire time budget downloading the pair; warm the
 /// cache out-of-band (or run locally after a first fetch) to exercise them.
+/// Also requires enough memory for the pair. Gate every 31B test on this.
 private let has31BPair: Bool =
-    hfSnapshotDir(modelId: target31BModelId, revision: target31BRevision) != nil
+    gemma31BEnabled()
+    && hfSnapshotDir(modelId: target31BModelId, revision: target31BRevision) != nil
     && hfSnapshotDir(modelId: drafter31BModelId, revision: drafter31BRevision) != nil
 
 /// Shared downloader for the 31B target+drafter pair. Fetches to the local
 /// HF cache on first use (~35GB); subsequent tests and runs reuse the cache.
 private let downloader: any Downloader = #hubDownloader()
 
+/// Loads the pair as one `TestModelManager` entry, since the test needs both at once.
 private func loadTargetAndDrafter(
     targetModelId: String,
     drafterModelId: String,
     targetRevision: String? = nil,
-    drafterRevision: String? = nil,
-    drafterConfigType: any Codable.Type = Gemma4AssistantConfiguration.self
+    drafterRevision: String? = nil
+) async throws -> LoadedPair {
+    let key = TestModelManager.key(
+        "pair", .init(id: targetModelId, revision: targetRevision ?? "main"))
+    return try await TestModelManager.shared.load(key) {
+        try await loadTargetAndDrafterUncached(
+            targetModelId: targetModelId, drafterModelId: drafterModelId,
+            targetRevision: targetRevision, drafterRevision: drafterRevision)
+    }
+}
+
+private func loadTargetAndDrafterUncached(
+    targetModelId: String,
+    drafterModelId: String,
+    targetRevision: String?,
+    drafterRevision: String?
 ) async throws -> LoadedPair {
     // Target — VLM factory's downloader-based load path gives us a full
     // ModelContext (model + tokenizer + processor + configuration),
@@ -108,8 +125,11 @@ private func loadTargetAndDrafter(
 
 // MARK: - 31B end-to-end iterator exercise
 
-@Suite(.serialized)
-struct MTPIteratorEndToEndDiagnosticTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct MTPIteratorEndToEndDiagnosticTests {}
+}
+
+extension ModelLoadingSuite.MTPIteratorEndToEndDiagnosticTests {
 
     /// Load the bit-exact-verified 31B target+drafter pair and run the MTP
     /// `generate(...)` overload for 32 tokens at the production blockSize=4

@@ -15,8 +15,11 @@ import MLXLMCommon
 /// behavior is independent of guided generation (which only engages for
 /// schema/tool requests); guided generation lives in the MLXGuidedGeneration
 /// library and is always available alongside the adapter.
-@Suite(.serialized)
-struct PlainChatGenerationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct PlainChatGenerationTests {}
+}
+
+extension ModelLoadingSuite.PlainChatGenerationTests {
 
     @Test("Plain chat request completes (falls through to unconstrained generation)")
     func chatRequestFallsThrough() async throws {

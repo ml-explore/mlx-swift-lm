@@ -20,7 +20,7 @@ xcodebuild test \
   -project IntegrationTesting/IntegrationTesting.xcodeproj \
   -scheme IntegrationTesting \
   -destination 'platform=macOS' \
-  -only-testing:IntegrationTestingTests/ToolCallIntegrationTests/qwen35FormatAutoDetection\(\)
+  -only-testing:IntegrationTestingTests/ModelLoadingSuite/ToolCallIntegrationTests/qwen35FormatAutoDetection\(\)
 ```
 
 These tests do not run in CI.
@@ -33,5 +33,5 @@ xcodebuild test \
   -project IntegrationTesting/IntegrationTesting.xcodeproj \
   -scheme IntegrationTesting \
   -destination 'platform=macOS' \
-  -only-testing:IntegrationTestingTests/RerankerModelIntegrationTests
+  -only-testing:IntegrationTestingTests/ModelLoadingSuite/RerankerModelIntegrationTests
 ```
