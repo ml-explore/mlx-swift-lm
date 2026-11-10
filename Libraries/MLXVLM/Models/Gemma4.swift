@@ -2112,6 +2112,20 @@ public final class Gemma4Unified: Module, VLMModel, KVCacheDimensionProvider,
     }
 }
 
+// MARK: - Checkpoint components
+
+extension Gemma4: ModelComponentsProviding {
+    public var modelComponents: [ModelComponent: [CheckpointComponent]] {
+        Gemma4Checkpoint.components
+    }
+}
+
+extension Gemma4Unified: ModelComponentsProviding {
+    public var modelComponents: [ModelComponent: [CheckpointComponent]] {
+        Gemma4Checkpoint.components
+    }
+}
+
 // MARK: - MTP drafter target access
 
 /// A Gemma 4 - family VLM whose text stack is the shared

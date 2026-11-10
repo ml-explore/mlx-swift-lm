@@ -182,4 +182,18 @@ struct ToolArgumentNormalizationTests {
         #expect(tryParsePythonLiteral(#"'\ud83d'"#) == nil)
         #expect(tryParsePythonLiteral(#"'\x4'"#) == nil)
     }
+
+    @Test("Python triple-quoted strings span lines and end at three quotes")
+    func pythonTripleQuotedStrings() {
+        for (literal, value) in [
+            ("'''line 1\nline 2'''", "line 1\nline 2"),
+            ("\"\"\"It's \"quoted\" text\"\"\"", "It's \"quoted\" text"),
+            ("''''a'''", "'a"),
+            ("''''''", ""),
+        ] {
+            #expect(tryParsePythonLiteral(literal) as? String == value)
+        }
+        #expect(tryParsePythonLiteral("'''a''''") == nil)
+        #expect(tryParsePythonLiteral("'''a''") == nil)
+    }
 }

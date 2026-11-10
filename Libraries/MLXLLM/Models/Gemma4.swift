@@ -106,6 +106,12 @@ public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider {
     }
 }
 
+extension Gemma4Model: ModelComponentsProviding {
+    public var modelComponents: [ModelComponent: [CheckpointComponent]] {
+        Gemma4Checkpoint.components
+    }
+}
+
 // MARK: - LoRA
 
 extension Gemma4Model: LoRAModel {

@@ -113,7 +113,8 @@ struct UpdateUsageEmissionTests {
         ])
         let request = makeExecutorRequest(
             transcript: transcript,
-            enabledTools: [weatherTool]
+            enabledTools: [weatherTool],
+            generationOptions: GenerationOptions(toolCallingMode: .required)
         )
 
         let stream = try await executeResponse(executor, request: request, model: model)

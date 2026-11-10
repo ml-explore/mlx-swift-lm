@@ -115,6 +115,14 @@ func lfm2DSparkRegistrationDisambiguatesTheQwen3ModelType() async throws {
         configuration: Data(tinyLFM2DSparkJSON.utf8), modelType: "qwen3")
 
     #expect(model is LFM2DSparkDraftModel)
+    #expect(
+        await MTPDrafterTypeRegistry.shared.contains(
+            "qwen3", configuration: Data(tinyLFM2DSparkJSON.utf8)))
+    #expect(
+        await !MTPDrafterTypeRegistry.shared.contains(
+            "qwen3",
+            configuration: Data(
+                #"{"model_type":"qwen3","architectures":["Qwen3ForCausalLM"]}"#.utf8)))
 }
 
 @Test

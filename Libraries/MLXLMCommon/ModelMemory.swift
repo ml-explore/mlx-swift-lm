@@ -47,8 +47,8 @@ public struct ModelMemory: Sendable, Equatable {
 
 /// A type that owns a loaded model and can measure its tensor buffers.
 ///
-/// ``ModelContainer`` and `EmbedderModelContainer` conform, so code that only
-/// needs memory can accept either one.
+/// ``ModelContainer``, `EmbedderModelContainer` and `EmbeddingGemma2Embedding`
+/// conform, so code that only needs memory can accept any of them.
 public protocol ModelMemoryReporting: Sendable {
     /// Measure the current model tensor buffers, including loaded on-demand components.
     func memory() async throws -> ModelMemory
