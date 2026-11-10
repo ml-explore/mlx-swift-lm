@@ -104,7 +104,7 @@ func makeReasoningTestModel(
 func testLoad() -> MLXLanguageModel.ProgressContainerLoader {
     { configuration, progress in
         try await TestModelManager.shared.load(
-            TestModelManager.key("fm", configuration),
+            "fm", configuration,
             onUnload: { await makeTestModel(configuration.name).evict() }
         ) {
             try await loadModelContainer(

@@ -28,7 +28,7 @@ extension ModelLoadingSuite.MTPDrafterModelFactoryIntegrationTests {
         let configuration = ModelConfiguration(
             id: "mlx-community/gemma-4-31B-it-assistant-bf16", revision: drafter31BRevision)
         let container = try await TestModelManager.shared.load(
-            TestModelManager.key("pair", configuration)
+            "pair", configuration
         ) {
             try await factory.loadContainer(
                 from: #hubDownloader(),

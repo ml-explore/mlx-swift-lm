@@ -271,7 +271,7 @@ public struct IntegrationTestModels: Sendable {
         let tokenizerLoader = self.tokenizerLoader
         let name = configuration.name
         return try await TestModelManager.shared.load(
-            TestModelManager.key("llm", configuration)
+            "llm", configuration
         ) {
             try await withNetworkRetry(name) {
                 try await LLMModelFactory.shared.loadContainer(
@@ -291,7 +291,7 @@ public struct IntegrationTestModels: Sendable {
         let tokenizerLoader = self.tokenizerLoader
         let name = configuration.name
         return try await TestModelManager.shared.load(
-            TestModelManager.key("vlm", configuration)
+            "vlm", configuration
         ) {
             try await VLMModelFactory.shared.loadContainer(
                 from: downloader, using: tokenizerLoader,
@@ -307,7 +307,7 @@ public struct IntegrationTestModels: Sendable {
         let tokenizerLoader = self.tokenizerLoader
         let configuration = EmbedderRegistry.nomic_text_v1_5
         return try await TestModelManager.shared.load(
-            TestModelManager.key("embedder", configuration)
+            "embedder", configuration
         ) {
             try await EmbedderModelFactory.shared.loadContainer(
                 from: downloader, using: tokenizerLoader,
@@ -620,7 +620,7 @@ public enum EmbedderTests {
         print("Loading Gemma 3 embedding model: \(modelId)")
         let configuration = ModelConfiguration(id: modelId)
         let modelContainer = try await TestModelManager.shared.load(
-            TestModelManager.key("embedder", configuration)
+            "embedder", configuration
         ) {
             try await EmbedderModelFactory.shared.loadContainer(
                 from: downloader, using: tokenizerLoader,
@@ -771,7 +771,7 @@ public enum RerankerIntegrationTests {
         downloader: any Downloader,
         tokenizerLoader: any TokenizerLoader
     ) async throws -> RerankerContainer {
-        try await TestModelManager.shared.load(TestModelManager.key("reranker", configuration)) {
+        try await TestModelManager.shared.load("reranker", configuration) {
             try await RerankerModelFactory.shared.loadContainer(
                 from: downloader, using: tokenizerLoader,
                 configuration: configuration,

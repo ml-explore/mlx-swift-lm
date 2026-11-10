@@ -23,9 +23,11 @@ extension ModelLoadingSuite.LFM2VLComponentIntegrationTests {
         let configuration = ModelConfiguration(
             id: "mlx-community/LFM2-VL-1.6B-4bit",
             revision: "be587c055231b0905e846f2c99803dd6d7f33a7a")
-        // A key of its own: the test needs a fresh model whose vision tower is not loaded yet.
+        // The test needs a fresh model whose vision tower is not loaded yet, and it
+        // leaves the tower loaded: unload first, and use a key no other test shares.
+        await TestModelManager.shared.unload()
         let context = try await TestModelManager.shared.load(
-            TestModelManager.key("lfm2vl-lazy-components", configuration)
+            "lfm2vl-lazy-components", configuration
         ) {
             try await VLMModelFactory.shared.load(
                 from: downloader, using: tokenizerLoader, configuration: configuration)

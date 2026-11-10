@@ -39,9 +39,9 @@ extension ModelLoadingSuite.StaleWeightIndexIntegrationTests {
     @Test func qwen3VLWithStaleIndexLoadsAndGenerates() async throws {
         let configuration = ModelConfiguration(
             id: staleIndexModelID, revision: staleIndexRevision)
-        let context = try await TestModelManager.shared.load(
-            TestModelManager.key("vlm-context", configuration)
-        ) {
+        // The load path is what's under test, so never reuse a cached model.
+        await TestModelManager.shared.unload()
+        let context = try await TestModelManager.shared.load("vlm-context", configuration) {
             try await VLMModelFactory.shared.load(
                 from: downloader, using: tokenizerLoader, configuration: configuration)
         }

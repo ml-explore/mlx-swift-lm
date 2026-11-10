@@ -1,11 +1,14 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
+import HuggingFace
 import IntegrationTestHelpers
 import MLX
+import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
 import Testing
+import Tokenizers
 
 private final class WeightProgressRecorder: @unchecked Sendable {
     private let lock = NSLock()
