@@ -9,12 +9,30 @@
 import Foundation
 import MLX
 import MLXLLM
-import MLXLMCommon
 import XCTest
+
+@testable import MLXLMCommon
 
 final class Gemma2Tests: XCTestCase {
 
     // MARK: - Tiny model
+
+    private final class RowLengthCache: KVCacheSimple {
+        let lengths: [Int32]
+
+        init(lengths: [Int32]) {
+            self.lengths = lengths
+            super.init()
+        }
+
+        override func makeMask(
+            n: Int, windowSize: Int?, returnArray: Bool
+        ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+            .array(
+                createCausalMask(
+                    n: n, offset: offset, windowSize: windowSize, lengths: MLXArray(lengths)))
+        }
+    }
 
     private func makeTinyModel() throws -> Gemma2Model {
         let json = """
@@ -71,6 +89,34 @@ final class Gemma2Tests: XCTestCase {
         }
 
         XCTAssertLessThanOrEqual(maxAbsDiff(full, last), MatmulPrecision.splitTolerance)
+    }
+
+    func testPerRowMaskMatchesIndependentSequences() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = try makeTinyModel()
+            let prompts: [[Int32]] = [[3, 7, 1], [12, 5, 9, 2, 8]]
+            let longest = prompts.map(\.count).max()!
+
+            var expected: [MLXArray] = []
+            for prompt in prompts {
+                let logits = model(
+                    MLXArray(prompt).reshaped([1, prompt.count]),
+                    cache: try model.newCache(parameters: nil))
+                expected.append(logits[0, prompt.count - 1])
+            }
+
+            let lengths = prompts.map { Int32($0.count) }
+            let cache = try model.newCache(parameters: nil).map { _ in
+                RowLengthCache(lengths: lengths) as KVCache
+            }
+            let padded = prompts.flatMap { $0 + Array(repeating: 0, count: longest - $0.count) }
+            let logits = model(MLXArray(padded).reshaped([prompts.count, longest]), cache: cache)
+            for (row, prompt) in prompts.enumerated() {
+                XCTAssertLessThan(
+                    maxAbsDiff(logits[row, prompt.count - 1], expected[row]), 1e-4,
+                    "row \(row)")
+            }
+        }
     }
 
     // MARK: - Warm continuation
