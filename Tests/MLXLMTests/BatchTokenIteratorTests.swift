@@ -1,5 +1,6 @@
 // Copyright © 2026 Apple Inc.
 
+import Cmlx
 import Foundation
 import MLX
 import MLXLLM
@@ -976,6 +977,56 @@ struct BatchTokenIteratorTests {
     }
 
     @Test(
+        "Batch resize evaluates replacement buffers only when trimming", arguments: [false, true])
+    func batchResizeEvaluation(trim: Bool) throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = BatchUniformLogitModel(dtype: .float32)
+            var iterator = BatchTokenIterator(model: model, clearCacheAfterBatchResize: trim)
+            let ids = iterator.insert(prompts: [[1, 2], [3, 4, 5]])
+            _ = try #require(try iterator.next())
+            let layer = try #require(model.lastBatchCache)
+
+            iterator.remove([ids[0]])
+            #expect(iterator.ids == [ids[1]])
+            let replacement = layer.innerState()
+            try #require(replacement.count == 2)
+            for array in replacement {
+                var available = false
+                #expect(_mlx_array_is_available(&available, array.ctx) == 0)
+                #expect(available == trim)
+            }
+        }
+    }
+
+    @Test("Two decode steps between prefill chunks, with immediate prefill when idle")
+    func resumablePrefillDecodeCadence() throws {
+        try Device.withDefaultDevice(.cpu) {
+            var iterator = BatchTokenIterator(
+                model: tinyLlama(), prefill: .init(stepSize: 2, decodeStepsPerChunk: 2))
+            let active = iterator.insert(prompt: [1])
+            #expect(try iterator.next()?.map(describe) == ["prefill(\(active), 1/1)"])
+            #expect(tokenIDs(try iterator.next()) == [active])
+
+            let queued = iterator.insert(prompt: Array(2 ..< 10))
+            let first = try #require(try iterator.next())
+            #expect(tokenIDs(first) == [active])
+            #expect(first.map(describe).last == "prefill(\(queued), 2/8)")
+
+            let decodeOnly = try #require(try iterator.next())
+            #expect(tokenIDs(decodeOnly) == [active])
+            #expect(decodeOnly.count == 1)
+
+            let second = try #require(try iterator.next())
+            #expect(tokenIDs(second) == [active])
+            #expect(second.map(describe).last == "prefill(\(queued), 4/8)")
+
+            iterator.remove([active])
+            #expect(try iterator.next()?.map(describe) == ["prefill(\(queued), 6/8)"])
+            #expect(try iterator.next()?.map(describe) == ["prefill(\(queued), 7/8)"])
+        }
+    }
+
+    @Test(
         "Each model family that opts in prefills resumably and matches single runs",
         arguments: ResumablePrefillFamily.allCases)
     func resumablePrefillFamilies(family: ResumablePrefillFamily) async throws {
@@ -1498,6 +1549,7 @@ private final class BatchLegacyOffsetModel: Module, LanguageModel {
 /// A rounding-sensitive nucleus without model or attention noise.
 private final class BatchUniformLogitModel: Module, LanguageModel {
     private let dtype: DType
+    private(set) weak var lastBatchCache: BatchKVCache?
 
     init(dtype: DType) {
         self.dtype = dtype
@@ -1516,6 +1568,7 @@ private final class BatchUniformLogitModel: Module, LanguageModel {
         let tokens = input.tokens
         let keys = tokens.asType(.float32).reshaped([tokens.dim(0), 1, tokens.dim(1), 1])
         _ = cache?.first?.update(keys: keys, values: keys)
+        lastBatchCache = cache?.first as? BatchKVCache
         return LMOutput(logits: zeros([tokens.dim(0), tokens.dim(1), 3], dtype: dtype))
     }
 

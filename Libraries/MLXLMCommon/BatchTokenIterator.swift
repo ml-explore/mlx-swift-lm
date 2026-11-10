@@ -51,13 +51,13 @@ public enum BatchEvent: Sendable {
 ///
 /// For a ``ResumablePrefillModel``, each ``next()`` instead decodes first and then feeds at
 /// most one prefill chunk of the first queued prompt (first in, first out), reporting it as
-/// `.prefill`. A long prompt therefore delays the decoding rows by one chunk per step rather
-/// than by its whole prefill. A step that only prefills returns `[.prefill(…)]`, so it is
+/// `.prefill`. ``PrefillParameters/decodeStepsPerChunk`` controls how often a step
+/// also prefills while rows decode. A step that only prefills returns `[.prefill(…)]`, so it is
 /// never mistaken for idle. `PrefillParameters.progress` still reports each chunk.
 ///
-/// The iterator clears MLX's buffer cache after each prefill chunk, as single-row prefill
-/// does, but never while decoding: the cache is process-wide, so memory policy belongs to the
-/// process owner, which can set `Memory.cacheLimit` or clear it on its own schedule.
+/// The iterator clears MLX's buffer cache after each prefill chunk, as single-row prefill does.
+/// Callers can opt in to clearing it after a join or removal rebuilds an active batch.
+/// The buffer cache is shared by all models in the process.
 ///
 /// ``next()`` returns the step's ``BatchEvent``s, or `nil` when the iterator is idle: no row
 /// is decoding or queued. Unlike `IteratorProtocol`, `nil` does not mean exhausted; inserting
@@ -125,6 +125,7 @@ public struct BatchTokenIterator {
     private let stopTokens: Set<Int>
     private let maxTokens: Int
     private let prefill: PrefillParameters
+    private let clearCacheAfterBatchResize: Bool
 
     private struct Row {
         let id: Int
@@ -165,12 +166,14 @@ public struct BatchTokenIterator {
 
     private var pending: [Pending] = []
     private var nextID = 0
+    private var decodeOnlyStepsRemaining = 0
 
     /// The rows being decoded.
     private var rows: [Row] = []
     /// Their caches, one batched cache per layer. Admission merges each layer into one and
     /// throws `KVCacheError` for a layer without a batched form.
     private var cache: [any BatchableKVCache] = []
+    private var batchCacheNeedsTrim = false
     /// The tokens the next step feeds: each row's sampled token.
     private var nextTokens: MLXArray?
     private var state: LMOutput.State?
@@ -198,10 +201,14 @@ public struct BatchTokenIterator {
     ///   - stopTokens: tokens that end a row
     ///   - maxTokens: the token limit for rows inserted without one
     ///   - prefill: how prompts are prefilled
+    ///   - clearCacheAfterBatchResize: evaluate replacement KV buffers and clear MLX's
+    ///     process-wide buffer pool when rows join an active batch or some active rows leave.
+    ///     Defaults to `false`.
     public init(
         model: any LanguageModel, sampler: LogitSampler = ArgMaxSampler(),
         processor: LogitProcessor? = nil, stopTokens: Set<Int> = [], maxTokens: Int = 128,
-        prefill: PrefillParameters = .init()
+        prefill: PrefillParameters = .init(),
+        clearCacheAfterBatchResize: Bool = false
     ) {
         self.model = model
         self.sampler = sampler
@@ -209,6 +216,7 @@ public struct BatchTokenIterator {
         self.stopTokens = stopTokens
         self.maxTokens = maxTokens
         self.prefill = prefill
+        self.clearCacheAfterBatchResize = clearCacheAfterBatchResize
     }
 
     /// An iterator configured from `parameters`, as ``TokenIterator`` is for one sequence.
@@ -224,7 +232,8 @@ public struct BatchTokenIterator {
     ///   than full precision, or `logProbabilities`; `KVCacheConfigurationError` for an
     ///   invalid cache configuration.
     public init(
-        model: any LanguageModel, parameters: GenerateParameters, stopTokens: Set<Int> = []
+        model: any LanguageModel, parameters: GenerateParameters, stopTokens: Set<Int> = [],
+        clearCacheAfterBatchResize: Bool = false
     ) throws {
         guard parameters.maxKVSize == nil else { throw ParameterError.maxKVSize }
         guard parameters.logProbabilities == nil else { throw ParameterError.logProbabilities }
@@ -241,7 +250,8 @@ public struct BatchTokenIterator {
         self.init(
             model: model, sampler: parameters.sampler(), processor: parameters.processor(),
             stopTokens: stopTokens, maxTokens: parameters.maxTokens ?? .max,
-            prefill: parameters.prefill)
+            prefill: parameters.prefill,
+            clearCacheAfterBatchResize: clearCacheAfterBatchResize)
         cacheParameters = configuration == nil ? nil : parameters
     }
 
@@ -319,7 +329,7 @@ public struct BatchTokenIterator {
         }
         let keep = rows.indices.filter { !removed.contains(rows[$0].id) }
         if keep.count < rows.count {
-            filter(keeping: keep)
+            autoreleasepool { filter(keeping: keep) }
         }
         func finalizeRemoved(_ list: inout [Ended]) {
             for var entry in list where removed.contains(entry.id) {
@@ -329,6 +339,7 @@ public struct BatchTokenIterator {
         }
         finalizeRemoved(&ended)
         finalizeRemoved(&undeliveredEnded)
+        trimReplacedBatchCache()
     }
 
     /// Records that the caller delivered `token` from row `id`: forwards it to the row's
@@ -380,6 +391,8 @@ public struct BatchTokenIterator {
     ///   admission stops before any sampling or decoding, and the queued rows that have not
     ///   failed stay queued. `.failed` events from a throwing call are returned by the next one.
     public mutating func next() throws -> [BatchEvent]? {
+        // Let the step's temporary buffers go before trimming the allocator pool.
+        defer { trimReplacedBatchCache() }
         finalizeEnded()
         // Drain admission and decode temporaries, including rejected admissions.
         return try autoreleasepool {
@@ -414,8 +427,8 @@ public struct BatchTokenIterator {
         }
     }
 
-    /// One step for a ``ResumablePrefillModel``: the decode step first, then at most one chunk
-    /// of the first queued row's prefill. The final chunk is the forward whose logits give the
+    /// One step for a ``ResumablePrefillModel``: decode first, then prefill at most one chunk
+    /// of the first queued row when due. The final chunk is the forward whose logits give the
     /// row's first sample; the row then joins the rows, and its first token comes with the
     /// next step.
     private mutating func resumableStep(_ model: any ResumablePrefillModel) throws
@@ -432,12 +445,20 @@ public struct BatchTokenIterator {
                 throw error
             }
         }
-        if !pending.isEmpty {
-            if Task.isCancelled {
-                // Submit no prefill work for a cancelled task; the queued rows stay queued.
-                guard !events.isEmpty else { throw CancellationError() }
+        if pending.isEmpty {
+            decodeOnlyStepsRemaining = 0
+        } else if Task.isCancelled {
+            // Submit no prefill work for a cancelled task; the queued rows stay queued.
+            guard !events.isEmpty else { throw CancellationError() }
+        } else if !rows.isEmpty && decodeOnlyStepsRemaining > 0 {
+            decodeOnlyStepsRemaining -= 1
+        } else {
+            let progress = prefillStep(model)
+            events += progress
+            if case .prefill = progress.first, !rows.isEmpty {
+                decodeOnlyStepsRemaining = max(1, prefill.decodeStepsPerChunk) - 1
             } else {
-                events += prefillStep(model)
+                decodeOnlyStepsRemaining = 0
             }
         }
         ended = ending
@@ -622,6 +643,7 @@ public struct BatchTokenIterator {
             for (layer, added) in zip(cache, batch.cache) {
                 layer.extend(other: added)
             }
+            batchCacheNeedsTrim = clearCacheAfterBatchResize
             rows += batch.rows
             nextTokens = concatenated([nextTokens!, batch.nextTokens!])
         }
@@ -805,7 +827,18 @@ public struct BatchTokenIterator {
         for layer in cache {
             layer.filter(batchIndices: indices)
         }
+        batchCacheNeedsTrim = clearCacheAfterBatchResize
         nextTokens = nextTokens?[indices]
+    }
+
+    private mutating func trimReplacedBatchCache() {
+        guard batchCacheNeedsTrim else { return }
+        batchCacheNeedsTrim = false
+        guard !invalidatedByModelState else { return }
+        let state = cache.flatMap { $0.innerState() }
+        guard !state.isEmpty else { return }
+        eval(state)
+        Memory.clearCache()
     }
 }
 
@@ -839,17 +872,21 @@ extension LogitSampler {
 ///   - sampler: the sampler for every prompt
 ///   - processor: the processor every prompt gets a copy of
 ///   - prefill: how prompts are prefilled
+///   - clearCacheAfterBatchResize: evaluate replacement KV buffers and clear MLX's
+///     process-wide buffer pool when rows join an active batch or some active rows leave
 /// - Returns: the generated tokens per prompt, in order
 /// - Throws: the error of the first prompt that cannot join the batch, or an error from a
 ///   batched forward
 public func batchGenerate(
     model: any LanguageModel, prompts: [[Int]], caches: [[KVCache]?]? = nil,
     maxTokens: Int = 128, stopTokens: Set<Int> = [], sampler: LogitSampler = ArgMaxSampler(),
-    processor: LogitProcessor? = nil, prefill: PrefillParameters = .init()
+    processor: LogitProcessor? = nil, prefill: PrefillParameters = .init(),
+    clearCacheAfterBatchResize: Bool = false
 ) throws -> [[Int]] {
     var iterator = BatchTokenIterator(
         model: model, sampler: sampler, processor: processor, stopTokens: stopTokens,
-        maxTokens: maxTokens, prefill: prefill)
+        maxTokens: maxTokens, prefill: prefill,
+        clearCacheAfterBatchResize: clearCacheAfterBatchResize)
     let ids = iterator.insert(prompts: prompts, caches: caches)
     // On every exit, including a throw from next(): every row, including the ones that ended
     // in the last step, so each processor is finalized once.

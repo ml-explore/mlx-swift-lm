@@ -19,7 +19,7 @@ public struct PrefillParameters: Sendable {
     /// its own default (512 for the generic path; the Gemma 3 text path uses a
     /// smaller, tuned chunk).
     ///
-    /// When ``BatchTokenIterator`` prefills a queued prompt one chunk per step while other
+    /// When ``BatchTokenIterator`` prefills a queued prompt in chunks while other
     /// rows decode, this sets the balance between them. Smaller chunks give the decoding
     /// rows shorter gaps between tokens but admit the new prompt more slowly, mainly because
     /// small chunks use the GPU less efficiently. The balance depends on the GPU and the
@@ -29,6 +29,13 @@ public struct PrefillParameters: Sendable {
 
     /// How the prompt is divided into forwards. See ``Chunking``.
     public var chunking: Chunking
+
+    /// Decode steps between prefill chunks while a batch has both active and queued rows.
+    ///
+    /// ``BatchTokenIterator`` uses this for models that support resumable prefill.
+    /// The default is 1, and values below 1 are treated as 1. Higher values give active
+    /// rows more chances to emit tokens between chunks but can delay new rows.
+    public var decodeStepsPerChunk: Int
 
     /// Called after each prefill chunk with `(processedPositions, totalPositions)`.
     ///
@@ -80,11 +87,13 @@ public struct PrefillParameters: Sendable {
     public init(
         stepSize: Int? = nil,
         chunking: Chunking = .balanced,
+        decodeStepsPerChunk: Int = 1,
         progress: (@Sendable (_ processed: Int, _ total: Int) -> Void)? = nil,
         prefix: (@Sendable (_ positions: Int) -> Void)? = nil
     ) {
         self.stepSize = stepSize
         self.chunking = chunking
+        self.decodeStepsPerChunk = decodeStepsPerChunk
         self.progress = progress
         self.prefix = prefix
     }
