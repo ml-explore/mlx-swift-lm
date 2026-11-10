@@ -900,6 +900,22 @@ struct ToolTests {
         #expect(toolCall.function.arguments["options"] == .object(["separator": .string(",")]))
     }
 
+    @Test("Pythonic string values can be triple-quoted")
+    func testPythonicParserTripleQuotedStrings() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content = ##"""
+            <|tool_call_start|>[write_file(path='notes.txt', content="""Line 1, "quoted"
+            Line 2""")]<|tool_call_end|>
+            """##
+
+        let toolCall = try #require(parser.parse(content: content, tools: nil))
+
+        #expect(toolCall.function.arguments["path"] == .string("notes.txt"))
+        #expect(
+            toolCall.function.arguments["content"] == .string("Line 1, \"quoted\"\nLine 2"))
+    }
+
     @Test("Pythonic scalars are inferred without a schema")
     func testPythonicParserUnschematizedScalars() throws {
         let parser = PythonicToolCallParser(

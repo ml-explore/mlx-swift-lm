@@ -59,4 +59,12 @@ public actor ModelTypeRegistry<T> {
         creators[modelType] != nil
     }
 
+    /// Whether ``createModel(configuration:modelType:)`` would find a creator for
+    /// `modelType` that accepts `configuration`. Unlike ``contains(_:)``, this
+    /// honours the `matches` predicate of a shared `model_type`, so it answers
+    /// for one checkpoint rather than for every architecture with that name.
+    public func contains(_ modelType: String, configuration: Data) -> Bool {
+        creators[modelType]?.contains { $0.matches(configuration) } ?? false
+    }
+
 }
