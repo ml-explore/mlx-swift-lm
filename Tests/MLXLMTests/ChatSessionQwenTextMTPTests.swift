@@ -90,9 +90,9 @@ struct ChatSessionQwenTextMTPTests {
     }
 
     @Test(
-        "MTP observations reject active speculation and allow staging fallback",
+        "MTP observations report every token with active speculation and staging fallback",
         arguments: [false, true])
-    func observationRejectsActiveMTPButAllowsStagingFallback(fallback: Bool) async throws {
+    func observationReportsActiveMTPAndStagingFallback(fallback: Bool) async throws {
         let probe = MTPStagingProbe()
         let session = ChatSession(
             makeModelContext(probe: probe),
@@ -102,20 +102,17 @@ struct ChatSessionQwenTextMTPTests {
         #expect((warm.info.proposedDraftTokens ?? 0) > 0)
         probe.cache.refusesSpeculativeStaging = fallback
 
-        do {
-            var probabilityCount = 0
-            var completion: GenerateCompletionInfo?
-            for try await event in session.observe(to: "a", using: .logProbabilities(topCount: 1)) {
-                if event.logProbabilities != nil { probabilityCount += 1 }
-                if let info = event.generation?.info { completion = info }
-            }
-            #expect(fallback)
-            let info = try #require(completion)
-            #expect(probabilityCount == info.generationTokenCount)
-            #expect(info.speculativeDecodingFallbackReason == .unsupportedCache)
-        } catch ChatSession.ObservationError.unsupportedSpeculativeDecoding {
-            #expect(!fallback)
+        var probabilities = [GenerateTokenLogProbabilities]()
+        var completion: GenerateCompletionInfo?
+        for try await event in session.observe(to: "a", using: .logProbabilities(topCount: 1)) {
+            if let values = event.logProbabilities { probabilities.append(values) }
+            if let info = event.generation?.info { completion = info }
         }
+        let info = try #require(completion)
+        #expect(probabilities.count == info.generationTokenCount)
+        #expect(probabilities.allSatisfy { $0.topLogProbabilities.first == $0.chosen })
+        #expect(info.speculativeDecodingFallbackReason == (fallback ? .unsupportedCache : nil))
+        #expect(((info.proposedDraftTokens ?? 0) > 0) == !fallback)
 
         probe.cache.refusesSpeculativeStaging = false
         let resumed = try await collect(session.streamDetails(to: "resume"))
