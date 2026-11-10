@@ -390,7 +390,8 @@ public final class RicursiveModel: Module, LLMModel {
     }
 
     /// Fills the cache through the backbone only, so the 100K-wide `lm_head` runs for the
-    /// last token alone. Chunks stay within the window so every query keeps its full window.
+    /// last token alone. The default chunk matches mlx-lm's 2048. Chunks may exceed the
+    /// sliding window: `RotatingKVCache` keeps the extra rows for the chunk and masks by window.
     public func prepare(
         _ input: LMInput, cache: [KVCache], state _: LMOutput.State? = nil,
         prefill: PrefillParameters = .init()
@@ -401,8 +402,7 @@ public final class RicursiveModel: Module, LLMModel {
         }
         let processed = try prefill.forEachChunk(
             total: y.tokens.size,
-            defaultStepSize: Self.defaultPrefillChunkSize,
-            maximumStepSize: configuration.slidingWindow
+            defaultStepSize: Self.defaultPrefillChunkSize
         ) { range in
             _ = model(y[.newAxis, range].tokens, cache: cache)
             asyncEval(cache)
@@ -410,5 +410,5 @@ public final class RicursiveModel: Module, LLMModel {
         return .tokens(y[processed...])
     }
 
-    private static let defaultPrefillChunkSize = 256
+    private static let defaultPrefillChunkSize = 2048
 }
