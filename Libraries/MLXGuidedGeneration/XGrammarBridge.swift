@@ -239,6 +239,10 @@ public final class GrammarConstraint: @unchecked Sendable {
     ///   - tokenizer: The tokenizer the grammar binds to. Must outlive
     ///     this constraint; a Swift reference is retained here.
     ///   - jsonSchema: A standard JSON Schema source string.
+    ///   - anyWhitespace: When `true` (the default, as in xgrammar), the
+    ///     grammar admits any whitespace between JSON tokens. When `false`,
+    ///     separators are fixed (`", "` and `": "`) and no other whitespace
+    ///     is allowed, so the output is single-line JSON.
     ///   - fastForward: When `true`, `commitToken` emits the tokens
     ///     produced by xgrammar's `FindJumpForwardString` on every
     ///     successful commit (requires `hostTokenizer`). Defaults to
@@ -251,6 +255,7 @@ public final class GrammarConstraint: @unchecked Sendable {
     public init(
         tokenizer: GrammarTokenizer,
         jsonSchema: String,
+        anyWhitespace: Bool = true,
         fastForward: Bool = false,
         hostTokenizer: (any Tokenizer)? = nil
     ) throws {
@@ -272,12 +277,13 @@ public final class GrammarConstraint: @unchecked Sendable {
 
         var compiledPtr: OpaquePointer?
         let compileStatus = jsonSchema.withCString { schemaPtr in
-            xg_compile_json_schema(compilerHandle, schemaPtr, &compiledPtr)
+            xg_compile_json_schema_with_whitespace(
+                compilerHandle, schemaPtr, anyWhitespace ? 1 : 0, &compiledPtr)
         }
         guard compileStatus == XG_OK, let compiledHandle = compiledPtr else {
             xg_grammar_compiler_free(compilerHandle)
             let message = Self.captureShimError(
-                status: compileStatus, fallback: "xg_compile_json_schema"
+                status: compileStatus, fallback: "xg_compile_json_schema_with_whitespace"
             )
             // Discriminate user-schema errors from generic compile
             // failures. xgrammar's typed exceptions map 1:1 to
