@@ -129,7 +129,14 @@ final class RicursiveTests: XCTestCase {
             let expected = try oracle()
             let cache = try model.newCache(parameters: nil)
             let input = LMInput(tokens: MLXArray(expected.prompt.map(Int32.init)))
-            guard case .tokens(let rest) = try model.prepare(input, cache: cache) else {
+            // Chunks wider than the sliding window, and a prompt longer than one chunk, so
+            // the default `LLMModel.prepare` chunks it and leaves the last token.
+            let step = model.configuration.slidingWindow + 3
+            XCTAssertGreaterThan(expected.prompt.count, step)
+            guard
+                case .tokens(let rest) = try model.prepare(
+                    input, cache: cache, state: nil, prefill: PrefillParameters(stepSize: step))
+            else {
                 return XCTFail("prepare should hand tokens to the iterator")
             }
             XCTAssertEqual(rest.tokens.size, 1)
@@ -324,7 +331,9 @@ final class RicursivePytorchParityTests: XCTestCase {
 
             let cache = try model.newCache(parameters: nil)
             let begin = Date()
-            guard case .tokens(let rest) = try model.prepare(LMInput(tokens: prompt), cache: cache)
+            guard
+                case .tokens(let rest) = try model.prepare(
+                    LMInput(tokens: prompt), cache: cache, state: nil, prefill: .init())
             else {
                 return XCTFail("prepare should hand tokens to the iterator")
             }
