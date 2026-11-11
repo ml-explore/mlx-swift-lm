@@ -78,6 +78,13 @@ public protocol ModelComponentsProviding: BaseLanguageModel {
 
 extension ModelComponentsProviding {
     public var onDemandComponents: [AnyOnDemandComponent] { [] }
+
+    /// Preload media off the Swift concurrency pool before a custom forward pass.
+    package nonisolated(nonsending) func loadMediaComponents(_ needed: Set<ModelComponent>)
+        async throws
+    {
+        try await loadOnDemandComponents(pendingOnDemandComponents(of: self, among: needed))
+    }
 }
 
 extension [CheckpointComponent] {

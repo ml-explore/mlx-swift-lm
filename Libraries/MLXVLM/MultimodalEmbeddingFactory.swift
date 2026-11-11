@@ -12,9 +12,14 @@ public typealias MultimodalEmbeddingLoader =
 public enum MultimodalEmbeddingTypeRegistry {
 
     public static let shared = ModelTypeRegistry<MultimodalEmbeddingLoader>(creators: [
+        "qwen3_vl": { _ in qwen3VL },
         "embedding_gemma2": { _ in embeddingGemma2 },
         "embedding_gemma2_text": { _ in embeddingGemma2 },
     ])
+
+    private static let qwen3VL: MultimodalEmbeddingLoader = {
+        try await Qwen3VLEmbedding(configuration: $0, tokenizerLoader: $1)
+    }
 
     private static let embeddingGemma2: MultimodalEmbeddingLoader = {
         try await EmbeddingGemma2Embedding(configuration: $0, tokenizerLoader: $1)
