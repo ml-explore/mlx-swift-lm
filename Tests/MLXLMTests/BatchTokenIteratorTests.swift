@@ -758,7 +758,7 @@ struct BatchTokenIteratorTests {
     @Test("Greedy batched generation matches each prompt generated alone")
     func greedy() throws {
         try Device.withDefaultDevice(.cpu) {
-            let model = tinyLlama()
+            let model: any BatchDecodableModel = tinyLlama()
             let expected = try Self.prompts.map { prompt in
                 try generateAlone(model, prompt: prompt, sampler: ArgMaxSampler(), maxTokens: 8)
             }
@@ -1081,6 +1081,7 @@ struct BatchTokenIteratorTests {
             try await LLMTypeRegistry.shared.createModel(
                 configuration: Data(family.configuration.utf8), modelType: family.rawValue)
         }
+        #expect(model is any BatchDecodableModel, "\(family) opts in to batched decoding")
         let resumable = try #require(model as? any ResumablePrefillModel, "\(family) opts in")
         // On the default device: some families use Metal kernels. Both runs use the same ones.
         do {
@@ -1348,7 +1349,7 @@ struct BatchTokenIteratorTests {
     @Test("A one-token prompt joins a longer one on a sliding-window model")
     func mixedLengthRotatingRows() throws {
         try Device.withDefaultDevice(.cpu) {
-            let model = tinyGemma3()
+            let model: any BatchDecodableModel = tinyGemma3()
             let prompts: [[Int]] = [[1], [2, 3]]
             let expected = try prompts.map { prompt in
                 try generateAlone(model, prompt: prompt, sampler: ArgMaxSampler(), maxTokens: 4)
@@ -2053,7 +2054,7 @@ extension BatchTokenIteratorTests {
         arguments: [2, 3])
     func ideficsIteratorParity(batchSize: Int) throws {
         try Device.withDefaultDevice(.cpu) {
-            let model = try tinyIdefics3ForBatchPositions()
+            let model: any BatchDecodableModel = try tinyIdefics3ForBatchPositions()
             let prompts = Array(
                 [[1, 2, 3], Array(4 ..< 11), Array(11 ..< 20)].prefix(batchSize))
             func sampler(_ row: Int) -> TopPSampler {
@@ -2106,6 +2107,7 @@ extension QwenVLBatchedPositionTests {
     func coldTextIterator(family: QwenVLTextFamily) throws {
         try Device.withDefaultDevice(.cpu) {
             let model = try tinyQwenVLText(family)
+            #expect(model is any BatchDecodableModel)
             let prompts = [[1, 2, 3], [4, 5, 6, 7, 8, 9, 10]]
             let expected = try prompts.map { prompt in
                 let iterator = try TokenIterator(

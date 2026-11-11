@@ -91,24 +91,26 @@ extension LLMModel {
     }
 }
 
-// MARK: - Resumable prefill
+// MARK: - Batch decoding and resumable prefill
 
-// Models that use the default `LLMModel` prefill and return no model state from their forward
-// pass, so their prefill chunks can be fed one per call. Each is checked against
-// `TokenIterator` in `BatchTokenIteratorTests.resumablePrefillFamilies`.
-extension LlamaModel: ResumablePrefillModel {}
-extension Qwen2Model: ResumablePrefillModel {}
-extension Qwen3Model: ResumablePrefillModel {}
-extension Qwen3MoEModel: ResumablePrefillModel {}
-extension PhiModel: ResumablePrefillModel {}
-extension Phi3Model: ResumablePrefillModel {}
-extension GemmaModel: ResumablePrefillModel {}
-extension Gemma2Model: ResumablePrefillModel {}
-extension Starcoder2Model: ResumablePrefillModel {}
-extension CohereModel: ResumablePrefillModel {}
-extension InternLM2Model: ResumablePrefillModel {}
-extension GraniteModel: ResumablePrefillModel {}
-extension GLM4Model: ResumablePrefillModel {}
-extension SmolLM3Model: ResumablePrefillModel {}
-extension Olmo2Model: ResumablePrefillModel {}
-extension MixtralModel: ResumablePrefillModel {}
+// These models use the default `LLMModel` prefill and return no model state from their forward
+// pass. `BatchTokenIteratorTests` cover resumable prefill and multi-row decode for each one.
+extension LlamaModel: ResumablePrefillModel, BatchDecodableModel {}
+extension Qwen2Model: ResumablePrefillModel, BatchDecodableModel {}
+extension Qwen3Model: ResumablePrefillModel, BatchDecodableModel {}
+extension Qwen3MoEModel: ResumablePrefillModel, BatchDecodableModel {}
+extension PhiModel: ResumablePrefillModel, BatchDecodableModel {}
+extension Phi3Model: ResumablePrefillModel, BatchDecodableModel {}
+extension GemmaModel: ResumablePrefillModel, BatchDecodableModel {}
+extension Gemma2Model: ResumablePrefillModel, BatchDecodableModel {}
+extension Starcoder2Model: ResumablePrefillModel, BatchDecodableModel {}
+extension CohereModel: ResumablePrefillModel, BatchDecodableModel {}
+extension InternLM2Model: ResumablePrefillModel, BatchDecodableModel {}
+extension GraniteModel: ResumablePrefillModel, BatchDecodableModel {}
+extension GLM4Model: ResumablePrefillModel, BatchDecodableModel {}
+extension SmolLM3Model: ResumablePrefillModel, BatchDecodableModel {}
+extension Olmo2Model: ResumablePrefillModel, BatchDecodableModel {}
+extension MixtralModel: ResumablePrefillModel, BatchDecodableModel {}
+
+// Covered by BatchTokenIteratorTests.mixedLengthRotatingRows.
+extension Gemma3TextModel: BatchDecodableModel {}

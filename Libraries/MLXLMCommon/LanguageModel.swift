@@ -455,6 +455,13 @@ extension LanguageModel {
     }
 }
 
+/// A ``LanguageModel`` with a supported multi-row decode path in ``BatchTokenIterator``.
+///
+/// Callers can query this capability when choosing a generation path for token prompts.
+/// Support depends on the model configuration and compatible row caches and model state.
+/// The iterator checks each row's cache and model state during admission.
+public protocol BatchDecodableModel: LanguageModel {}
+
 /// A ``LanguageModel`` whose prompt prefill can stop after any chunk and resume later, with
 /// the same result as ``LanguageModel/prepare(_:cache:state:prefill:)``.
 ///
