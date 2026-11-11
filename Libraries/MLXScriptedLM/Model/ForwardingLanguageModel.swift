@@ -135,6 +135,10 @@ open class ForwardingLanguageModel: Module, LanguageModel, LoRAModel, Suppressed
         try wrapped.cacheStatus(parameters: parameters)
     }
 
+    open func estimator(parameters: GenerateParameters?) throws -> GenerationEstimator {
+        try wrapped.estimator(parameters: parameters)
+    }
+
     // MARK: - ChatConventionsProviding
 
     open var toolCallFormat: ToolCallFormat? { wrapped.toolCallFormat }

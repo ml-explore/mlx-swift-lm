@@ -139,6 +139,31 @@ for layer in status.layers {
 print(status.memoryBytes)
 ```
 
+### Planning Cache Memory
+
+`estimator(parameters:)` estimates what generation will need, before it runs.
+Its `cache` follows windows, recurrent state, and compression.
+`KVCacheStatus.memoryBytes` is what a cache holds now.
+
+```swift
+let estimator = try await container.estimator(parameters: params)
+let bytes = estimator.cache.bytes(tokens: 32_768)
+// The longest context that fits, or nil when every length fits
+let maxTokens = estimator.cache.maxTokens(fittingIn: budgetBytes)
+
+for layer in estimator.cache.layers {
+    print(layer.path, layer.strategy as Any, layer.bytesPerToken,
+          layer.fixedBytes, layer.capacity as Any)
+}
+```
+
+Its `decode` reports what one decoded token reads. The weights are the
+model's, so pass the bytes they contribute to a token.
+
+```swift
+let perToken = estimator.decode.bytes(tokens: 32_768, weightBytes: weightBytes)
+```
+
 Hybrid attention / state-space models (Qwen3.5, Jamba, LFM2, Falcon-H1, …)
 apply `maxKVSize` only to attention layers. Architecture sliding-window layers
 use `min(slidingWindow, maxKVSize)`. State-space caches are never token-windowed.
