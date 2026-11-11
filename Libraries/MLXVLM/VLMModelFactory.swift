@@ -490,6 +490,7 @@ public final class VLMModelFactory: GenericModelFactory {
             excludedComponents: configuration.excludedComponents)
 
         let tokenizer = try await tokenizerTask
+        try model.validate(tokenizer: tokenizer)
         let processorConfiguration: VLMProcessorConfiguration
         do {
             processorConfiguration = try await processorConfigTask
