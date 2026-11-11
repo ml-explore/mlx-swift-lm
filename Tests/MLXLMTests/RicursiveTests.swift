@@ -300,6 +300,10 @@ final class RicursivePytorchParityTests: XCTestCase {
             throw XCTSkip("RICURSIVE_PARITY_MODEL and RICURSIVE_PARITY_ORACLE are not set")
         }
         let exact = (environment["RICURSIVE_PARITY_MODE"] ?? "exact") == "exact"
+        var prefill = PrefillParameters()
+        if let step = Int(environment["RICURSIVE_PARITY_STEP"] ?? "") {
+            prefill.stepSize = step
+        }
 
         let directory = URL(fileURLWithPath: modelPath)
         let configData = try Data(contentsOf: directory.appendingPathComponent("config.json"))
@@ -333,7 +337,7 @@ final class RicursivePytorchParityTests: XCTestCase {
             let begin = Date()
             guard
                 case .tokens(let rest) = try model.prepare(
-                    LMInput(tokens: prompt), cache: cache, state: nil, prefill: .init())
+                    LMInput(tokens: prompt), cache: cache, state: nil, prefill: prefill)
             else {
                 return XCTFail("prepare should hand tokens to the iterator")
             }
@@ -346,7 +350,10 @@ final class RicursivePytorchParityTests: XCTestCase {
             var worst: Float = 0
             let decodeBegin = Date()
             for step in expected.indices {
-                let row = model(input, cache: cache)[0, -1].asType(.float32)
+                // The iterator's path: `nextTokenLogits` may trim the vocabulary projection.
+                let row = model.nextTokenLogits(
+                    LMInput.Text(tokens: input), cache: cache, state: nil
+                ).logits[0, -1].asType(.float32)
                 eval(row)
                 eval(cache)
                 let token = argMax(row, axis: -1).item(Int.self)

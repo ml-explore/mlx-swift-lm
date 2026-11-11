@@ -349,6 +349,14 @@ public final class RicursiveModel: Module, LLMModel {
         projectLogits(hiddenStates(inputs, cache: cache))
     }
 
+    public func nextTokenLogits(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        let hidden = hiddenStates(input.tokens, cache: cache)
+        return .init(
+            logits: projectLogits(quantizedVocabularyProjectionInput(hidden, projection: lmHead)))
+    }
+
     public var loraLayers: [Module] { model.layers }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
