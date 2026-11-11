@@ -62,6 +62,10 @@ public class LFM3Model: Module, LLMModel, KVCacheDimensionProvider {
 
         // PyTorch stores the depthwise conv as [C, 1, K]; MLX expects [C, K, 1].
         for (name, value) in weights where name.hasSuffix("conv.conv.weight") {
+            guard value.ndim == 3 else {
+                throw ModelFactoryError.invalidConfiguration(
+                    "LFM3 convolution tensor \(name) must have rank 3, got \(value.shape)")
+            }
             if value.dim(-1) > value.dim(1) {
                 weights[name] = value.transposed(0, 2, 1)
             }
@@ -76,6 +80,10 @@ public class LFM3Model: Module, LLMModel, KVCacheDimensionProvider {
 
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
         try model.newCache(parameters: parameters)
+    }
+
+    public func validate(tokenizer: any Tokenizer) throws {
+        try LFM3ModelInner.validate(tokenizer: tokenizer)
     }
 }
 
