@@ -337,7 +337,7 @@ struct VLMRowPositionTests {
     }
 }
 
-/// Text models whose Llama 4 query scaling follows each row's position.
+/// Text models whose attention scaling follows each row's position.
 @Suite(.serialized)
 struct LLMRowPositionTests {
 
@@ -366,6 +366,51 @@ struct LLMRowPositionTests {
                           \(Self.llama4Scaling)
                         }
                         """.utf8)))
+        }
+    }
+
+    @Test(
+        "InternLM2 batch logits match solo across the dynamic RoPE cutoff",
+        arguments: [[20, 100], [20, 256], [160, 256]])
+    func internLM2DynamicRoPE(promptLengths: [Int]) throws {
+        try Device.withDefaultDevice(.cpu) {
+            let configuration = try JSONDecoder().decode(
+                InternLM2Configuration.self,
+                from: Data(ResumablePrefillFamily.internlm2.configuration.utf8))
+            let model = withRandomState(MLXRandom.RandomState(seed: 777)) {
+                let model = InternLM2Model(configuration)
+                eval(model)
+                return model
+            }
+            let singles = try zip(promptLengths, [3, 7]).map { length, seed in
+                let cache = try model.newCache(parameters: nil)
+                let tokens = (0 ..< length).map { Int32(($0 * 17 + seed * 13) % 63 + 1) }
+                eval(forward(model, MLXArray(tokens).reshaped([1, length]), cache: cache))
+                eval(cache)
+                return cache
+            }
+            let batch = try singles[0].indices.map { layer in
+                try mergeCaches(singles.map { $0[layer].copy() })
+            }
+            let first = try #require(batch.first as? BatchKVCache)
+            #expect(first.batchOffset.asArray(Int.self) == promptLengths)
+
+            let tokens = MLXArray([Int32(17), 13]).reshaped([2, 1])
+            let batched = forward(model, tokens, cache: batch)
+            for row in singles.indices {
+                let solo = forward(model, tokens[row ..< row + 1], cache: singles[row])
+                #expect(
+                    maxAbsDifference(batched[row ..< row + 1], solo) < 1e-4,
+                    "prompt lengths \(promptLengths), row \(row)")
+            }
+
+            batch.forEach { $0.filter(batchIndices: batchRows(0)) }
+            let nextToken = MLXArray([Int32(18)]).reshaped([1, 1])
+            let remaining = forward(model, nextToken, cache: batch)
+            let solo = forward(model, nextToken, cache: singles[0])
+            #expect(
+                maxAbsDifference(remaining, solo) < 1e-4,
+                "prompt lengths \(promptLengths), after removing the longer row")
         }
     }
 
