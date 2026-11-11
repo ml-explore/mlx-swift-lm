@@ -299,11 +299,7 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         defaultPrompt: "Describe the image in English",
         extraEOSTokens: ["<|eot|>", "<|end_of_text|>"],
         toolCallFormat: .atem,
-        reasoningConfig: ReasoningConfig(
-            startDelimiter: "to=self<|message|>",
-            endDelimiter: "<|eom|>",
-            promptStrategy: .none,
-            isSpecialToken: true)
+        reasoningConfig: OnyxReasoningProtocol.glimmer
     )
 
     static public func all() -> [ModelConfiguration] {
