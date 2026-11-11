@@ -159,11 +159,21 @@ public struct QwenVL {
     }
 
     // image_processing_qwen2_vl.smart_resize
-    static func targetSize(height: Int, width: Int, factor: Int, minPixels: Int, maxPixels: Int)
-        throws
-        -> (Int, Int)
-    {
+    // `scaleUpSmallSides` follows image_processing_glm46v.smart_resize, which
+    // scales a side under `factor` up instead of throwing.
+    static func targetSize(
+        height: Int, width: Int, factor: Int, minPixels: Int, maxPixels: Int,
+        scaleUpSmallSides: Bool = false
+    ) throws -> (Int, Int) {
         debug("Original dimensions: \(width) × \(height)")
+        var height = height
+        var width = width
+        if scaleUpSmallSides, height > 0, width > 0, height < factor || width < factor {
+            let scale = max(Double(factor) / Double(height), Double(factor) / Double(width))
+            height = Int(Double(height) * scale)
+            width = Int(Double(width) * scale)
+            debug("After scaling up small sides: \(width) × \(height)")
+        }
         debug("Factor: \(factor), minPixels: \(minPixels), maxPixels: \(maxPixels)")
 
         if height < factor {
