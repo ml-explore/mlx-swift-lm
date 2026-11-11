@@ -25,7 +25,7 @@ public struct ModelComponent: Hashable, Sendable, CustomStringConvertible {
     public static let audio = ModelComponent("audio")
 }
 
-private let logger = Logger(subsystem: "mlx-swift-lm", category: "model-component")
+private let logger = MLXLogger(label: "model-component")
 
 /// When a load reads the components that a model can load on first use.
 public enum ComponentLoading: Sendable {
