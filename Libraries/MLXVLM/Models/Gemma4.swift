@@ -781,6 +781,8 @@ final class Gemma4TextDecoderLayer: Module {
     @ModuleInfo(key: "layer_scalar") var layerScalar: MLXArray
 
     init(config: Gemma4TextConfiguration, layerIdx: Int, kvSharedOnly: Bool = false) {
+        // Fail before a checkpoint with a different eps reaches the fused graphs.
+        gemma4RequireFusedNormEps(config.rmsNormEps)
         self.layerType = config.layerTypes[layerIdx]
         self.enableMoE = config.enableMoEBlock
         self._selfAttention.wrappedValue = Gemma4TextAttention(
@@ -824,15 +826,14 @@ final class Gemma4TextDecoderLayer: Module {
         sharedKV: Gemma4SharedKVState? = nil,
         offset: Int? = nil
     ) -> (MLXArray, Gemma4SharedKVState?, Int) {
-        var residual = x
+        let residual = x
         var h = inputLayerNorm(x)
         let (attentionOutput, kvState, attentionOffset) = selfAttention(
             h, mask: mask, cache: cache, sharedKV: sharedKV, offset: offset)
-        h = attentionOutput
-        h = postAttentionLayerNorm(h)
-        h = residual + h
+        // Fused: residual + RMSNorm(attnOut) * weight
+        var out = gemma4AddRMSNorm(residual, attentionOutput, postAttentionLayerNorm.weight)
 
-        residual = h
+        let residual2 = out
         if enableMoE,
             let router,
             let experts,
@@ -840,36 +841,36 @@ final class Gemma4TextDecoderLayer: Module {
             let postFeedforwardLayerNorm2,
             let preFeedforwardLayerNorm2
         {
-            var dense = preFeedforwardLayerNorm(h)
+            var dense = preFeedforwardLayerNorm(out)
             dense = mlp(dense)
             dense = postFeedforwardLayerNorm1(dense)
 
-            let (topKIndices, topKWeights) = router(h)
-            var sparse = preFeedforwardLayerNorm2(h)
+            let (topKIndices, topKWeights) = router(out)
+            var sparse = preFeedforwardLayerNorm2(out)
             sparse = experts(sparse, topKIndices: topKIndices, topKWeights: topKWeights)
             sparse = postFeedforwardLayerNorm2(sparse)
 
-            h = dense + sparse
+            // Fused: residual + RMSNorm(dense + sparse) * weight
+            out = gemma4AddRMSNorm(residual2, dense + sparse, postFeedforwardLayerNorm.weight)
         } else {
-            h = preFeedforwardLayerNorm(h)
-            h = mlp(h)
+            out = preFeedforwardLayerNorm(out)
+            out = mlp(out)
+            // Fused: residual + RMSNorm(out) * weight
+            out = gemma4AddRMSNorm(residual2, out, postFeedforwardLayerNorm.weight)
         }
-        h = postFeedforwardLayerNorm(h)
-        h = residual + h
 
         if let perLayerInputGate, let perLayerProjection, let postPerLayerInputNorm,
             let perLayerInput
         {
-            residual = h
-            var gated = perLayerInputGate(h)
-            gated = geluApproximate(gated)
-            gated = gated * perLayerInput
-            gated = perLayerProjection(gated)
-            gated = postPerLayerInputNorm(gated)
-            h = residual + gated
+            let residual3 = out
+            // Fused: gelu_approx(g) * perLayerInput
+            var g = gemma4GeluMul(perLayerInputGate(out), perLayerInput)
+            g = perLayerProjection(g)
+            // Fused: residual + RMSNorm(g) * weight
+            out = gemma4AddRMSNorm(residual3, g, postPerLayerInputNorm.weight)
         }
 
-        return (h * layerScalar, kvState, attentionOffset)
+        return (out * layerScalar, kvState, attentionOffset)
     }
 }
 

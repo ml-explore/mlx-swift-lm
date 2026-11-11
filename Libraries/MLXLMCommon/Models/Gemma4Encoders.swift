@@ -250,7 +250,7 @@ package final class Gemma4RMSNormNoScale: Module, UnaryLayer {
 
 package final class Gemma4RMSNormZeroShift: Module, UnaryLayer {
     let eps: Float
-    @ModuleInfo var weight: MLXArray
+    @ModuleInfo package var weight: MLXArray
 
     package init(dimensions: Int, eps: Float = 1e-6) {
         self.eps = eps
