@@ -52,14 +52,14 @@ public struct BaseProcessorConfiguration: Codable, Sendable {
 
 /// Creates a function that loads a configuration file and instantiates a model with the proper configuration
 private func create<C: Decodable, M>(
-    _ configurationType: C.Type, _ modelInit: @escaping (C) -> M
+    _ configurationType: C.Type, _ modelInit: @escaping (C) throws -> M
 ) -> (Data) throws -> M {
     { data in
         let configuration = try JSONDecoder.json5().decode(C.self, from: data)
         if let validating = configuration as? ModelConfigurationValidating {
             try validating.validateModelConfiguration()
         }
-        return modelInit(configuration)
+        return try modelInit(configuration)
     }
 }
 
@@ -105,6 +105,8 @@ public enum VLMTypeRegistry {
         "llava_qwen2": create(FastVLMConfiguration.self, FastVLM.init),
         "pixtral": create(PixtralConfiguration.self, PixtralVLM.init),
         "mistral3": create(Mistral3VLMConfiguration.self, Mistral3VLM.init),
+        "lfm3_omni": create(LFM3OmniConfiguration.self) { try LFM3Omni($0) },
+        "lfm3_vl": create(LFM3VLConfiguration.self, LFM3VL.init),
         "lfm2_vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "lfm2-vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "glm_ocr": create(GlmOcrConfiguration.self, GlmOcr.init),
@@ -148,6 +150,8 @@ public enum VLMProcessorTypeRegistry {
             PixtralProcessorConfiguration.self, PixtralProcessor.init),
         "Mistral3Processor": create(
             Mistral3VLMProcessorConfiguration.self, Mistral3VLMProcessor.init),
+        "Lfm3OmniProcessor": create(LFM3OmniProcessorConfiguration.self, LFM3OmniProcessor.init),
+        "Lfm3VlProcessor": create(LFM3VLProcessorConfiguration.self, LFM3VLProcessor.init),
         "Lfm2VlProcessor": create(
             LFM2VLProcessorConfiguration.self, LFM2VLProcessor.init),
         "Glm46VProcessor": create(
@@ -490,6 +494,7 @@ public final class VLMModelFactory: GenericModelFactory {
             excludedComponents: configuration.excludedComponents)
 
         let tokenizer = try await tokenizerTask
+        try model.validate(tokenizer: tokenizer)
         let processorConfiguration: VLMProcessorConfiguration
         do {
             processorConfiguration = try await processorConfigTask

@@ -1,7 +1,6 @@
 // Copyright © 2026 Apple Inc.
 
 import MLX
-import MLXLMCommon
 
 /// Shared runtime support for the dense and mixture-of-experts LFM2 families.
 ///
@@ -9,13 +8,13 @@ import MLXLMCommon
 /// Keeping their cache construction and convolution-state commits identical
 /// prevents the two implementations from drifting on long-context, ragged-batch,
 /// and prompt-cache behavior.
-enum LFM2RuntimeSupport {
+package enum LFM2RuntimeSupport {
     /// Maximum verifier tail retained by every convolution layer. DSpark
     /// advertises this same bound before selecting the in-place hybrid-cache
     /// path, so cache construction and speculative rollback cannot drift.
-    static let speculativeRollbackCapacity = 64
+    package static let speculativeRollbackCapacity = 64
 
-    static func removingLanguageModelScope(from checkpoint: ModelCheckpoint) throws
+    package static func removingLanguageModelScope(from checkpoint: ModelCheckpoint) throws
         -> ModelCheckpoint
     {
         let stripScope =
@@ -26,7 +25,7 @@ enum LFM2RuntimeSupport {
         return try checkpoint.mapNames(using: mapping)
     }
 
-    static func makeHybridCache(
+    package static func makeHybridCache(
         hiddenLayers: Int,
         fullAttentionIndices: Set<Int>,
         convolutionStateLength: Int,
@@ -47,7 +46,7 @@ enum LFM2RuntimeSupport {
     /// Prepends the previous convolution state and atomically commits the next
     /// state. For ragged batches, each row is committed at its logical sequence
     /// endpoint rather than at the padded physical endpoint.
-    static func convolutionTimeline(
+    package static func convolutionTimeline(
         input: MLXArray,
         stateLength: Int,
         hiddenSize: Int,

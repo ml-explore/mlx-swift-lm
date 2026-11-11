@@ -37,6 +37,7 @@ extension UserInput.Audio {
                 AVNumberOfChannelsKey: processing.channels,
                 AVLinearPCMBitDepthKey: 32,
                 AVLinearPCMIsFloatKey: true,
+                AVLinearPCMIsBigEndianKey: false,
                 AVLinearPCMIsNonInterleaved: false,
             ]
 

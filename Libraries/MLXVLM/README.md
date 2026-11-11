@@ -486,3 +486,137 @@ configuration by id:
 # Using a Model
 
 See [MLXLMCommon/README.md](../MLXLMCommon/README.md#using-a-model).
+
+## LFM3-Omni
+
+`LiquidAI/LFM3-Omni-2B` accepts text, images, timestamped video and 16 kHz audio.
+It can produce text, 24 kHz speech, or interleaved text and speech. Text responses
+use `VLMModelFactory` and `ModelContainer` as usual, including tool-call handling.
+Speech responses use `LFM3OmniSession`, which owns the model. Its speech component
+includes the bundled LiquidCodec weights. The model does not support thinking mode.
+The session decodes speech with float32 codec weights and resets the codec at
+each end-of-audio marker. MLX's reduced-precision TF32 arithmetic can still cause
+differences between streaming and batched decoding; use `MLX_ENABLE_TF32=0` when
+comparing numerical results with the full-precision reference.
+
+Download the complete checkpoint, including `audio_tokenizer/config.json` and
+`audio_tokenizer/model.safetensors`. The original BF16 checkpoint is supported;
+no conversion or tokenizer code from the checkpoint runs in the Swift loader.
+Use a tokenizer with the fixes in swift-transformers 1.4.0 or newer. Loading
+validates the tokenizer's LFM3 behavior and modality token IDs.
+
+```swift
+import Foundation
+import HuggingFace
+import MLXHuggingFace
+import MLXLMCommon
+import MLXVLM
+import Tokenizers
+
+let loader: any TokenizerLoader = #huggingFaceTokenizerLoader()
+let context = try await VLMModelFactory.shared.load(
+    from: URL(fileURLWithPath: "/path/to/LFM3-Omni-2B"), using: loader)
+let session = try LFM3OmniSession(context: context)
+let response = try await session.respond(
+    to: UserInput(chat: [
+        .system("Perform TTS in American English using a female voice."),
+        .user("The weather is sunny today."),
+    ]), parameters: .init(mode: .audio, seed: 42)
+) { event in
+    switch event {
+    case .text(let fragment): print(fragment, terminator: "")
+    case .audio(let samples):
+        // Feed these mono Float samples to a 24 kHz audio player.
+        print("Received \(samples.count) samples")
+    }
+}
+// response.audio contains the complete waveform; response.sampleRate is 24000.
+```
+
+Use `.interleaved` with the system prompt `Respond with interleaved text and audio.`
+for voice chat. `.automatic` allows the model to choose the response modality;
+`.text` forces text output. `maxSteps` counts both text tokens and speech frames.
+The optional seed controls codebook reveal order and sampling. Cancellation
+throws `CancellationError`; each response has independent language and codec caches.
+
+For subsequent turns, append `response.content` as the assistant message and pass
+its `response.audioCodes` through `audioOutputCodes`. Concatenate codebook rows in
+message order when retaining multiple spoken turns. Keep the modality markers
+and terminal codebook rows: the model needs them to reconstruct speech embeddings.
+`session.encodeAudio` accepts mono 24 kHz samples and creates codebook rows for
+recorded speech; `session.decodeAudio` reconstructs a waveform from those rows.
+
+Audio URLs are decoded and resampled to mono 16 kHz. For `.array` audio, set
+`input.processing.audio.sampleRate = 16000` and supply mono samples already at that
+rate. Input audio can accompany images or video. To include a video's soundtrack,
+pass its URL as both video and audio and enable timestamp-based interleaving:
+
+```swift
+let input = UserInput(
+    prompt: "Describe what is happening and what is being said.",
+    videos: [.url(videoURL)], audios: [.url(videoURL)],
+    additionalContext: ["use_audio_in_video": true])
+let response = try await session.respond(to: input, parameters: .init(mode: .text))
+```
+
+When there are multiple videos, each video pairs with the next audio placeholder
+in the conversation. Standalone audio clips remain separate. Explicit frame inputs
+must carry their real timestamps so soundtrack tokens align with frame groups.
+
+### Omni validation
+
+Unit tests generate their configurations and weights in memory. Real-checkpoint
+and PyTorch comparison tests are in `IntegrationTesting/IntegrationTestingTests/LFM3OmniIntegrationTests.swift`.
+The reference generator is `tools/lfm3-omni-checkpoint-reference.py`; it executes
+the downloaded checkpoint's Python modules, so use a trusted snapshot. The tested
+upstream snapshot is `21d75123f86c1f7ffb4bef1ea202710c4e7ebe67`.
+
+```sh
+python tools/lfm3-omni-checkpoint-reference.py /path/to/checkpoint /tmp/codec.safetensors --component codec
+python tools/lfm3-omni-checkpoint-reference.py /path/to/checkpoint /tmp/audio.safetensors --component audio
+python tools/lfm3-omni-checkpoint-reference.py /path/to/checkpoint /tmp/depth.safetensors --component depth
+
+TEST_RUNNER_MLX_ENABLE_TF32=0 \
+TEST_RUNNER_MLX_LFM3_OMNI_CHECKPOINT=/path/to/checkpoint \
+TEST_RUNNER_MLX_LFM3_OMNI_CODEC_REFERENCE=/tmp/codec.safetensors \
+TEST_RUNNER_MLX_LFM3_OMNI_AUDIO_REFERENCE=/tmp/audio.safetensors \
+TEST_RUNNER_MLX_LFM3_OMNI_DEPTH_REFERENCE=/tmp/depth.safetensors \
+xcodebuild test -project IntegrationTesting/IntegrationTesting.xcodeproj \
+  -scheme IntegrationTesting -destination 'platform=macOS' \
+  -skipPackagePluginValidation \
+  -only-testing:IntegrationTestingTests/LFM3OmniIntegrationTests
+```
+
+`MLX_LFM3_OMNI_AUDIO_SAMPLE` optionally supplies a recording saying “The weather is
+sunny today” for transcription and synchronized video/audio checks. Pass it with
+the `TEST_RUNNER_` prefix when invoking `xcodebuild`. `MLX_LFM3_OMNI_VIDEO_SAMPLE`
+optionally supplies a red video with that phrase as its soundtrack to test the
+file loading path. `MLX_LFM3_OMNI_SPEECH_OUTPUT`
+optionally saves the speech test's generated samples and codebook rows outside
+the repository. Full-precision reference comparisons disable reduced-precision
+TF32; ordinary generation also runs with MLX's default precision settings.
+
+### Omni component loading
+
+Omni declares `.vision` for the visual encoder and projector, `.audio` for the
+audio encoder and projector, and `.speech` for the depth decoder, codebook
+embedding and LiquidCodec. Each component loads on first use through the model
+loader, including checkpoint preparation, precision settings and validation.
+The memory report includes loaded components.
+
+Set `ModelConfiguration.excludedComponents` to exclude any of these components.
+Text generation needs none of them. Constructing `LFM3OmniSession` requires
+`.speech` and throws `OnDemandComponentError.unavailable(.speech)` when excluded.
+The bundled codec weights are read from `audio_tokenizer/model.safetensors`;
+load the complete checkpoint directory. The wrapper uses the released LFM3-Omni
+codec architecture, with float32 codec arithmetic. The session validates the
+bundled codec configuration before inference.
+
+## LFM3-VL component loading
+
+LFM3-VL loads its vision encoder and projector on first image or video use.
+Set `ModelConfiguration.excludedComponents = [.vision]` for text-only use.
+An image or video request then throws `OnDemandComponentError.unavailable(.vision)`.
+Use `componentLoading: .immediate` to load vision together with the language model,
+including when converting a checkpoint. The model memory report includes the
+vision component after it loads.
