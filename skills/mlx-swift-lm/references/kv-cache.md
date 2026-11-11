@@ -151,6 +151,12 @@ per-layer capacity provenance, and planned / realized phase.
 
 Prefer `makeAttentionKVCache(parameters:)` / `makeHybridAttentionKVCache(...)`
 inside model `newCache` overrides so the limit cannot be silently dropped.
+Declare `kvHeadDim` on a `KVCacheDimensionProvider` model (or pass `headDim:`
+to `makeAttentionKVCache`) so a strategy that compresses from token 0 starts
+compressed instead of holding the full fp16 cache through the first prefill.
+Only declare it when every attention layer goes through
+`attentionWithCacheUpdate` (or another compressed-cache-aware route) on every
+call, including prefill: a compressed cache traps on plain `KVCache.update`.
 
 ### Via Utility Functions
 

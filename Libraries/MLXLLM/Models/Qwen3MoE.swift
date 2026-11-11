@@ -232,6 +232,7 @@ public class Qwen3MoEModelInner: Module {
 public class Qwen3MoEModel: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
+    public var kvHeadDim: Int? { configuration.headDim }
 
     public let model: Qwen3MoEModelInner
     let configuration: Qwen3MoEConfiguration

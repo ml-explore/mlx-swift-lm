@@ -154,6 +154,7 @@ public class LlamaModel: Module, LLMModel, KVCacheDimensionProvider {
 
     public let vocabularySize: Int
     public let kvHeads: [Int]
+    public var kvHeadDim: Int? { configuration.resolvedHeadDimensions }
 
     public let model: LlamaModelInner
 

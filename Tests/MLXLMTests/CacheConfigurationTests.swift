@@ -13,9 +13,11 @@ import Testing
 /// Minimal model that uses the default ``KVCacheDimensionProvider`` cache path.
 private final class DummyModel: Module, LanguageModel, KVCacheDimensionProvider {
     let kvHeads: [Int]
+    let kvHeadDim: Int?
 
-    init(layers: Int = 4) {
+    init(layers: Int = 4, headDim: Int? = nil) {
         self.kvHeads = Array(repeating: 1, count: layers)
+        self.kvHeadDim = headDim
         super.init()
     }
 
@@ -198,6 +200,68 @@ private func legacyStatus(cache: [KVCache], maxKVSize: Int) throws -> KVCacheSta
         makeAttentionKVCache(parameters: parameters) as? RotatingKVCache)
     #expect(cache.maxSize == 1)
     #expect(cache.keepCount == 0)
+}
+
+@Test func makeAttentionKVCacheStartsCompressedWhenHeadDimIsKnown() throws {
+    let fourBit = GenerateParameters(kvBits: 4, kvGroupSize: 64)
+
+    let quantized = try #require(
+        makeAttentionKVCache(parameters: fourBit, headDim: 128) as? QuantizedKVCache)
+    #expect(quantized.bits == 4)
+    #expect(quantized.groupSize == 64)
+    #expect(quantized.offset == 0)
+
+    // The group size follows the head dimension, as dynamic conversion does.
+    let narrow = try #require(
+        makeAttentionKVCache(parameters: fourBit, headDim: 96) as? QuantizedKVCache)
+    #expect(narrow.groupSize == 32)
+
+    // Unknown or unsupported head dimensions keep the dynamic path.
+    #expect(try makeAttentionKVCache(parameters: fourBit) is KVCacheSimple)
+    #expect(try makeAttentionKVCache(parameters: fourBit, headDim: 80) is KVCacheSimple)
+
+    // A later compression start and full precision stay simple; capacity still wins.
+    let deferred = GenerateParameters(kvBits: 4, quantizedKVStart: 256)
+    #expect(try makeAttentionKVCache(parameters: deferred, headDim: 128) is KVCacheSimple)
+    #expect(try makeAttentionKVCache(parameters: nil, headDim: 128) is KVCacheSimple)
+    let bounded = GenerateParameters(maxKVSize: 64, kvBits: 4)
+    #expect(try makeAttentionKVCache(parameters: bounded, headDim: 128) is RotatingKVCache)
+}
+
+@Test func makeAttentionKVCacheStartsCompressedForTypedStrategies() throws {
+    var parameters = GenerateParameters()
+    parameters.kvCache = KVCacheConfiguration(strategy: .affine(.eightBit))
+    let affine = try #require(
+        makeAttentionKVCache(parameters: parameters, headDim: 64) as? QuantizedKVCache)
+    #expect(affine.bits == 8)
+
+    parameters.kvCache = KVCacheConfiguration(
+        strategy: .varianceNormalized(try .init(keyBits: 4, valueBits: 2, tileSize: 32)))
+    let varn = try #require(
+        makeAttentionKVCache(parameters: parameters, headDim: 128)
+            as? VarianceNormalizedKVCache)
+    #expect(varn.tileSize == 32)
+    #expect(varn.keyBits == 4)
+    #expect(varn.valueBits == 2)
+    #expect(try makeAttentionKVCache(parameters: parameters, headDim: 96) is KVCacheSimple)
+
+    // TurboQuant protects boundary layers by position, so it still converts dynamically.
+    parameters.kvCache = KVCacheConfiguration(
+        strategy: .turboQuant(try .init(keyPrecision: .fourBit, valuePrecision: .fourBit)))
+    #expect(try makeAttentionKVCache(parameters: parameters, headDim: 128) is KVCacheSimple)
+}
+
+@Test func dimensionProviderHeadDimReportsCompressionActiveWhenPlanned() throws {
+    let parameters = GenerateParameters(kvBits: 4)
+    let unknown = DummyModel(layers: 2)
+    #expect(try unknown.newCache(parameters: parameters).allSatisfy { $0 is KVCacheSimple })
+    #expect(try unknown.cacheStatus(parameters: parameters).pendingLayerCount == 2)
+
+    let known = DummyModel(layers: 2, headDim: 64)
+    #expect(try known.newCache(parameters: parameters).allSatisfy { $0 is QuantizedKVCache })
+    let status = try known.cacheStatus(parameters: parameters)
+    #expect(status.pendingLayerCount == 0)
+    #expect(status.layers.allSatisfy { $0.state == .active && $0.resolvedStrategy == .affine })
 }
 
 @Test func cacheConstructionRejectsInvalidLegacyCapacity() {
