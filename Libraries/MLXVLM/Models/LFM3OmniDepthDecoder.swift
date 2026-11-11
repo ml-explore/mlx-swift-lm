@@ -39,7 +39,7 @@ private final class LFM3OmniCodebook: Module {
 final class LFM3OmniDepthDecoder: Module {
     @ModuleInfo(key: "depth_linear") var projection: Linear
     @ParameterInfo(key: "mask_embedding") var maskEmbedding: MLXArray
-    let model: LFM3ModelInner
+    let model: LFM3EmbeddingModelInner
     @ModuleInfo(key: "depth_embeddings") private var codebookEmbeddings: [LFM3OmniCodebook]
     let config: LFM3OmniConfiguration
 
@@ -49,7 +49,7 @@ final class LFM3OmniDepthDecoder: Module {
             config.visionLanguage.text.hiddenSize,
             config.codebooks * config.depth.hiddenSize)
         _maskEmbedding.wrappedValue = MLXArray.zeros([config.depth.hiddenSize])
-        model = LFM3ModelInner(config.depth, includeTokenEmbedding: false)
+        model = LFM3EmbeddingModelInner(config.depth)
         _codebookEmbeddings.wrappedValue = (0 ..< config.codebooks).map { _ in
             LFM3OmniCodebook(config)
         }

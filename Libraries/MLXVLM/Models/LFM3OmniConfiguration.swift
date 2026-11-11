@@ -1,7 +1,7 @@
 import Foundation
 import MLXLMCommon
 
-struct LFM3OmniConfiguration: Decodable {
+struct LFM3OmniConfiguration: Decodable, Sendable {
     let visionLanguage: LFM3VLConfiguration
     let audioEncoder: LFM3OmniAudioConfiguration
     let depth: LFM3Configuration

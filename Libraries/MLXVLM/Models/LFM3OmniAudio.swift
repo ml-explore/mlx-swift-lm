@@ -3,7 +3,7 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-struct LFM3OmniAudioConfiguration: Decodable {
+struct LFM3OmniAudioConfiguration: Decodable, Sendable {
     let channels: Int
     let hiddenSize: Int
     let melBins: Int

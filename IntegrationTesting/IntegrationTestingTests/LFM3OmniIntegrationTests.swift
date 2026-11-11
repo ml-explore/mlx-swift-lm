@@ -108,10 +108,34 @@ final class LFM3OmniIntegrationTests: XCTestCase {
         }
     }
 
+    func testOfficialExcludedComponentsKeepTextAvailable() async throws {
+        var configuration = ModelConfiguration(directory: try checkpoint())
+        configuration.excludedComponents = [.vision, .audio, .speech]
+        let context = try await VLMModelFactory.shared.load(
+            from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
+            configuration: configuration)
+        let model = try XCTUnwrap(context.model as? LFM3Omni)
+        XCTAssertTrue(model.onDemandComponents.allSatisfy { !$0.isLoaded })
+        let prepared = try await context.processor.prepare(input: .init(prompt: "Hello"))
+        _ = try model.prepare(
+            prepared, cache: model.newCache(parameters: nil), state: nil, prefill: .init())
+        XCTAssertTrue(try model.memory().components.isEmpty)
+        XCTAssertThrowsError(try LFM3OmniSession(context: context)) { error in
+            guard case OnDemandComponentError.unavailable(.speech) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
     func testOfficialInterleavedSessionAndSpeechHistory() async throws {
         let context = try await VLMModelFactory.shared.load(
             from: checkpoint(), using: #huggingFaceTokenizerLoader())
+        let model = try XCTUnwrap(context.model as? LFM3Omni)
+        XCTAssertTrue(try model.memory().components.isEmpty)
         let session = try LFM3OmniSession(context: context)
+        let memory = try model.memory()
+        XCTAssertEqual(memory.components.map(\.kind), [.speech])
+        XCTAssertGreaterThan(memory.components[0].bytes, 0)
         let response = try await session.respond(
             to: .init(chat: [
                 .system("Respond with interleaved text and audio."), .user("Say hello."),

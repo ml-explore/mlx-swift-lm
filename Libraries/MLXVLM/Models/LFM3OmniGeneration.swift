@@ -172,7 +172,7 @@ extension LFM3Omni {
             let interleaving = mode == .interleaved
             let next: MLXArray
             if mode == .audio || (interleaving && speaking) {
-                var codes = try depthDecoder.sampleFrame(
+                var codes = try speech().decoder.sampleFrame(
                     hidden: hidden, sampler: audioSampler,
                     order: MLXRandom.permutation(config.codebooks, key: random),
                     history: audioHistory, penalty: parameters.audioRepetitionPenalty)

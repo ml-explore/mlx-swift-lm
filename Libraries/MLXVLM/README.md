@@ -492,8 +492,8 @@ See [MLXLMCommon/README.md](../MLXLMCommon/README.md#using-a-model).
 `LiquidAI/LFM3-Omni-2B` accepts text, images, timestamped video and 16 kHz audio.
 It can produce text, 24 kHz speech, or interleaved text and speech. Text responses
 use `VLMModelFactory` and `ModelContainer` as usual, including tool-call handling.
-Speech responses use `LFM3OmniSession`, which owns the model and its bundled
-LiquidCodec weights. The model does not support thinking mode.
+Speech responses use `LFM3OmniSession`, which owns the model. Its speech component
+includes the bundled LiquidCodec weights. The model does not support thinking mode.
 The session decodes speech with float32 codec weights and resets the codec at
 each end-of-audio marker. MLX's reduced-precision TF32 arithmetic can still cause
 differences between streaming and batched decoding; use `MLX_ENABLE_TF32=0` when
@@ -595,3 +595,28 @@ file loading path. `MLX_LFM3_OMNI_SPEECH_OUTPUT`
 optionally saves the speech test's generated samples and codebook rows outside
 the repository. Full-precision reference comparisons disable reduced-precision
 TF32; ordinary generation also runs with MLX's default precision settings.
+
+### Omni component loading
+
+Omni declares `.vision` for the visual encoder and projector, `.audio` for the
+audio encoder and projector, and `.speech` for the depth decoder, codebook
+embedding and LiquidCodec. Each component loads on first use through the model
+loader, including checkpoint preparation, precision settings and validation.
+The memory report includes loaded components.
+
+Set `ModelConfiguration.excludedComponents` to exclude any of these components.
+Text generation needs none of them. Constructing `LFM3OmniSession` requires
+`.speech` and throws `OnDemandComponentError.unavailable(.speech)` when excluded.
+The bundled codec weights are read from `audio_tokenizer/model.safetensors`;
+load the complete checkpoint directory. The wrapper uses the released LFM3-Omni
+codec architecture, with float32 codec arithmetic. The session validates the
+bundled codec configuration before inference.
+
+## LFM3-VL component loading
+
+LFM3-VL loads its vision encoder and projector on first image or video use.
+Set `ModelConfiguration.excludedComponents = [.vision]` for text-only use.
+An image or video request then throws `OnDemandComponentError.unavailable(.vision)`.
+Use `componentLoading: .immediate` to load vision together with the language model,
+including when converting a checkpoint. The model memory report includes the
+vision component after it loads.

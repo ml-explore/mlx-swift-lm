@@ -5,7 +5,7 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-struct LFM3VLConfiguration: Decodable {
+struct LFM3VLConfiguration: Decodable, Sendable {
     let text: LFM3Configuration
     let vision: LFM3VisionConfiguration
     let imageToken: Int
@@ -86,11 +86,22 @@ final class LFM3VLLanguageModel: Module {
     }
 }
 
+final class LFM3VLVision: Module {
+    @ModuleInfo(key: "vision_tower") var tower: LFM3VisionModel
+    @ModuleInfo(key: "multi_modal_projector") var projector: LFM3VisionProjector
+
+    init(_ config: LFM3VLConfiguration) {
+        _tower.wrappedValue = LFM3VisionModel(config.vision)
+        _projector.wrappedValue = LFM3VisionProjector(config)
+    }
+}
+
 final class LFM3VL: Module, LanguageModel, KVCacheDimensionProvider, LoRAModel {
     let config: LFM3VLConfiguration
     @ModuleInfo(key: "language_model") var languageModel: LFM3VLLanguageModel
-    @ModuleInfo(key: "vision_tower") var vision: LFM3VisionModel
-    @ModuleInfo(key: "multi_modal_projector") var projector: LFM3VisionProjector
+    @ModuleInfo(key: "vision_tower") private var vision: LFM3VisionModel?
+    @ModuleInfo(key: "multi_modal_projector") private var projector: LFM3VisionProjector?
+    private let onDemandVision: OnDemandComponent<LFM3VLVision>
 
     var vocabularySize: Int { config.text.vocabularySize }
     var kvHeads: [Int] { config.text.layerTypes.map { $0 == .conv ? 0 : config.text.kvHeads } }
@@ -101,8 +112,10 @@ final class LFM3VL: Module, LanguageModel, KVCacheDimensionProvider, LoRAModel {
     init(_ c: LFM3VLConfiguration) {
         config = c
         _languageModel.wrappedValue = LFM3VLLanguageModel(c.text)
-        _vision.wrappedValue = LFM3VisionModel(c.vision)
-        _projector.wrappedValue = LFM3VisionProjector(c)
+        let stack = LFM3VLVision(c)
+        _vision.wrappedValue = stack.tower
+        _projector.wrappedValue = stack.projector
+        onDemandVision = OnDemandComponent(.vision) { LFM3VLVision(c) }
     }
 
     func validate(tokenizer: any Tokenizer) throws {
@@ -159,8 +172,14 @@ final class LFM3VL: Module, LanguageModel, KVCacheDimensionProvider, LoRAModel {
                 return
             }
             guard let frames else { throw VLMError.processing("Missing LFM3-VL media grid") }
-            let features = try projector(
-                vision(pixels, frames: frames))
+            let stack: (tower: LFM3VisionModel, projector: LFM3VisionProjector)
+            if let vision, let projector {
+                stack = (vision, projector)
+            } else {
+                let loaded = try onDemandVision.load()
+                stack = (loaded.tower, loaded.projector)
+            }
+            let features = try stack.projector(stack.tower(pixels, frames: frames))
             guard indices.count == features.dim(0) else {
                 throw VLMError.processing(
                     "LFM3-VL media token count does not match projected features")
@@ -186,6 +205,23 @@ final class LFM3VL: Module, LanguageModel, KVCacheDimensionProvider, LoRAModel {
         return .logits(.init(logits: logits))
     }
 
+    func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        var checkpoint = try checkpoint.mapNames { name in
+            var name = name.hasPrefix("model.") ? String(name.dropFirst(6)) : name
+            if name.hasPrefix("language_model."), name != "language_model.model",
+                name != "language_model.lm_head", !name.hasPrefix("language_model.model."),
+                !name.hasPrefix("language_model.lm_head.")
+            {
+                name = "language_model.model." + name.dropFirst("language_model.".count)
+            } else if name == "lm_head" || name.hasPrefix("lm_head.") {
+                name = "language_model." + name
+            }
+            return name
+        }
+        checkpoint.weights = sanitize(weights: checkpoint.weights)
+        return checkpoint
+    }
+
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var result = weights
         if config.text.tieWordEmbeddings {
@@ -202,4 +238,12 @@ final class LFM3VL: Module, LanguageModel, KVCacheDimensionProvider, LoRAModel {
         }
         return result
     }
+}
+
+extension LFM3VL: ModelComponentsProviding {
+    var modelComponents: [ModelComponent: [CheckpointComponent]] {
+        [.vision: .modules("vision_tower", "multi_modal_projector")]
+    }
+
+    var onDemandComponents: [AnyOnDemandComponent] { [onDemandVision] }
 }

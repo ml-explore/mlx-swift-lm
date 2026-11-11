@@ -3,7 +3,7 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-struct LiquidCodecConfiguration: Decodable {
+struct LiquidCodecConfiguration: Decodable, Sendable, Equatable {
     let hiddenSize: Int
     let channels: Int
     let fftSize: Int
@@ -15,6 +15,11 @@ struct LiquidCodecConfiguration: Decodable {
     let codebooks: Int
     let decoderWindow: Int
     let sampleRate: Int
+
+    static let lfm3Omni = LiquidCodecConfiguration(
+        hiddenSize: 512, channels: 256, fftSize: 1280, hopSize: 320,
+        windowSize: 1280, frameStack: 6, quantizerSize: 256,
+        levels: [8, 7, 6, 6], codebooks: 12, decoderWindow: 30, sampleRate: 24000)
 
     enum CodingKeys: String, CodingKey {
         case hiddenSize = "encoder_dim"
@@ -97,9 +102,9 @@ private final class LiquidCodecFrontEnd: Module {
 }
 
 private final class LiquidCodecEncoder: Module {
-    let lfm: LFM3ModelInner
+    let lfm: LFM3EmbeddingModelInner
     init(_ config: LiquidCodecConfiguration) throws {
-        lfm = LFM3ModelInner(try config.backbone(), includeTokenEmbedding: false)
+        lfm = LFM3EmbeddingModelInner(try config.backbone())
     }
     func callAsFunction(_ embeddings: MLXArray) -> MLXArray { lfm(embeddings: embeddings) }
 }
@@ -182,14 +187,14 @@ private final class LiquidCodecSynthesis: Module {
 }
 
 private final class LiquidCodecDecoder: Module {
-    let lfm: LFM3ModelInner
+    let lfm: LFM3EmbeddingModelInner
     let lin: Linear
     let istft: LiquidCodecSynthesis
     let config: LiquidCodecConfiguration
 
     init(_ c: LiquidCodecConfiguration) throws {
         config = c
-        lfm = LFM3ModelInner(try c.backbone(window: c.decoderWindow), includeTokenEmbedding: false)
+        lfm = LFM3EmbeddingModelInner(try c.backbone(window: c.decoderWindow))
         lin = Linear(c.hiddenSize, 2 * (c.fftSize / 2 + 1))
         istft = LiquidCodecSynthesis(c)
     }
@@ -209,6 +214,9 @@ private final class LiquidCodecDecoder: Module {
 }
 
 final class LiquidCodec: Module {
+    static let checkpointNamespaces = [
+        "frontend", "encoder", "to_quantizer", "quantizer", "decoder", "from_quantizer",
+    ]
     private let frontend: LiquidCodecFrontEnd
     private let encoder: LiquidCodecEncoder
     @ModuleInfo(key: "to_quantizer") var toQuantizer: Linear
@@ -272,6 +280,10 @@ final class LiquidCodec: Module {
     }
 
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        Self.sanitizeWeights(weights)
+    }
+
+    static func sanitizeWeights(_ weights: [String: MLXArray]) -> [String: MLXArray] {
         weights.reduce(into: [:]) { result, entry in
             let (key, value) = entry
             if key.hasPrefix("frontend."), key.hasSuffix(".weight"), value.ndim == 3 {

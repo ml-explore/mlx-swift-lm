@@ -5,15 +5,46 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
+private final class LFM3OmniAudio: Module {
+    @ModuleInfo(key: "audio_encoder") var encoder: LFM3OmniAudioEncoder
+    @ModuleInfo(key: "audio_projector") var projector: LFM3OmniAudioProjector
+
+    init(_ config: LFM3OmniConfiguration) {
+        _encoder.wrappedValue = LFM3OmniAudioEncoder(config.audioEncoder)
+        _projector.wrappedValue = LFM3OmniAudioProjector(
+            inputSize: config.audioEncoder.hiddenSize,
+            outputSize: config.visionLanguage.text.hiddenSize)
+    }
+}
+
+final class LFM3OmniSpeech: Module {
+    @ModuleInfo(key: "depth_decoder") var decoder: LFM3OmniDepthDecoder
+    @ModuleInfo(key: "codebook_embedding") var embedding: Embedding
+    @ModuleInfo(key: "audio_tokenizer") var codec: LiquidCodec
+
+    init(_ config: LFM3OmniConfiguration, codecConfiguration: LiquidCodecConfiguration) throws {
+        _decoder.wrappedValue = LFM3OmniDepthDecoder(config)
+        _embedding.wrappedValue = Embedding(
+            embeddingCount: config.codebooks * config.codebookSize,
+            dimensions: config.visionLanguage.text.hiddenSize)
+        _codec.wrappedValue = try LiquidCodec(codecConfiguration)
+    }
+}
+
 final class LFM3Omni: Module, LanguageModel, KVCacheDimensionProvider, LoRAModel {
     let config: LFM3OmniConfiguration
     @ModuleInfo(key: "language_model") var languageModel: LFM3VLLanguageModel
-    @ModuleInfo(key: "vision_tower") var vision: LFM3VisionModel
-    @ModuleInfo(key: "multi_modal_projector") var projector: LFM3VisionProjector
-    @ModuleInfo(key: "audio_encoder") var audioEncoder: LFM3OmniAudioEncoder
-    @ModuleInfo(key: "audio_projector") var audioProjector: LFM3OmniAudioProjector
-    @ModuleInfo(key: "depth_decoder") var depthDecoder: LFM3OmniDepthDecoder
-    @ModuleInfo(key: "codebook_embedding") var codebookEmbedding: Embedding
+    @ModuleInfo(key: "vision_tower") private var vision: LFM3VisionModel?
+    @ModuleInfo(key: "multi_modal_projector") private var projector: LFM3VisionProjector?
+    @ModuleInfo(key: "audio_encoder") private var audioEncoder: LFM3OmniAudioEncoder?
+    @ModuleInfo(key: "audio_projector") private var audioProjector: LFM3OmniAudioProjector?
+    @ModuleInfo(key: "depth_decoder") private var depthDecoder: LFM3OmniDepthDecoder?
+    @ModuleInfo(key: "codebook_embedding") private var codebookEmbedding: Embedding?
+
+    @ModuleInfo(key: "audio_tokenizer") private var codec: LiquidCodec?
+    private let onDemandVision: OnDemandComponent<LFM3VLVision>
+    private let onDemandAudio: OnDemandComponent<LFM3OmniAudio>
+    private let onDemandSpeech: OnDemandComponent<LFM3OmniSpeech>
 
     var vocabularySize: Int { config.visionLanguage.text.vocabularySize }
     var kvHeads: [Int] {
@@ -24,19 +55,42 @@ final class LFM3Omni: Module, LanguageModel, KVCacheDimensionProvider, LoRAModel
     var loraLayers: [Module] { languageModel.model.layers }
     var toolCallFormat: ToolCallFormat? { .xmlFunction }
 
-    init(_ config: LFM3OmniConfiguration) {
+    init(
+        _ config: LFM3OmniConfiguration,
+        codecConfiguration: LiquidCodecConfiguration = .lfm3Omni
+    ) throws {
+        try codecConfiguration.validate()
+        guard codecConfiguration.codebooks == config.codebooks,
+            codecConfiguration.levels.reduce(1, *) == config.audioEndCode,
+            config.codebookSize == config.audioEndCode + 1
+        else { throw VLMError.processing("LiquidCodec codebooks do not match the Omni model") }
         self.config = config
         _languageModel.wrappedValue = LFM3VLLanguageModel(config.visionLanguage.text)
-        _vision.wrappedValue = LFM3VisionModel(config.visionLanguage.vision)
-        _projector.wrappedValue = LFM3VisionProjector(config.visionLanguage)
-        _audioEncoder.wrappedValue = LFM3OmniAudioEncoder(config.audioEncoder)
-        _audioProjector.wrappedValue = LFM3OmniAudioProjector(
-            inputSize: config.audioEncoder.hiddenSize,
-            outputSize: config.visionLanguage.text.hiddenSize)
-        _depthDecoder.wrappedValue = LFM3OmniDepthDecoder(config)
-        _codebookEmbedding.wrappedValue = Embedding(
-            embeddingCount: config.codebooks * config.codebookSize,
-            dimensions: config.visionLanguage.text.hiddenSize)
+        let vision = LFM3VLVision(config.visionLanguage)
+        _vision.wrappedValue = vision.tower
+        _projector.wrappedValue = vision.projector
+        let audio = LFM3OmniAudio(config)
+        _audioEncoder.wrappedValue = audio.encoder
+        _audioProjector.wrappedValue = audio.projector
+        let speech = try LFM3OmniSpeech(config, codecConfiguration: codecConfiguration)
+        _depthDecoder.wrappedValue = speech.decoder
+        _codebookEmbedding.wrappedValue = speech.embedding
+        _codec.wrappedValue = speech.codec
+        onDemandVision = OnDemandComponent(.vision) { LFM3VLVision(config.visionLanguage) }
+        onDemandAudio = OnDemandComponent(.audio) { LFM3OmniAudio(config) }
+        onDemandSpeech = OnDemandComponent(.speech) {
+            try LFM3OmniSpeech(config, codecConfiguration: codecConfiguration)
+        }
+    }
+
+    func speech() throws -> (
+        decoder: LFM3OmniDepthDecoder, embedding: Embedding, codec: LiquidCodec
+    ) {
+        if let depthDecoder, let codebookEmbedding, let codec {
+            return (depthDecoder, codebookEmbedding, codec)
+        }
+        let stack = try onDemandSpeech.load()
+        return (stack.decoder, stack.embedding, stack.codec)
     }
 
     func validate(tokenizer: any Tokenizer) throws {
@@ -67,7 +121,7 @@ final class LFM3Omni: Module, LanguageModel, KVCacheDimensionProvider, LoRAModel
             all((codes .>= 0) .&& (codes .< config.codebookSize)).item(Bool.self)
         else { throw VLMError.processing("Invalid LFM3-Omni speech codebook indices") }
         let offsets = MLXArray(0 ..< config.codebooks) * config.codebookSize
-        return codebookEmbedding(codes + offsets).sum(axis: 1)
+        return try speech().embedding(codes + offsets).sum(axis: 1)
     }
 
     func embeddings(_ input: LMInput, audioOutputCodes: MLXArray? = nil) throws -> MLXArray {
@@ -100,7 +154,11 @@ final class LFM3Omni: Module, LanguageModel, KVCacheDimensionProvider, LoRAModel
         func visualFeatures(pixels: MLXArray?, grid: [THW]?) throws -> MLXArray? {
             guard let pixels else { return nil }
             guard let grid else { throw VLMError.processing("Missing LFM3-Omni media grid") }
-            return try projector(vision(pixels, frames: grid))
+            if let vision, let projector {
+                return try projector(vision(pixels, frames: grid))
+            }
+            let stack = try onDemandVision.load()
+            return try stack.projector(stack.tower(pixels, frames: grid))
         }
         try insert(
             token: config.visionLanguage.imageToken,
@@ -119,7 +177,12 @@ final class LFM3Omni: Module, LanguageModel, KVCacheDimensionProvider, LoRAModel
             guard all(mask.asType(.bool) .== expected).item(Bool.self) else {
                 throw VLMError.processing("LFM3-Omni audio masks must describe right padding")
             }
-            audio = try audioProjector(audioEncoder(prepared.features, lengths: lengths))
+            if let audioEncoder, let audioProjector {
+                audio = try audioProjector(audioEncoder(prepared.features, lengths: lengths))
+            } else {
+                let stack = try onDemandAudio.load()
+                audio = try stack.projector(stack.encoder(prepared.features, lengths: lengths))
+            }
         }
         try insert(token: config.audioToken, features: audio)
         try insert(
@@ -171,32 +234,97 @@ final class LFM3Omni: Module, LanguageModel, KVCacheDimensionProvider, LoRAModel
         return .logits(.init(logits: textLogits(hidden)[0..., (-1)..., 0...]))
     }
 
+    private static func checkpointName(_ original: String) -> String {
+        var key = original.hasPrefix("model.") ? String(original.dropFirst(6)) : original
+        if key.hasPrefix("language_model."), key != "language_model.model",
+            key != "language_model.lm_head", !key.hasPrefix("language_model.model."),
+            !key.hasPrefix("language_model.lm_head.")
+        {
+            key = "language_model.model." + key.dropFirst("language_model.".count)
+        } else if key == "lm_head" || key.hasPrefix("lm_head.") {
+            key = "language_model." + key
+        } else if LiquidCodec.checkpointNamespaces.contains(where: {
+            key == $0 || key.hasPrefix($0 + ".")
+        }) {
+            key = "audio_tokenizer." + key
+        }
+        return key
+    }
+
+    func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        let rawCodec = checkpoint.weights.keys.contains(where: Self.isRawCodecWeight)
+        var checkpoint = try checkpoint.mapNames(Self.checkpointName)
+        checkpoint.weights = try sanitize(weights: checkpoint.weights, rawCodec: rawCodec)
+        return checkpoint
+    }
+
+    private static func isRawCodecWeight(_ name: String) -> Bool {
+        let name = name.hasPrefix("model.") ? String(name.dropFirst(6)) : name
+        return LiquidCodec.checkpointNamespaces.contains { name.hasPrefix($0 + ".") }
+    }
+
     func sanitize(weights: [String: MLXArray]) throws -> [String: MLXArray] {
+        try sanitize(
+            weights: weights, rawCodec: weights.keys.contains(where: Self.isRawCodecWeight))
+    }
+
+    private func sanitize(weights: [String: MLXArray], rawCodec: Bool) throws -> [String: MLXArray]
+    {
         var result = [String: MLXArray]()
+        var audioWeights = [String: MLXArray]()
+        var codecWeights = [String: MLXArray]()
         for (original, value) in weights {
-            var key = original.hasPrefix("model.") ? String(original.dropFirst(6)) : original
-            if key.hasPrefix("language_model."), !key.hasPrefix("language_model.model."),
-                !key.hasPrefix("language_model.lm_head.")
-            {
-                key = "language_model.model." + key.dropFirst("language_model.".count)
-            } else if key.hasPrefix("lm_head.") {
-                key = "language_model." + key
-            }
+            let key = Self.checkpointName(original)
             guard result[key] == nil else {
                 throw VLMError.processing("Duplicate normalized LFM3-Omni weight: \(key)")
             }
+            result[key] = value
             if key.hasPrefix("audio_encoder.") {
-                let local = String(key.dropFirst("audio_encoder.".count))
-                result[key] = audioEncoder.sanitize(weights: [local: value])[local]
+                audioWeights[String(key.dropFirst("audio_encoder.".count))] = value
+            } else if key.hasPrefix("audio_tokenizer.") {
+                codecWeights[String(key.dropFirst("audio_tokenizer.".count))] =
+                    value.dtype.isFloatingPoint ? value.asType(.float32) : value
             } else if key.hasSuffix("conv.conv.weight"), value.ndim == 3, value.dim(1) == 1 {
                 result[key] = value.transposed(0, 2, 1)
             } else if key.hasSuffix("spatial_conv.weight"), value.ndim == 4, value.dim(1) == 1 {
                 result[key] = value.transposed(0, 2, 3, 1)
-            } else {
-                result[key] = value
             }
+        }
+        if !audioWeights.isEmpty {
+            let encoder = audioEncoder ?? LFM3OmniAudioEncoder(config.audioEncoder)
+            for (key, value) in encoder.sanitize(weights: audioWeights) {
+                result["audio_encoder." + key] = value
+            }
+        }
+        let preparedCodec = rawCodec ? LiquidCodec.sanitizeWeights(codecWeights) : codecWeights
+        for (key, value) in preparedCodec {
+            result["audio_tokenizer." + key] = value
         }
         return filterLMHeadWeights(
             from: result, tiedWordEmbeddings: config.visionLanguage.text.tieWordEmbeddings)
     }
+
+}
+
+extension LFM3Omni: ModelComponentsProviding, AdditionalWeightFilesProviding {
+    var modelComponents: [ModelComponent: [CheckpointComponent]] {
+        [
+            .vision: .modules("vision_tower", "multi_modal_projector"),
+            .audio: .modules("audio_encoder", "audio_projector"),
+            .speech: .modules("depth_decoder", "codebook_embedding") + [
+                CheckpointComponent(
+                    name: "audio_tokenizer",
+                    namespaces: ["audio_tokenizer", "model.audio_tokenizer"]
+                        + LiquidCodec.checkpointNamespaces
+                        + LiquidCodec.checkpointNamespaces.map { "model." + $0 },
+                    destination: "audio_tokenizer")
+            ],
+        ]
+    }
+
+    var onDemandComponents: [AnyOnDemandComponent] {
+        [onDemandVision, onDemandAudio, onDemandSpeech]
+    }
+
+    var additionalWeightFiles: [String] { ["audio_tokenizer/model.safetensors"] }
 }

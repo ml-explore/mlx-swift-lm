@@ -431,43 +431,22 @@ package struct LFM3AttentionMasks {
 /// from the caches, so a sequence can be fed in chunks of token ids or embeddings.
 public class LFM3ModelInner: Module {
     let args: LFM3Configuration
-    let firstFullAttentionIdx: Int?
-    let firstSlidingAttentionIdx: Int?
-
     package let layers: [LFM3DecoderLayer]
-
-    @ModuleInfo(key: "embed_tokens") private var tokenEmbedding: Embedding?
-    package var embedTokens: Embedding {
-        guard let tokenEmbedding else {
-            preconditionFailure("This LFM3 backbone accepts only embeddings")
-        }
-        return tokenEmbedding
-    }
+    @ModuleInfo(key: "embed_tokens") package var embedTokens: Embedding
     @ModuleInfo(key: "embedding_norm") var embeddingNorm: RMSNorm
-
     package var hiddenSize: Int { args.hiddenSize }
 
-    package init(_ args: LFM3Configuration, includeTokenEmbedding: Bool = true) {
+    package init(_ args: LFM3Configuration) {
         self.args = args
-        self.firstFullAttentionIdx = args.layerTypes.firstIndex(of: .fullAttention)
-        self.firstSlidingAttentionIdx = args.layerTypes.firstIndex(of: .slidingAttention)
-
-        if includeTokenEmbedding {
-            _tokenEmbedding.wrappedValue = Embedding(
-                embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
-        }
-
-        self.layers = (0 ..< args.hiddenLayers).map { i in
-            LFM3DecoderLayer(args, layerIdx: i)
-        }
-
-        _embeddingNorm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.normEps)
+        let backbone = LFM3EmbeddingModelInner(args)
+        layers = backbone.layers
+        _embeddingNorm.wrappedValue = backbone.embeddingNorm
+        _embedTokens.wrappedValue = Embedding(
+            embeddingCount: args.vocabularySize, dimensions: args.hiddenSize)
     }
 
     /// Token embeddings `[B, L, hidden]` for token ids `[B, L]`.
-    package func embed(_ inputs: MLXArray) -> MLXArray {
-        embedTokens(inputs)
-    }
+    package func embed(_ inputs: MLXArray) -> MLXArray { embedTokens(inputs) }
 
     /// Final normed hidden states `[B, L, hidden]` for token ids `[B, L]`.
     package func callAsFunction(
@@ -480,34 +459,8 @@ public class LFM3ModelInner: Module {
     package func callAsFunction(
         embeddings: MLXArray, cache: [KVCache]? = nil, masks: LFM3AttentionMasks = .init()
     ) -> MLXArray {
-        precondition(
-            cache == nil || cache?.count == layers.count, "LFM3 requires one cache per layer")
-        precondition(
-            embeddings.ndim == 3 && embeddings.dim(-1) == hiddenSize && embeddings.dim(1) > 0,
-            "LFM3 expects nonempty embeddings shaped [batch, sequence, hidden_size]")
-        var h = embeddings
-        let n = h.dim(1)
-
-        let fullMask =
-            masks.fullAttention
-            ?? firstFullAttentionIdx.map { makeAttentionMask(n: n, cache: cache?[$0]) }
-        let slidingMask =
-            masks.slidingAttention
-            ?? firstSlidingAttentionIdx.map {
-                makeAttentionMask(n: n, cache: cache?[$0], windowSize: args.slidingWindow)
-            }
-
-        for (i, layer) in layers.enumerated() {
-            let mask: MLXFast.ScaledDotProductAttentionMaskMode =
-                switch layer.layerType {
-                case .fullAttention: fullMask!
-                case .slidingAttention: slidingMask!
-                case .conv: .none
-                }
-            h = layer(h, mask: mask, cache: cache?[i])
-        }
-
-        return embeddingNorm(h)
+        lfm3HiddenStates(
+            embeddings, args: args, layers: layers, norm: embeddingNorm, cache: cache, masks: masks)
     }
 
     /// Vocabulary logits for final hidden states, through `lmHead` when the checkpoint has
@@ -519,16 +472,82 @@ public class LFM3ModelInner: Module {
     /// One cache per layer: a conv state for conv layers, a rotating cache bounded by the
     /// sliding window for sliding attention, and a full or `maxKVSize` cache otherwise.
     package func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
-        try args.layerTypes.map { layerType in
-            switch layerType {
-            case .conv:
-                MambaCache()
-            case .fullAttention, .slidingAttention:
-                try makeHybridAttentionKVCache(
-                    parameters: parameters,
-                    slidingWindow: args.slidingWindow,
-                    usesSlidingWindow: layerType == .slidingAttention)
+        try lfm3Cache(args, parameters: parameters)
+    }
+}
+
+/// An embedding-only backbone for speech modules. It has no token or vocabulary projection API.
+package final class LFM3EmbeddingModelInner: Module {
+    let args: LFM3Configuration
+    package let layers: [LFM3DecoderLayer]
+    @ModuleInfo(key: "embedding_norm") var embeddingNorm: RMSNorm
+
+    package init(_ args: LFM3Configuration) {
+        self.args = args
+        layers = (0 ..< args.hiddenLayers).map { LFM3DecoderLayer(args, layerIdx: $0) }
+        _embeddingNorm.wrappedValue = RMSNorm(dimensions: args.hiddenSize, eps: args.normEps)
+    }
+
+    package func callAsFunction(
+        embeddings: MLXArray, cache: [KVCache]? = nil, masks: LFM3AttentionMasks = .init()
+    ) -> MLXArray {
+        lfm3HiddenStates(
+            embeddings, args: args, layers: layers, norm: embeddingNorm, cache: cache, masks: masks)
+    }
+
+    package func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        try lfm3Cache(args, parameters: parameters)
+    }
+}
+
+private func lfm3HiddenStates(
+    _ embeddings: MLXArray, args: LFM3Configuration, layers: [LFM3DecoderLayer],
+    norm: RMSNorm, cache: [KVCache]?, masks: LFM3AttentionMasks
+) -> MLXArray {
+    precondition(
+        cache == nil || cache?.count == layers.count, "LFM3 requires one cache per layer")
+    precondition(
+        embeddings.ndim == 3 && embeddings.dim(-1) == args.hiddenSize && embeddings.dim(1) > 0,
+        "LFM3 expects nonempty embeddings shaped [batch, sequence, hidden_size]")
+    var h = embeddings
+    let n = h.dim(1)
+
+    let fullMask =
+        masks.fullAttention
+        ?? args.layerTypes.firstIndex(of: .fullAttention).map {
+            makeAttentionMask(n: n, cache: cache?[$0])
+        }
+    let slidingMask =
+        masks.slidingAttention
+        ?? args.layerTypes.firstIndex(of: .slidingAttention).map {
+            makeAttentionMask(n: n, cache: cache?[$0], windowSize: args.slidingWindow)
+        }
+
+    for (i, layer) in layers.enumerated() {
+        let mask: MLXFast.ScaledDotProductAttentionMaskMode =
+            switch layer.layerType {
+            case .fullAttention: fullMask!
+            case .slidingAttention: slidingMask!
+            case .conv: .none
             }
+        h = layer(h, mask: mask, cache: cache?[i])
+    }
+
+    return norm(h)
+}
+
+private func lfm3Cache(_ args: LFM3Configuration, parameters: GenerateParameters?) throws
+    -> [KVCache]
+{
+    try args.layerTypes.map { layerType in
+        switch layerType {
+        case .conv:
+            MambaCache()
+        case .fullAttention, .slidingAttention:
+            try makeHybridAttentionKVCache(
+                parameters: parameters,
+                slidingWindow: args.slidingWindow,
+                usesSlidingWindow: layerType == .slidingAttention)
         }
     }
 }

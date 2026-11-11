@@ -33,29 +33,19 @@ public final class LFM3OmniSession: Sendable {
     }
     private let state: SerialAccessContainer<State>
 
-    /// Takes ownership of the context and loads the bundled `audio_tokenizer` weights.
-    public init(context: consuming ModelContext, codecDirectory: URL? = nil) throws {
+    /// Takes ownership of the context and loads its speech component, including LiquidCodec.
+    public init(context: consuming ModelContext) throws {
         guard let model = context.model as? LFM3Omni else {
             throw VLMError.processing("LFM3OmniSession requires an LFM3-Omni model")
         }
-        let directory =
-            try codecDirectory
-            ?? context.configuration.modelDirectory.appending(path: "audio_tokenizer")
-        let config = try JSONDecoder().decode(
-            LiquidCodecConfiguration.self,
-            from: Data(contentsOf: directory.appending(path: "config.json")))
-        try config.validate()
-        guard config.codebooks == model.config.codebooks,
-            config.levels.reduce(1, *) == model.config.audioEndCode,
-            model.config.codebookSize == model.config.audioEndCode + 1
-        else { throw VLMError.processing("LiquidCodec codebooks do not match the Omni model") }
-        let codec = try LiquidCodec(config)
-        // Keep codec arithmetic in float32 across streaming and offline decoding.
-        let weights = codec.sanitize(
-            weights: try loadArrays(url: directory.appending(path: "model.safetensors"))
-                .mapValues { $0.asType(.float32) })
-        try codec.update(parameters: .unflattened(weights), verify: .all)
-        eval(codec)
+        let codec = try model.speech().codec
+        let configurationURL = try context.configuration.modelDirectory
+            .appending(path: "audio_tokenizer/config.json")
+        let configuration = try JSONDecoder().decode(
+            LiquidCodecConfiguration.self, from: Data(contentsOf: configurationURL))
+        guard configuration == codec.config else {
+            throw VLMError.processing("Unsupported LiquidCodec configuration for LFM3-Omni")
+        }
         state = SerialAccessContainer(State(context: context, model: model, codec: codec))
     }
 
