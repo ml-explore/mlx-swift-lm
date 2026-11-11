@@ -9,12 +9,17 @@ import Testing
 @testable import MLXLMCommon
 
 struct ParoQuantCheckpointTests {
-    @Test(arguments: [false, true])
-    func checkpointPreparationPreservesPrecision(prepared: Bool) async throws {
+    @Test(arguments: [false, true], [false, true])
+    func checkpointPreparationPreservesPrecision(prepared: Bool, symlink: Bool) async throws {
         let directory = try makeCheckpoint(prepared: prepared)
         defer { try? FileManager.default.removeItem(at: directory) }
+        let link = directory.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
+        defer { if symlink { try? FileManager.default.removeItem(at: link) } }
+        if symlink {
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: directory)
+        }
         let container = try await loadParoQuantModel(
-            from: directory,
+            from: symlink ? link : directory,
             typeRegistry: ModelTypeRegistry(creators: [
                 "qwen3_5": { _ in CheckpointModel() }
             ]),

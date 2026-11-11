@@ -315,7 +315,7 @@ package func safetensorWeightURLs(
     selection: WeightFileSelection = .automatic,
     additionalFiles: [String] = []
 ) throws -> [URL] {
-    let present = topLevelSafetensorURLs(in: modelDirectory)
+    let present = try topLevelSafetensorURLs(in: modelDirectory)
 
     let selected: [URL]
     switch selection {
@@ -377,14 +377,21 @@ private func conventionalWeightURLs(in present: [URL]) -> [URL] {
     return present
 }
 
-private func topLevelSafetensorURLs(in modelDirectory: URL) -> [URL] {
-    let contents =
-        (try? FileManager.default.contentsOfDirectory(
-            at: modelDirectory, includingPropertiesForKeys: nil)) ?? []
+private func topLevelSafetensorURLs(in modelDirectory: URL) throws -> [URL] {
+    let contents = try contentsOfModelDirectory(modelDirectory)
     return
         contents
         .filter { $0.pathExtension == "safetensors" }
         .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        .map { modelDirectory.appendingPathComponent($0.lastPathComponent) }
+}
+
+func contentsOfModelDirectory(
+    _ directory: URL, includingPropertiesForKeys keys: [URLResourceKey]? = nil,
+    options: FileManager.DirectoryEnumerationOptions = []
+) throws -> [URL] {
+    try FileManager.default.contentsOfDirectory(
+        at: directory.resolvingSymlinksInPath(), includingPropertiesForKeys: keys, options: options)
 }
 
 /// Load model weights.
