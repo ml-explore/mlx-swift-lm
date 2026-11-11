@@ -6,7 +6,7 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
-struct LFM3VisionConfiguration: Decodable {
+struct LFM3VisionConfiguration: Decodable, Sendable {
     let hiddenSize: Int
     let intermediateSize: Int
     let heads: Int
@@ -21,7 +21,7 @@ struct LFM3VisionConfiguration: Decodable {
     let rope: Rope
     let patchDimension: Int
 
-    struct Rope: Decodable {
+    struct Rope: Decodable, Sendable {
         let theta: Float
         let type: String
         enum CodingKeys: String, CodingKey {

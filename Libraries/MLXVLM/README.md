@@ -486,3 +486,12 @@ configuration by id:
 # Using a Model
 
 See [MLXLMCommon/README.md](../MLXLMCommon/README.md#using-a-model).
+
+## LFM3-VL component loading
+
+LFM3-VL loads its vision encoder and projector on first image or video use.
+Set `ModelConfiguration.excludedComponents = [.vision]` for text-only use.
+An image or video request then throws `OnDemandComponentError.unavailable(.vision)`.
+Use `componentLoading: .immediate` to load vision together with the language model,
+including when converting a checkpoint. The model memory report includes the
+vision component after it loads.
