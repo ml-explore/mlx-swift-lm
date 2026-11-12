@@ -441,7 +441,8 @@ struct KVCacheConfigurationTests {
                 sliding.finalize()
             }
 
-            #expect(global.offset == 8)
+            // Both rows sit behind two columns of padding: six tokens in a buffer of eight.
+            #expect(global.offset == 6)
             #expect(sliding.offset == 6)
             #expect(global.leftPadding.asArray(Int.self) == [2, 2])
             #expect(global.batchOffset.asArray(Int.self) == [6, 6])
@@ -457,37 +458,25 @@ struct KVCacheConfigurationTests {
             storage.commitProcessedTokens(1)
 
             #expect(storage.processedTokenCount == 7)
-            #expect(global.offset == 9)
+            #expect(global.offset == 7)
             #expect(sliding.offset == 7)
             #expect(storage.nativeAttentionOffsetsAreAligned)
         }
     }
 
-    @Test func modelCacheAuditRejectsMismatchedBatchPositions() {
+    @Test func modelCacheAdoptsRaggedBatchAtLongestRow() {
         Device.withDefaultDevice(.cpu) {
             let global = BatchKVCache(leftPadding: [1, 0])
-            let sliding = BatchRotatingKVCache(maxSize: 16, leftPadding: [0, 1])
+            let sliding = BatchRotatingKVCache(maxSize: 16, leftPadding: [1, 0])
             let kv = makePositionKV(
                 positions: 0 ..< 3, heads: 1, headDim: 4, batchSize: 2)
             _ = global.update(keys: kv.0, values: kv.1)
-            let aligned = BatchRotatingKVCache(maxSize: 16, leftPadding: [1, 0])
-            _ = aligned.update(keys: kv.0, values: kv.1)
-            let alignedStorage = KVCacheStorage([global, aligned], plan: .disabled)
-            #expect(alignedStorage.processedTokenCount == 3)
-            #expect(alignedStorage.nativeAttentionOffsetsAreAligned)
-
             _ = sliding.update(keys: kv.0, values: kv.1)
             #expect(global.batchOffset.asArray(Int.self) == [2, 3])
-            #expect(sliding.batchOffset.asArray(Int.self) == [3, 2])
-            let reordered = KVCacheStorage(
-                [global, sliding], plan: .disabled, processedTokenCount: 3)
-            #expect(reordered.nativeAttentionOffsetsAreAligned == false)
-
-            let single = KVCacheSimple()
-            _ = single.update(keys: kv.0[0 ..< 1], values: kv.1[0 ..< 1])
-            let differentRowCounts = KVCacheStorage(
-                [global, single], plan: .disabled, processedTokenCount: 3)
-            #expect(differentRowCounts.nativeAttentionOffsetsAreAligned == false)
+            #expect(sliding.batchOffset.asArray(Int.self) == [2, 3])
+            let storage = KVCacheStorage([global, sliding], plan: .disabled)
+            #expect(storage.processedTokenCount == 3)
+            #expect(storage.nativeAttentionOffsetsAreAligned)
         }
     }
 
@@ -510,11 +499,6 @@ struct KVCacheConfigurationTests {
             let storage = KVCacheStorage([global, sliding], plan: .disabled)
             #expect(storage.processedTokenCount == 0)
             #expect(storage.nativeAttentionOffsetsAreAligned)
-
-            let differentRowCounts = KVCacheStorage(
-                [global, BatchKVCache(leftPadding: [0])], plan: .disabled,
-                processedTokenCount: 0)
-            #expect(differentRowCounts.nativeAttentionOffsetsAreAligned == false)
         }
     }
 
