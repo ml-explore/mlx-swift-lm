@@ -15,8 +15,8 @@ import MLX
 /// [0, 0, 0, 7]
 /// [2, 6, 8, 9]
 /// ```
-/// with ``leftPadding`` `[1, 3, 0]`. ``KVCache/offset`` is the longest row's position, 4 here;
-/// padding is never counted.
+/// with ``leftPadding`` `[1, 3, 0]`. ``KVCache/offset`` is the longest row's position, 4 here:
+/// after finalization it counts tokens, not padding.
 ///
 /// Row positions and padding live on the host. The arrays the model reads are
 /// built from them on demand, so a decode step advances positions without a
@@ -49,10 +49,11 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
     /// The buffer position the next token is written to: the width in use, padding included.
     private var idx = 0
 
-    /// The position of the longest row, as ``KVCache/offset`` counts it: tokens, never
-    /// padding, so it is 0 until a row has consumed its padding. A ragged prefill counts
-    /// its right padding until `finalize()` turns it into left padding. Rows keep their
-    /// own positions in ``batchOffset``, so the batch as a whole cannot be moved.
+    /// The position of the longest row, as ``KVCache/offset`` counts it. After
+    /// finalization that is tokens, not padding, so it is 0 until a row has consumed its
+    /// left padding. During a ragged prefill it also counts right padding, until
+    /// `finalize()` turns that into left padding. Rows keep their own positions in
+    /// ``batchOffset``, so the batch as a whole cannot be moved.
     public override var offset: Int {
         get { Int(max(0, positions.max() ?? 0)) }
         set { preconditionFailure("BatchKVCache positions are per row; see batchOffset") }
