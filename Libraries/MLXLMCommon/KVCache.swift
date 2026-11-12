@@ -323,8 +323,21 @@ public func createCausalMask(
     windowSize: Int? = nil,
     lengths: MLXArray? = nil
 ) -> MLXArray {
+    createCausalMask(
+        n: n, offset: offset, windowSize: windowSize, lengths: lengths, leftPadding: nil)
+}
+
+/// ``createCausalMask(n:offset:windowSize:lengths:)`` for a left-padded batch: row `b` also
+/// masks the keys before `leftPadding[b]`.
+func createCausalMask(
+    n: Int,
+    offset: Int,
+    windowSize: Int? = nil,
+    lengths: MLXArray? = nil,
+    leftPadding: MLXArray?
+) -> MLXArray {
     var rinds = MLXArray(Int32(0) ..< Int32(offset + n))
-    var linds = offset != 0 ? MLXArray(Int32(offset) ..< Int32(offset + n)) : rinds
+    var linds = offset != 0 ? rinds[offset...] : rinds
     linds = linds[0..., .newAxis]
     rinds = rinds[.newAxis]
     var mask = linds .>= rinds
@@ -336,6 +349,10 @@ public func createCausalMask(
     if var lengths {
         lengths = lengths[0..., .newAxis, .newAxis, .newAxis]
         mask = mask & (rinds .< lengths)
+    }
+
+    if let leftPadding {
+        mask = mask & (rinds .>= leftPadding[0..., .newAxis, .newAxis, .newAxis])
     }
 
     return mask
@@ -683,6 +700,9 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     package var capacityOrigin = CapacityOrigin.modelNative
 
     package var preservedPrefixTokens: Int { keep }
+
+    /// The number of positions the buffer grows by.
+    package var allocationStep: Int { step }
 
     public override var maxSize: Int? { maxCacheSize }
 
