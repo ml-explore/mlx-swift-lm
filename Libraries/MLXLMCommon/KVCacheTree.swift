@@ -1,7 +1,5 @@
 // Copyright © 2026 Apple Inc.
 
-import MLX
-
 /// A classified leaf in a potentially nested cache topology.
 struct KVCacheLeaf {
     enum Kind {
@@ -35,15 +33,6 @@ struct KVCacheLeaf {
     var isAttentionCache: Bool {
         if case .recurrent = kind { return false }
         return true
-    }
-
-    /// Logical row positions for storage adoption and consistency audits only.
-    /// Reading batched positions may synchronize; decode keeps its own timeline.
-    var logicalPositions: [Int] {
-        if let batch = cache as? any BatchPositionedKVCache {
-            return batch.batchOffset.asArray(Int.self)
-        }
-        return [cache.offset]
     }
 
     var isCompressed: Bool {
