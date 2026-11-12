@@ -27,29 +27,20 @@ extension LLMModel {
     ) throws
         -> PrepareResult
     {
-        let stepSize = prefill.resolvedStepSize()
         let y = input.text
-        let total = y.tokens.size
-
         // A prompt that fits in one chunk is handed to the iterator whole,
         // keeping short prompts bitwise-identical to the pre-chunking path.
         // `.unchunked` (forEachChunk processes nothing) takes the same route
         // at any prompt length.
-        guard total > stepSize else { return .tokens(y) }
+        guard y.tokens.size > prefill.resolvedStepSize() else { return .tokens(y) }
 
         var processed = 0
         try withPreparedCache(cache, lengths: y.sequenceLengths) {
-            // asyncEval lets the CPU build chunk N+1's graph while the GPU evaluates
-            // chunk N. Under .remainder the reserved tail is the legacy leftover
-            // (up to a full step) rather than a single token.
             var state: LMOutput.State? = state
             processed = try prefill.forEachChunk(
-                total: total, reserving: prefill.chunking == .remainder ? stepSize : 1
+                total: y.tokens.size, reserving: prefillReservation(prefill)
             ) { range in
-                let input = y[.newAxis, range]
-                let output = self(input, cache: cache.isEmpty ? nil : cache, state: state)
-                state = output.state
-                asyncEval(cache)
+                state = feedPrefillChunk(y, range: range, cache: cache, state: state)
             }
 
             // Single sync after the loop to flush any remaining async work.
@@ -61,7 +52,65 @@ extension LLMModel {
         return .tokens(y[processed...])
     }
 
+    /// The chunks ``prepare(_:cache:state:prefill:)`` feeds; see ``ResumablePrefillModel``.
+    public func prefillChunks(for prompt: LMInput.Text, prefill: PrefillParameters)
+        -> [Range<Int>]
+    {
+        guard prompt.tokens.size > prefill.resolvedStepSize() else { return [] }
+        return prefill.chunkRanges(
+            total: prompt.tokens.size, reserving: prefillReservation(prefill))
+    }
+
+    /// One chunk of ``prepare(_:cache:state:prefill:)``, for a model whose chunks carry no
+    /// model state; see ``ResumablePrefillModel``.
+    public func prefillChunk(_ prompt: LMInput.Text, range: Range<Int>, cache: [KVCache]) {
+        let state = feedPrefillChunk(prompt, range: range, cache: cache, state: nil)
+        precondition(
+            state?.isEmpty != false,
+            "\(Self.self) returns model state from its prefill chunks, so it cannot resume them")
+    }
+
+    /// Feeds one chunk of the prompt and returns the model state for the next chunk.
+    private func feedPrefillChunk(
+        _ prompt: LMInput.Text, range: Range<Int>, cache: [KVCache], state: LMOutput.State?
+    ) -> LMOutput.State? {
+        let output = self(prompt[.newAxis, range], cache: cache.isEmpty ? nil : cache, state: state)
+        // asyncEval lets the CPU build chunk N+1's graph while the GPU evaluates chunk N.
+        asyncEval(cache)
+        return output.state
+    }
+
+    /// Positions left for the first sampled forward. Under `.remainder` the reserved tail is
+    /// the legacy leftover (up to a full step) rather than a single token.
+    private func prefillReservation(_ prefill: PrefillParameters) -> Int {
+        prefill.chunking == .remainder ? prefill.resolvedStepSize() : 1
+    }
+
     public func messageGenerator(tokenizer: Tokenizer) -> MessageGenerator {
         DefaultMessageGenerator()
     }
 }
+
+// MARK: - Batch decoding and resumable prefill
+
+// These models use the default `LLMModel` prefill and return no model state from their forward
+// pass. `BatchTokenIteratorTests` cover resumable prefill and multi-row decode for each one.
+extension LlamaModel: ResumablePrefillModel, BatchDecodableModel {}
+extension Qwen2Model: ResumablePrefillModel, BatchDecodableModel {}
+extension Qwen3Model: ResumablePrefillModel, BatchDecodableModel {}
+extension Qwen3MoEModel: ResumablePrefillModel, BatchDecodableModel {}
+extension PhiModel: ResumablePrefillModel, BatchDecodableModel {}
+extension Phi3Model: ResumablePrefillModel, BatchDecodableModel {}
+extension GemmaModel: ResumablePrefillModel, BatchDecodableModel {}
+extension Gemma2Model: ResumablePrefillModel, BatchDecodableModel {}
+extension Starcoder2Model: ResumablePrefillModel, BatchDecodableModel {}
+extension CohereModel: ResumablePrefillModel, BatchDecodableModel {}
+extension InternLM2Model: ResumablePrefillModel, BatchDecodableModel {}
+extension GraniteModel: ResumablePrefillModel, BatchDecodableModel {}
+extension GLM4Model: ResumablePrefillModel, BatchDecodableModel {}
+extension SmolLM3Model: ResumablePrefillModel, BatchDecodableModel {}
+extension Olmo2Model: ResumablePrefillModel, BatchDecodableModel {}
+extension MixtralModel: ResumablePrefillModel, BatchDecodableModel {}
+
+// Covered by BatchTokenIteratorTests.mixedLengthRotatingRows.
+extension Gemma3TextModel: BatchDecodableModel {}

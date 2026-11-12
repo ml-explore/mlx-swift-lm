@@ -18,10 +18,24 @@ public struct PrefillParameters: Sendable {
     /// Ceiling on tokens evaluated per prefill forward. `nil` lets each model pick
     /// its own default (512 for the generic path; the Gemma 3 text path uses a
     /// smaller, tuned chunk).
+    ///
+    /// When ``BatchTokenIterator`` prefills a queued prompt in chunks while other
+    /// rows decode, this sets the balance between them. Smaller chunks give the decoding
+    /// rows shorter gaps between tokens but admit the new prompt more slowly, mainly because
+    /// small chunks use the GPU less efficiently. The balance depends on the GPU and the
+    /// model; the default of 512 was chosen on an Apple M5 Max. DecodeBench's `arrival`
+    /// mode (`Benchmarks/DecodeBench`) measures both sides on other hardware.
     public var stepSize: Int?
 
     /// How the prompt is divided into forwards. See ``Chunking``.
     public var chunking: Chunking
+
+    /// Decode steps between prefill chunks while a batch has both active and queued rows.
+    ///
+    /// ``BatchTokenIterator`` uses this for models that support resumable prefill.
+    /// The default is 1, and values below 1 are treated as 1. Higher values give active
+    /// rows more chances to emit tokens between chunks but can delay new rows.
+    public var decodeStepsPerChunk: Int
 
     /// Called after each prefill chunk with `(processedPositions, totalPositions)`.
     ///
@@ -73,11 +87,13 @@ public struct PrefillParameters: Sendable {
     public init(
         stepSize: Int? = nil,
         chunking: Chunking = .balanced,
+        decodeStepsPerChunk: Int = 1,
         progress: (@Sendable (_ processed: Int, _ total: Int) -> Void)? = nil,
         prefix: (@Sendable (_ positions: Int) -> Void)? = nil
     ) {
         self.stepSize = stepSize
         self.chunking = chunking
+        self.decodeStepsPerChunk = decodeStepsPerChunk
         self.progress = progress
         self.prefix = prefix
     }
@@ -144,25 +160,44 @@ public struct PrefillParameters: Sendable {
         maximumStepSize: Int? = nil,
         _ body: (Range<Int>) -> Void
     ) throws -> Int {
+        let ranges = chunkRanges(
+            total: total, reserving: reserving, defaultStepSize: defaultStepSize,
+            maximumStepSize: maximumStepSize)
+        for range in ranges {
+            try Task.checkCancellation()
+            autoreleasepool {
+                body(range)
+                progress?(range.upperBound, total)
+                Memory.clearCache()
+            }
+        }
+        return ranges.last?.upperBound ?? 0
+    }
+
+    /// The chunks ``forEachChunk(total:reserving:defaultStepSize:maximumStepSize:_:)`` feeds,
+    /// in order: consecutive ranges from 0 that leave `reserving` positions for the caller's
+    /// final forward. Empty under ``Chunking/unchunked``.
+    public func chunkRanges(
+        total: Int,
+        reserving: Int = 1,
+        defaultStepSize: Int = PrefillParameters.defaultStepSize,
+        maximumStepSize: Int? = nil
+    ) -> [Range<Int>] {
         guard
             let chunkLength = chunkLength(
                 forChunking: total - reserving,
                 defaultStepSize: defaultStepSize, maximumStepSize: maximumStepSize)
         else {
-            return 0
+            return []
         }
         let slack = min(reserving, 1)
+        var ranges: [Range<Int>] = []
         var processed = 0
         while total - processed > reserving {
-            try Task.checkCancellation()
-            autoreleasepool {
-                let n = min(chunkLength, total - processed - slack)
-                body(processed ..< processed + n)
-                processed += n
-                progress?(processed, total)
-                Memory.clearCache()
-            }
+            let n = min(chunkLength, total - processed - slack)
+            ranges.append(processed ..< processed + n)
+            processed += n
         }
-        return processed
+        return ranges
     }
 }

@@ -323,8 +323,21 @@ public func createCausalMask(
     windowSize: Int? = nil,
     lengths: MLXArray? = nil
 ) -> MLXArray {
+    createCausalMask(
+        n: n, offset: offset, windowSize: windowSize, lengths: lengths, leftPadding: nil)
+}
+
+/// ``createCausalMask(n:offset:windowSize:lengths:)`` for a left-padded batch: row `b` also
+/// masks the keys before `leftPadding[b]`.
+func createCausalMask(
+    n: Int,
+    offset: Int,
+    windowSize: Int? = nil,
+    lengths: MLXArray? = nil,
+    leftPadding: MLXArray?
+) -> MLXArray {
     var rinds = MLXArray(Int32(0) ..< Int32(offset + n))
-    var linds = offset != 0 ? MLXArray(Int32(offset) ..< Int32(offset + n)) : rinds
+    var linds = offset != 0 ? rinds[offset...] : rinds
     linds = linds[0..., .newAxis]
     rinds = rinds[.newAxis]
     var mask = linds .>= rinds
@@ -336,6 +349,10 @@ public func createCausalMask(
     if var lengths {
         lengths = lengths[0..., .newAxis, .newAxis, .newAxis]
         mask = mask & (rinds .< lengths)
+    }
+
+    if let leftPadding {
+        mask = mask & (rinds .>= leftPadding[0..., .newAxis, .newAxis, .newAxis])
     }
 
     return mask
@@ -683,6 +700,9 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     package var capacityOrigin = CapacityOrigin.modelNative
 
     package var preservedPrefixTokens: Int { keep }
+
+    /// The number of positions the buffer grows by.
+    package var allocationStep: Int { step }
 
     public override var maxSize: Int? { maxCacheSize }
 
@@ -1588,13 +1608,20 @@ public class ArraysCache: BaseKVCache {
         state: [MLXArray], metaState: [String]
     ) throws -> any KVCache {
         let cache = ArraysCache(size: 0)
-        cache.restoreFromMetaState(state: state, savedMetaState: metaState)
+        try cache.restoreFromMetaState(state: state, savedMetaState: metaState)
         return cache
     }
 
     fileprivate var cache: [MLXArray?]
     internal var leftPadding: MLXArray?
     internal var lengths: MLXArray?
+    /// The rows an empty cache stands for when no array records them, as after a merge of
+    /// empty rows. mlx-lm and mlx-vlm record them as zero left padding
+    /// (https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1301-L1304);
+    /// here, as in mlx-vlm's `make_mask` (#L1285-L1293), padding takes precedence over
+    /// lengths in ``makeMask(N:)``, so zero padding would hide the lengths of a later ragged
+    /// prefill. Kept in memory only; see ``metaState``.
+    internal var emptyRowCount: Int?
 
     public init(size: Int, leftPadding: [Int]? = nil) {
         self.cache = Array(repeating: nil, count: size)
@@ -1631,10 +1658,12 @@ public class ArraysCache: BaseKVCache {
         new.offset = self.offset
         new.leftPadding = self.leftPadding
         new.lengths = self.lengths
+        new.emptyRowCount = self.emptyRowCount
     }
 
     internal var batchSize: Int {
-        cache.lazy.compactMap { $0?.dim(0) }.first ?? leftPadding?.size ?? lengths?.size ?? 1
+        cache.lazy.compactMap { $0?.dim(0) }.first ?? leftPadding?.size ?? lengths?.size
+            ?? emptyRowCount ?? 1
     }
 
     /// In-place filter to keep just the given indices in the cache
@@ -1644,12 +1673,17 @@ public class ArraysCache: BaseKVCache {
         }
         leftPadding = leftPadding?[batchIndices]
         lengths = lengths?[batchIndices]
+        emptyRowCount = batchIndices.size
     }
 
     /// In-place extend this cache with the other cache
     public func extend(other: ArraysCache) {
         let aBatch = batchSize
         let bBatch = other.batchSize
+        // Record rows even when neither side has arrays or masking metadata yet. A side
+        // without a slot's array gets zeros, as mlx-vlm's `cat` gives it:
+        // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1244-L1261
+        emptyRowCount = aBatch + bBatch
 
         func concatenate(_ a: MLXArray?, _ b: MLXArray?) -> MLXArray? {
             guard let example = a ?? b else {
@@ -1668,6 +1702,11 @@ public class ArraysCache: BaseKVCache {
         }
         leftPadding = concatenate(leftPadding, other.leftPadding)
         lengths = concatenate(lengths, other.lengths)
+        // One position counter for the batch, the longest row's, as `merge` keeps it. A side
+        // with no rows has no position to contribute.
+        if bBatch > 0 {
+            offset = aBatch > 0 ? max(offset, other.offset) : other.offset
+        }
     }
 
     public override func prepare(lengths: [Int]?) {
@@ -1679,6 +1718,7 @@ public class ArraysCache: BaseKVCache {
     }
 
     public override func finalize() {
+        emptyRowCount = batchSize
         lengths = nil
         leftPadding = nil
     }
@@ -1728,6 +1768,10 @@ public class ArraysCache: BaseKVCache {
 
     /// metaState format: [slotCount, presentSlots, leftPadding?, lengths?]
     /// Legacy format (BaseKVCache default): [""]
+    ///
+    /// The row count is not saved: the state arrays, padding or lengths carry it. A batch of
+    /// several rows with none of them (its row count kept in memory only) is refused by
+    /// ``savePromptCache(url:cache:metadata:state:)``.
     public override var metaState: [String] {
         get {
             let leftPaddingState = Self.serializeMetadata(leftPadding)
@@ -1754,16 +1798,23 @@ public class ArraysCache: BaseKVCache {
     }
 
     /// Restore from saved metaState + state arrays. Handles both new (slot-aware) and legacy formats.
-    internal func restoreFromMetaState(state: [MLXArray], savedMetaState: [String]) {
+    internal func restoreFromMetaState(state: [MLXArray], savedMetaState: [String]) throws {
+        // No format has more than four fields.
+        guard savedMetaState.count <= 4 else {
+            throw KVCacheError(message: "Unrecognized recurrent cache metadata")
+        }
         // Detect new format: first element parses as int (slotCount), second element is present slots
         if savedMetaState.count >= 2, let slotCount = Int(savedMetaState[0]) {
+            guard slotCount >= 0 else {
+                throw KVCacheError(message: "Corrupt recurrent cache slot count")
+            }
             let presentSlots =
                 savedMetaState[1].isEmpty
                 ? [] : savedMetaState[1].split(separator: ",").compactMap { Int($0) }
 
             self.cache = Array(repeating: nil, count: slotCount)
             for (arrayIdx, slotIdx) in presentSlots.enumerated()
-            where slotIdx < slotCount && arrayIdx < state.count {
+            where slotIdx >= 0 && slotIdx < slotCount && arrayIdx < state.count {
                 self.cache[slotIdx] = state[arrayIdx]
             }
             self.leftPadding = Self.metadataArray(savedMetaState, at: 2)
@@ -1792,7 +1843,7 @@ public class MambaCache: ArraysCache {
         state: [MLXArray], metaState: [String]
     ) throws -> any KVCache {
         let cache = MambaCache()
-        cache.restoreFromMetaState(state: state, savedMetaState: metaState)
+        try cache.restoreFromMetaState(state: state, savedMetaState: metaState)
         return cache
     }
 
@@ -2087,6 +2138,26 @@ public class CacheList: BaseKVCache {
         caches.forEach { $0.finalize() }
     }
 
+    /// The mask of the first descendant with per-row positions, so a batched list excludes
+    /// its rows' left padding; otherwise the default.
+    public override func makeMask(
+        n: Int, windowSize: Int?, returnArray: Bool
+    ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        if let child = positionedDescendant {
+            return child.makeMask(n: n, windowSize: windowSize, returnArray: returnArray)
+        }
+        return super.makeMask(n: n, windowSize: windowSize, returnArray: returnArray)
+    }
+
+    /// The first child, or child of a nested list, with per-row positions.
+    private var positionedDescendant: (any KVCache)? {
+        for child in caches {
+            if child is any BatchPositionedKVCache { return child }
+            if let nested = (child as? CacheList)?.positionedDescendant { return nested }
+        }
+        return nil
+    }
+
     public override var isTrimmable: Bool {
         isTrimmable(after: 0)
     }
@@ -2223,6 +2294,28 @@ public struct PromptCacheSnapshot {
     }
 }
 
+/// Why `cache`, or a recurrent cache inside it, cannot be saved: zero rows, or several rows
+/// that neither state arrays nor padding or lengths record (a merge of empty rows), so a
+/// load would restore one row. `nil` when it can be saved.
+private func unsaveableRecurrentRows(_ cache: KVCache) -> String? {
+    if let arrays = cache as? ArraysCache {
+        if arrays.batchSize == 0 {
+            // It holds arrays no input can continue from.
+            return "A cache filtered to zero rows cannot be saved"
+        }
+        if arrays.batchSize > 1, arrays.state.isEmpty, arrays.leftPadding == nil,
+            arrays.lengths == nil
+        {
+            return "A recurrent batch of several rows cannot be saved before it holds state"
+        }
+        return nil
+    }
+    if let list = cache as? CacheList {
+        return list.children.lazy.compactMap(unsaveableRecurrentRows).first
+    }
+    return nil
+}
+
 /// Save a pre-computed prompt cache to a file.
 ///
 /// - Parameters:
@@ -2239,6 +2332,9 @@ public func savePromptCache(
     let stateArrays = try promptCacheStateArrays(state, userMetadata: metadata)
     guard stateArrays.isEmpty || !cache.isEmpty else {
         throw KVCacheError(message: "Model state requires at least one prompt cache")
+    }
+    if let reason = cache.lazy.compactMap(unsaveableRecurrentRows).first {
+        throw KVCacheError(message: reason)
     }
 
     let cacheClasses = try cache.map {

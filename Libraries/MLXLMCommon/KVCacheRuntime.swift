@@ -97,7 +97,7 @@ public func validateKVCacheCompatibility(
             if case .rotating(let rotating) = leaf.kind {
                 return rotating.rewindCapacity < rewind.maxTokens
             }
-            return false
+            return leaf.cache is BatchRotatingKVCache
         }
         guard incompatibleCount == 0 else {
             throw KVCacheConfigurationError.incompatibleRewindCapacity(
@@ -107,6 +107,11 @@ public func validateKVCacheCompatibility(
 
     if let capacity = configuration.capacity {
         let incompatibleCapacityCount = leaves.count { leaf in
+            if let batch = leaf.cache as? BatchRotatingKVCache {
+                guard batch.capacityOrigin == .requested else { return false }
+                // A batch keeps no prefix, so a requested prefix is not applied to it.
+                return batch.maxSize != capacity.maxTokens || capacity.preservedPrefixTokens != 0
+            }
             switch leaf.kind {
             case .recurrent:
                 return false
@@ -215,7 +220,11 @@ extension KVCacheLeaf {
             case .rotating(let rotating):
                 rotating.capacityOrigin == .requested ? .requested : .modelDefined
             default:
-                cache.maxSize == nil ? .unbounded : .implementationDefined
+                if let batch = cache as? BatchRotatingKVCache {
+                    batch.capacityOrigin == .requested ? .requested : .modelDefined
+                } else {
+                    cache.maxSize == nil ? .unbounded : .implementationDefined
+                }
             }
 
         func status(
@@ -262,11 +271,17 @@ extension KVCacheLeaf {
                 resolvedStrategy: .affine,
                 reason: isBoundaryProtection
                     ? .boundaryProtection : (matches ? nil : .differentStrategy))
-        case .rotating:
+        case .rotating,
+            .unsupported where cache is BatchRotatingKVCache:
             return status(
                 state: requested == .fullPrecision ? .active : .skipped,
                 resolvedStrategy: .fullPrecision,
                 reason: requested == .fullPrecision ? nil : .slidingWindow)
+        case .unsupported where cache is BatchKVCache:
+            return status(
+                state: requested == .fullPrecision ? .active : .skipped,
+                resolvedStrategy: .fullPrecision,
+                reason: requested == .fullPrecision ? nil : .unsupportedShape)
         case .simple where requested == .fullPrecision:
             return status(
                 state: .active,
