@@ -323,7 +323,9 @@ class DeepseekV3MoE: Module, UnaryLayer {
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let (indices, scores) = gate(x)
         var y = switchMLP(x, indices)
-        y = weightedExpertSum(y, scores)
+        // A float32 e_score_correction_bias makes the scores float32. Cast
+        // back so the residual stream keeps the activation dtype.
+        y = weightedExpertSum(y, scores).asType(y.dtype)
 
         if let shared = sharedExperts {
             y = y + shared(x)
