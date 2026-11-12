@@ -1084,6 +1084,41 @@ struct BatchedSlidingWindowParityTests {
             let continuation = MLXArray([4, 5]).reshaped([1, 2])
             let expected = model(continuation, cache: singles[0])
             #expect(maxAbsDifference(model(continuation, cache: batched), expected) < 1e-4)
+
+            // Two prefilled rows join the live one: every layer holds the same rows in
+            // the same order.
+            let joining = try [model.newCache(parameters: nil), model.newCache(parameters: nil)]
+            eval(model(MLXArray(Array(1 ... 5)).reshaped([1, 5]), cache: joining[0]))
+            eval(model(MLXArray([1, 2]).reshaped([1, 2]), cache: joining[1]))
+            let layers = try batched.map { try #require($0 as? any BatchableKVCache) }
+            let added = try layers.indices.map { layer in
+                try mergeRows(joining.map { $0[layer].copy() })
+            }
+            for (layer, other) in zip(layers, added) {
+                try layer.validateExtension(other: other)
+            }
+            for (layer, other) in zip(layers, added) { layer.extend(other: other) }
+            func positions(_ cache: any KVCache) throws -> [Int] {
+                try #require(cache as? any BatchPositionedKVCache).batchOffset.asArray(Int.self)
+            }
+            for cache in batched { #expect(try positions(cache) == [19, 5, 2]) }
+
+            // The longest row leaves: the survivors keep their order and positions on
+            // every layer.
+            layers.forEach { $0.filter(batchIndices: batchRows(1, 2)) }
+            for cache in batched {
+                #expect(try positions(cache) == [5, 2])
+                #expect(cache.offset == 5)
+            }
+            try expectExtractedRowsMatch(batched, joining)
+
+            let output = model(MLXArray([6, 6]).reshaped([2, 1]), cache: batched)
+            for row in 0 ..< 2 {
+                let single = model(MLXArray([6]).reshaped([1, 1]), cache: joining[row])
+                #expect(
+                    maxAbsDifference(output[row ..< row + 1], single) < 1e-4,
+                    "after removal, row \(row)")
+            }
         }
     }
 }
