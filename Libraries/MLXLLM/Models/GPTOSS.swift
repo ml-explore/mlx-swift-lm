@@ -266,7 +266,8 @@ class AttentionBlock: Module {
                 mask: mask,
                 groupSize: qcache.groupSize,
                 bits: qcache.bits,
-                mode: qcache.mode
+                mode: qcache.mode,
+                sinks: sinks
             )
 
             return oProj(vHat.swappedAxes(1, 2).reshaped(B, L, -1))
