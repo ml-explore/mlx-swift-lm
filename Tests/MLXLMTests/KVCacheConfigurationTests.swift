@@ -393,6 +393,18 @@ struct KVCacheConfigurationTests {
         #expect(storage.nativeAttentionOffsetsAreAligned)
     }
 
+    #if !DEBUG
+    @Test func modelCacheAdoptsMinimumOfDivergentAttentionOffsets() {
+        let ahead = KVCacheSimple()
+        ahead.offset = 8
+        let behind = KVCacheSimple()
+        behind.offset = 6
+
+        #expect(KVCacheStorage([ahead, behind], plan: .disabled).processedTokenCount == 6)
+        #expect(KVCacheStorage([behind, ahead], plan: .disabled).processedTokenCount == 6)
+    }
+    #endif
+
     @Test func modelCacheCopyAndTrimPreserveOneTimeline() throws {
         let attention = KVCacheSimple()
         _ = attention.update(
