@@ -214,15 +214,15 @@ extension KVCacheLeaf {
         let layerKind = CacheLayerKind(cache: cache)
         let memoryBytes = cache.innerState().reduce(0) { $0 + $1.nbytes }
         let capacitySource: KVCacheLayerStatus.CapacitySource? =
-            if let batch = cache as? BatchRotatingKVCache {
-                batch.capacityOrigin == .requested ? .requested : .modelDefined
-            } else {
-                switch self.kind {
-                case .recurrent:
-                    nil
-                case .rotating(let rotating):
-                    rotating.capacityOrigin == .requested ? .requested : .modelDefined
-                default:
+            switch self.kind {
+            case .recurrent:
+                nil
+            case .rotating(let rotating):
+                rotating.capacityOrigin == .requested ? .requested : .modelDefined
+            default:
+                if let batch = cache as? BatchRotatingKVCache {
+                    batch.capacityOrigin == .requested ? .requested : .modelDefined
+                } else {
                     cache.maxSize == nil ? .unbounded : .implementationDefined
                 }
             }
