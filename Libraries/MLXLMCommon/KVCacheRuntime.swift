@@ -109,6 +109,7 @@ public func validateKVCacheCompatibility(
         let incompatibleCapacityCount = leaves.count { leaf in
             if let batch = leaf.cache as? BatchRotatingKVCache {
                 guard batch.capacityOrigin == .requested else { return false }
+                // A batch keeps no prefix, so a requested prefix is not applied to it.
                 return batch.maxSize != capacity.maxTokens || capacity.preservedPrefixTokens != 0
             }
             switch leaf.kind {
@@ -270,6 +271,12 @@ extension KVCacheLeaf {
                 resolvedStrategy: .affine,
                 reason: isBoundaryProtection
                     ? .boundaryProtection : (matches ? nil : .differentStrategy))
+        case .rotating,
+            .unsupported where cache is BatchRotatingKVCache:
+            return status(
+                state: requested == .fullPrecision ? .active : .skipped,
+                resolvedStrategy: .fullPrecision,
+                reason: requested == .fullPrecision ? nil : .slidingWindow)
         case .unsupported where cache is BatchKVCache:
             return status(
                 state: requested == .fullPrecision ? .active : .skipped,
@@ -292,13 +299,7 @@ extension KVCacheLeaf {
                 state: compressionPending ? .pending : .skipped,
                 resolvedStrategy: .fullPrecision,
                 reason: compressionPending ? .awaitingCompressionStart : .unsupportedShape)
-        case .rotating, .unsupported:
-            if case .rotatingAttention = layerKind {
-                return status(
-                    state: requested == .fullPrecision ? .active : .skipped,
-                    resolvedStrategy: .fullPrecision,
-                    reason: requested == .fullPrecision ? nil : .slidingWindow)
-            }
+        case .unsupported:
             return status(
                 state: .skipped,
                 resolvedStrategy: nil,
