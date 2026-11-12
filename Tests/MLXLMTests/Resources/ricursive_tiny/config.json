@@ -1,0 +1,27 @@
+{
+  "model_type": "ricursive",
+  "vocab_size": 64,
+  "hidden_size": 32,
+  "intermediate_size": 64,
+  "num_hidden_layers": 5,
+  "num_attention_heads": 4,
+  "num_key_value_heads": 2,
+  "head_dim": 16,
+  "rms_norm_eps": 1e-06,
+  "rope_theta": 10000.0,
+  "sliding_window": 8,
+  "layer_types": [
+    "sliding_attention",
+    "sliding_attention",
+    "sliding_attention",
+    "sliding_attention",
+    "full_attention"
+  ],
+  "use_gated_attention": true,
+  "gate_full_precision": true,
+  "use_valres": true,
+  "ffn_clamp_threshold": 2.0,
+  "embed_scale": 5.656854249492381,
+  "hidden_act": "silu",
+  "tie_word_embeddings": false
+}
