@@ -18,7 +18,10 @@ import MLXNN
 private func getLlama4AttentionScale(
     start: Int, stop: Int, beta: Float, maxPositionEmbeddings: Int
 ) -> MLXArray {
-    let positions = MLXArray(Int32(start) ..< Int32(stop))
+    var positions = MLXArray(Int32(start) ..< Int32(stop))
+    if start < 0 {
+        positions = MLX.maximum(positions, MLXArray(Int32(0)))
+    }
     let scaling =
         1 + beta
         * MLX.log(
@@ -224,13 +227,6 @@ public class Mistral3TextModelInner: Module {
             h = embedTokens(inputs)
         }
 
-        let offset: Int
-        if let cache {
-            offset = cache[0].offset
-        } else {
-            offset = 0
-        }
-
         // Create full attention mask
         let faMask = createAttentionMask(h: h, cache: cache?[faIdx])
 
@@ -249,12 +245,20 @@ public class Mistral3TextModelInner: Module {
             let llama4ScalingBeta = ropeParams["llama_4_scaling_beta"]?.asFloat(),
             let originalMaxPosEmbed = ropeParams["original_max_position_embeddings"]?.asInt()
         {
-            attnScale = getLlama4AttentionScale(
-                start: offset,
-                stop: offset + inputs.dim(1),
-                beta: llama4ScalingBeta,
-                maxPositionEmbeddings: originalMaxPosEmbed
-            ).asType(h.dtype)
+            switch cache?.first?.ropeOffset ?? .scalar(0) {
+            case .scalar(let offset):
+                attnScale = getLlama4AttentionScale(
+                    start: offset,
+                    stop: offset + inputs.dim(1),
+                    beta: llama4ScalingBeta,
+                    maxPositionEmbeddings: originalMaxPosEmbed
+                ).asType(h.dtype)
+            case .batch(let offsets):
+                attnScale = batchedLlama4AttentionScale(
+                    offsets: offsets, length: inputs.dim(1), beta: llama4ScalingBeta,
+                    maxPositionEmbeddings: originalMaxPosEmbed
+                ).asType(h.dtype)
+            }
         } else {
             attnScale = MLXArray.ones([inputs.dim(1), 1]).asType(h.dtype)
         }
