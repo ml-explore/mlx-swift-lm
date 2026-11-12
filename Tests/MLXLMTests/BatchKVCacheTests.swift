@@ -804,8 +804,14 @@ struct BatchedDecodeParityTests {
                     values: concatenated(rows.map { MLX.padded($0[1], widths: widths) }))
                 return cache
             }
-            #expect(batch[0].offset == 8)
+            // `offset` counts the rows' six tokens, not the eight buffer positions, so cache
+            // storage adopts the batch at the position a single-row cache would report.
+            #expect(batch[0].offset == 6)
+            #expect(try #require(batch[0].state.first).dim(2) == 8)
             #expect(batch[0].batchOffset.asArray(Int32.self) == [6, 6])
+            let storage = KVCacheStorage(batch, plan: .disabled)
+            #expect(storage.processedTokenCount == 6)
+            #expect(storage.nativeAttentionOffsetsAreAligned)
             guard case .scalar(let position) = batch[0].ropeOffset else {
                 Issue.record("rows at one position must use the scalar offset")
                 return

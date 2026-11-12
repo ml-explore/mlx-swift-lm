@@ -15,7 +15,8 @@ import MLX
 /// [0, 0, 0, 7]
 /// [2, 6, 8, 9]
 /// ```
-/// with ``leftPadding`` `[1, 3, 0]`. ``KVCache/offset`` is the width of the buffer in use.
+/// with ``leftPadding`` `[1, 3, 0]`. ``KVCache/offset`` is the longest row's position, 4 here;
+/// padding is never counted.
 ///
 /// Row positions and padding live on the host. The arrays the model reads are
 /// built from them on demand, so a decode step advances positions without a
@@ -44,6 +45,18 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
 
     var keys: MLXArray?
     var values: MLXArray?
+
+    /// The buffer position the next token is written to: the width in use, padding included.
+    private var idx = 0
+
+    /// The position of the longest row, as ``KVCache/offset`` counts it: tokens, never
+    /// padding, so it is 0 until a row has consumed its padding. A ragged prefill counts
+    /// its right padding until `finalize()` turns it into left padding. Rows keep their
+    /// own positions in ``batchOffset``, so the batch as a whole cannot be moved.
+    public override var offset: Int {
+        get { Int(max(0, positions.max() ?? 0)) }
+        set { preconditionFailure("BatchKVCache positions are per row; see batchOffset") }
+    }
 
     /// The right padding of a ragged prefill, from `prepare` until `finalize`.
     private var rightPadding: MLXArray?
@@ -98,7 +111,7 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
     }
 
     public override func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
-        let previous = offset
+        let previous = idx
         if self.keys == nil || previous + keys.dim(2) > self.keys!.dim(2) {
             let length = (step + keys.dim(2) - 1) / step * step
             let newKeys = MLXArray.zeros(
@@ -119,18 +132,18 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
         }
 
         let n = Int32(keys.dim(2))
-        offset += keys.dim(2)
+        idx += keys.dim(2)
         setPositions(positions.map { $0 + n })
-        self.keys![.ellipsis, previous ..< offset, 0...] = keys
-        self.values![.ellipsis, previous ..< offset, 0...] = values
-        return (self.keys![.ellipsis, ..<offset, 0...], self.values![.ellipsis, ..<offset, 0...])
+        self.keys![.ellipsis, previous ..< idx, 0...] = keys
+        self.values![.ellipsis, previous ..< idx, 0...] = values
+        return (self.keys![.ellipsis, ..<idx, 0...], self.values![.ellipsis, ..<idx, 0...])
     }
 
     public override var state: [MLXArray] {
         get {
             guard let keys, let values else { return [batchOffset, leftPadding] }
             return [
-                keys[.ellipsis, ..<offset, 0...], values[.ellipsis, ..<offset, 0...],
+                keys[.ellipsis, ..<idx, 0...], values[.ellipsis, ..<idx, 0...],
                 batchOffset, leftPadding,
             ]
         }
@@ -139,13 +152,13 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
             case 2:
                 keys = nil
                 values = nil
-                offset = 0
+                idx = 0
                 setPositions(newValue[0].asArray(Int32.self))
                 setLeftPadding(newValue[1].asArray(Int32.self))
             case 4:
                 keys = newValue[0]
                 values = newValue[1]
-                offset = newValue[0].dim(2)
+                idx = newValue[0].dim(2)
                 setPositions(newValue[2].asArray(Int32.self))
                 setLeftPadding(newValue[3].asArray(Int32.self))
             default:
@@ -166,13 +179,13 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
     /// No row can lose more tokens than the shortest row holds.
     public override var maxTrimCount: Int {
         let shortest = Int(positions.min() ?? 0)
-        return min(offset, max(0, shortest))
+        return min(idx, max(0, shortest))
     }
 
     @discardableResult
     public override func trim(_ n: Int) -> Int {
         let trimmed = min(maxTrimCount, n)
-        offset -= trimmed
+        idx -= trimmed
         setPositions(positions.map { $0 - Int32(trimmed) })
         return trimmed
     }
@@ -184,12 +197,12 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
     public override func makeMask(
         n: Int, windowSize: Int?, returnArray: Bool
     ) -> MLXFast.ScaledDotProductAttentionMaskMode {
-        if n == 1, !hasLeftPadding, windowSize.map({ $0 >= offset + n }) ?? true {
+        if n == 1, !hasLeftPadding, windowSize.map({ $0 >= idx + n }) ?? true {
             return .none
         }
         return .array(
             createCausalMask(
-                n: n, offset: offset, windowSize: windowSize, leftPadding: leftPadding))
+                n: n, offset: idx, windowSize: windowSize, leftPadding: leftPadding))
     }
 
     /// Prepares a right-padded prefill of rows with the given lengths.
@@ -207,7 +220,7 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
     public override func finalize() {
         guard let rightPadding, let rightPaddingValues else { return }
         // A circular roll of the whole buffer lands each row's tokens at
-        // `padding ..< offset`; what wraps around is masked or unused.
+        // `padding ..< idx`; what wraps around is masked or unused.
         if let keys, let values {
             self.keys = dynamicRoll(keys, shifts: rightPadding[0..., .newAxis], axis: 2)
             self.values = dynamicRoll(values, shifts: rightPadding[0..., .newAxis], axis: 2)
@@ -224,7 +237,7 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
             keys = nil
             values = nil
             setRightPadding(nil)
-            offset = 0
+            idx = 0
             setLeftPadding([])
             setPositions([])
             return
@@ -242,11 +255,11 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
         // holds: a chunked prefill can be filtered before all of its padding is written.
         // mlx-vlm bounds `min_left_pad` by `_idx` the same way:
         // https://github.com/Blaizzy/mlx-vlm/blob/dcea787/mlx_vlm/models/cache.py#L1677
-        let shared = min(padding.min() ?? 0, Int32(offset))
+        let shared = min(padding.min() ?? 0, Int32(idx))
         if shared > 0, keys != nil {
             keys = keys?[.ellipsis, Int(shared)..., 0...]
             values = values?[.ellipsis, Int(shared)..., 0...]
-            offset -= Int(shared)
+            idx -= Int(shared)
             padding = padding.map { $0 - shared }
         }
         setLeftPadding(padding)
@@ -270,16 +283,16 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
             guard row.leftPaddingValues.count == row.batchSize,
                 row.leftPadding.ndim == 1, row.leftPadding.size == row.batchSize,
                 zip(row.positions, row.leftPaddingValues).allSatisfy({
-                    Int($0) + Int($1) == row.offset
+                    Int($0) + Int($1) == row.idx
                 })
             else {
                 throw KVCacheError(message: "BatchKVCache metadata must agree on the row count")
             }
         }
         try validateBatchKVExtension(
-            keys: keys, values: values, batchSize: batchSize, end: offset,
+            keys: keys, values: values, batchSize: batchSize, end: idx,
             otherKeys: other.keys, otherValues: other.values, otherBatchSize: other.batchSize,
-            otherEnd: other.offset)
+            otherEnd: other.idx)
     }
 
     /// Appends the rows of `other`. Port of mlx-lm's `BatchKVCache.extend`: rows without keys
@@ -296,7 +309,7 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
             // New array objects, so writes to either cache leave the other unchanged.
             keys = other.keys?[.ellipsis]
             values = other.values?[.ellipsis]
-            offset = other.offset
+            idx = other.idx
             setLeftPadding(other.leftPaddingValues)
             setPositions(other.positions)
             setRightPadding(other.rightPaddingValues)
@@ -323,19 +336,19 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
         let (ownKeys, ownValues) = arrays(self)
         let (otherKeys, otherValues) = arrays(other)
 
-        let end = max(offset, other.offset)
+        let end = max(idx, other.idx)
         let width = max(ownKeys.dim(2), otherKeys.dim(2))
-        let own = rightJustify(ownKeys, ownValues, end: offset, to: end, width: width)
-        let added = rightJustify(otherKeys, otherValues, end: other.offset, to: end, width: width)
+        let own = rightJustify(ownKeys, ownValues, end: idx, to: end, width: width)
+        let added = rightJustify(otherKeys, otherValues, end: other.idx, to: end, width: width)
         keys = concatenated([own.keys, added.keys])
         values = concatenated([own.values, added.values])
-        let ownShift = Int32(end - offset)
-        let addedShift = Int32(end - other.offset)
+        let ownShift = Int32(end - idx)
+        let addedShift = Int32(end - other.idx)
         setLeftPadding(
             leftPaddingValues.map { $0 + ownShift }
                 + other.leftPaddingValues.map { $0 + addedShift })
         setPositions(positions + other.positions)
-        offset = end
+        idx = end
     }
 
     /// The row at `index` without its left padding, as a ``KVCacheSimple``. A row whose
@@ -350,11 +363,11 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
             "BatchKVCache.extract takes finalized rows; finalize a ragged prefill first")
         let cache = KVCacheSimple()
         let padding = Int(leftPaddingValues[index])
-        if let keys, let values, padding < offset {
-            cache.keys = MLX.contiguous(keys[index ..< index + 1, 0..., padding ..< offset, 0...])
+        if let keys, let values, padding < idx {
+            cache.keys = MLX.contiguous(keys[index ..< index + 1, 0..., padding ..< idx, 0...])
             cache.values = MLX.contiguous(
-                values[index ..< index + 1, 0..., padding ..< offset, 0...])
-            cache.offset = offset - padding
+                values[index ..< index + 1, 0..., padding ..< idx, 0...])
+            cache.offset = idx - padding
         }
         return cache
     }
@@ -401,7 +414,7 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
         }
         self.keys = concatenated(keys)
         self.values = concatenated(values)
-        offset = longest
+        idx = longest
         setPositions(caches.map { Int32($0.offset) })
     }
 
@@ -412,7 +425,7 @@ public final class BatchKVCache: BaseKVCache, BatchPositionedKVCache, BatchableK
         copy.keys = keys?[.ellipsis]
         copy.values = values?[.ellipsis]
         copy.setRightPadding(rightPaddingValues)
-        copy.offset = offset
+        copy.idx = idx
         copy.step = step
         return copy
     }

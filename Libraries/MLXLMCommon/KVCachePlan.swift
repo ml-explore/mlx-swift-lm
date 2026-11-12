@@ -369,27 +369,24 @@ package final class KVCacheStorage {
         return copy
     }
 
-    /// Debug-only consistency audit for logical attention positions. Recurrent
+    /// Debug-only consistency audit for native attention offsets. Recurrent
     /// entries intentionally do not participate in the shared timeline.
     package var nativeAttentionOffsetsAreAligned: Bool {
-        let positions = KVCacheTree.leaves(in: cache)
+        KVCacheTree.leaves(in: cache)
             .filter(\.isAttentionCache)
-            .map(\.logicalPositions)
-        guard let first = positions.first else { return true }
-        return max(0, first.max() ?? 0) == processedTokenCount
-            && positions.allSatisfy { $0 == first }
+            .allSatisfy { $0.cache.offset == processedTokenCount }
     }
 
     /// One-time compatibility inference for caches created outside the shared
     /// container API. Hot generation and reuse paths never scan child caches.
     private static func inferProcessedTokenCount(from cache: [KVCache]) -> Int {
         let leaves = KVCacheTree.leaves(in: cache)
-        let attentionPositions = leaves.filter(\.isAttentionCache).map(\.logicalPositions)
-        if let positions = attentionPositions.first {
+        let attentionOffsets = leaves.filter(\.isAttentionCache).map { $0.cache.offset }
+        if let inferred = attentionOffsets.min() {
             assert(
-                attentionPositions.allSatisfy { $0 == positions },
-                "Attention cache row positions diverged before storage adoption")
-            return attentionPositions.map { max(0, $0.max() ?? 0) }.min() ?? 0
+                attentionOffsets.allSatisfy { $0 == inferred },
+                "Attention cache offsets diverged before storage adoption")
+            return inferred
         }
 
         // Compatibility for recurrent-only caches created by older call sites
