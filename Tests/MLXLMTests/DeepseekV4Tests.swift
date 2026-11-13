@@ -724,8 +724,9 @@ final class DeepseekV4Tests: XCTestCase {
             XCTAssertEqual(try XCTUnwrap(cache.poolMask(queries: 2, offset: 30)).shape, [2, 7])
 
             let copy = try XCTUnwrap(cache.copy() as? DeepseekV4PoolCache)
-            XCTAssertEqual(copy.appendPooled(MLXArray([Float(8)]).reshaped(1, 1, 1))
-                .asArray(Float.self), all + [8])
+            XCTAssertEqual(
+                copy.appendPooled(MLXArray([Float(8)]).reshaped(1, 1, 1))
+                    .asArray(Float.self), all + [8])
             XCTAssertEqual(cache.pooled?.asArray(Float.self), all)
 
             let restored = DeepseekV4PoolCache(ratio: 4)
