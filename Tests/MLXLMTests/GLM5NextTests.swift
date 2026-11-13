@@ -153,6 +153,19 @@ final class GLM5NextTests: XCTestCase {
         XCTAssertEqual(config.linearLowerBound, -5.0)
     }
 
+    /// transformers' configuration names the sparse layers `indexed_attention`,
+    /// and `save_pretrained` writes that name.
+    func testConfigurationAcceptsTransformersLayerTypeName() throws {
+        let json = textConfigJSON().replacingOccurrences(
+            of: "deepseek_sparse_attention", with: "indexed_attention")
+        let config = try JSONDecoder().decode(GLM5NextConfiguration.self, from: Data(json.utf8))
+        try config.validateModelConfiguration()
+        XCTAssertEqual(config.layerTypes, try configuration().layerTypes)
+        let model = GLM5NextTextModel(config)
+        XCTAssertTrue(model.model.layers[3].selfAttn is GLM5NextAttention)
+        XCTAssertTrue(model.model.layers[4].selfAttn is GLM5NextLinearAttention)
+    }
+
     // MARK: - Cache consistency
 
     /// Token-by-token decode reproduces the full-prefill logits. With

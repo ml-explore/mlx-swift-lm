@@ -1286,7 +1286,10 @@ public struct GLM5NextConfiguration: Codable, Sendable {
                 $0 % 4 != 3 ? "linear_attention" : "deepseek_sparse_attention"
             }
         }
-        layerTypes = layerTypes.map { $0 == "full_attention" ? "deepseek_sparse_attention" : $0 }
+        // transformers names the sparse layers `indexed_attention` (and saves that name).
+        layerTypes = layerTypes.map {
+            $0 == "full_attention" || $0 == "indexed_attention" ? "deepseek_sparse_attention" : $0
+        }
 
         if let types = try c.decodeIfPresent([String].self, forKey: .mlpLayerTypes) {
             mlpLayerTypes = types
