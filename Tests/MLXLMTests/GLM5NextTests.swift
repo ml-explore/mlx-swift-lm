@@ -12,7 +12,7 @@ final class GLM5NextTests: XCTestCase {
 
     /// Six layers: three dense KDA, then DSA (own indexer) + MoE, KDA + MoE,
     /// and DSA with a shared indexer + MoE.
-    private func textConfigJSON(indexTopk: Int = 8) -> String {
+    private func textConfigJSON(indexTopk: Int = 8, indexHeads: Int = 2) -> String {
         """
         {
             "model_type": "glm5_next_text", "vocab_size": 64, "hidden_size": 64,
@@ -25,7 +25,7 @@ final class GLM5NextTests: XCTestCase {
             "kv_lora_rank": 32, "q_lora_rank": 32, "qk_rope_head_dim": 0,
             "qk_nope_head_dim": 32, "v_head_dim": 32, "mla_use_nope": true,
             "rms_norm_eps": 1e-5, "tie_word_embeddings": false, "attention_bias": false,
-            "index_topk": \(indexTopk), "index_head_dim": 16, "index_n_heads": 2,
+            "index_topk": \(indexTopk), "index_head_dim": 16, "index_n_heads": \(indexHeads),
             "index_kpool": 4, "index_kpool_always_select_tail": true,
             "layer_types": ["linear_attention", "linear_attention", "linear_attention",
                 "deepseek_sparse_attention", "linear_attention", "deepseek_sparse_attention"],
@@ -40,10 +40,10 @@ final class GLM5NextTests: XCTestCase {
         """
     }
 
-    private func configuration(indexTopk: Int = 8, nested: Bool = false) throws
-        -> GLM5NextConfiguration
+    private func configuration(indexTopk: Int = 8, indexHeads: Int = 2, nested: Bool = false)
+        throws -> GLM5NextConfiguration
     {
-        let text = textConfigJSON(indexTopk: indexTopk)
+        let text = textConfigJSON(indexTopk: indexTopk, indexHeads: indexHeads)
         let json = nested ? #"{"model_type": "glm5_next", "text_config": \#(text)}"# : text
         let config = try JSONDecoder().decode(GLM5NextConfiguration.self, from: Data(json.utf8))
         try config.validateModelConfiguration()
@@ -70,6 +70,16 @@ final class GLM5NextTests: XCTestCase {
         withRandomState(MLXRandom.RandomState(seed: seed)) {
             MLXRandom.randInt(0 ..< 64, [1, count]).asType(.int32)
         }
+    }
+
+    /// Run `body` on the CPU with compilation off. MLX's compile cache matches
+    /// entries on its global default stream, not on `withDefaultDevice`'s
+    /// task-local device, so a function compiled by an earlier GPU test would
+    /// replay its GPU trace here.
+    private func onCPU<R>(_ body: () throws -> R) rethrows -> R {
+        compile(enable: false)
+        defer { compile(enable: true) }
+        return try Device.withDefaultDevice(.cpu) { try body() }
     }
 
     private func maxAbsDifference(_ a: MLXArray, _ b: MLXArray) -> Float {
@@ -168,24 +178,51 @@ final class GLM5NextTests: XCTestCase {
 
     // MARK: - Cache consistency
 
-    /// Token-by-token decode reproduces the full-prefill logits. With
-    /// `index_topk` 8 over 40 tokens the indexer's selection is live.
+    /// Token-by-token decode reproduces the full-prefill logits while the
+    /// indexer keeps a strict subset of the pools. Eight indexer heads and this
+    /// seed keep every top-k boundary clear of ties (with two heads, scores the
+    /// ReLU clamps to exactly 0 often tie at the boundary). It runs on the CPU:
+    /// on an M5 GPU a multi-row float32 matmul differs from the one-row path by
+    /// about 1e-3 relative, enough to flip a close selection.
     func testIncrementalDecodeMatchesPrefill() throws {
-        let model = GLM5NextTextModel(try configuration(indexTopk: 8))
-        randomize(model)
-        let input = tokens(40)
+        try onCPU {
+            let model = GLM5NextTextModel(try configuration(indexTopk: 8, indexHeads: 8))
+            randomize(model)
+            let input = tokens(40)
+            let inner = model.model
 
-        let prefill = model(input, cache: try model.newCache(parameters: nil))
-        eval(prefill)
+            let prefill = model(input, cache: try model.newCache(parameters: nil))
+            eval(prefill)
 
-        let cache = try model.newCache(parameters: nil)
-        var maxDifference: Float = 0
-        for t in 0 ..< 40 {
-            let step = model(input[0..., t ..< (t + 1)], cache: cache)
-            eval(step)
-            maxDifference = max(maxDifference, maxAbsDifference(step[0, 0], prefill[0, t]))
+            // The model's forward, one layer at a time, to read the selection
+            // of the first sparse-attention layer (3) at each step.
+            let cache = try model.newCache(parameters: nil)
+            var maxDifference: Float = 0
+            var strictSubsetSteps = 0
+            for t in 0 ..< 40 {
+                var h = repeated(
+                    expandedDimensions(inner.embedTokens(input[0..., t ..< (t + 1)]), axis: 2),
+                    count: inner.hcMult, axis: 2)
+                var topk: MLXArray?
+                var selection: MLXArray?
+                for (index, layer) in inner.layers.enumerated() {
+                    (h, topk) = layer(h, cache: cache[index], previousTopk: topk)
+                    if index == 3 { selection = topk }
+                }
+                let step = model.lmHead!(inner.norm(h.mean(axis: 2)))
+                eval(step)
+                maxDifference = max(maxDifference, maxAbsDifference(step[0, 0], prefill[0, t]))
+
+                // Selected pool tokens (the first index_topk entries; the open tail follows).
+                if let selection {
+                    let picked = (selection[0, 0, ..<8] .>= 0).sum().item(Int.self)
+                    if picked < (t + 1) / 4 * 4 { strictSubsetSteps += 1 }
+                }
+            }
+            XCTAssertLessThan(maxDifference, 1e-3, "decode diverged from prefill")
+            // Every step with more than two complete pools (t >= 11) drops some.
+            XCTAssertEqual(strictSubsetSteps, (0 ..< 40).filter { ($0 + 1) / 4 > 2 }.count)
         }
-        XCTAssertLessThan(maxDifference, 1e-3, "decode diverged from prefill")
     }
 
     /// Prefill in chunks whose boundaries split pool windows matches one-shot
@@ -563,7 +600,7 @@ final class GLM5NextTests: XCTestCase {
         let model = try await loadTiny()
         let tokens = oracle.prompt + oracle.greedy.dropLast()
 
-        try Device.withDefaultDevice(.cpu) {
+        try onCPU {
             var worst: Float = 0
             for item in oracle.cases {
                 let rows = try teacherForced(model, tokens: tokens, prefillEnds: item.prefillEnds)
