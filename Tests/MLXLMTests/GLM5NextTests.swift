@@ -485,6 +485,110 @@ final class GLM5NextTests: XCTestCase {
         XCTAssertEqual(maxAbsDifference(source(input, cache: nil), target(input, cache: nil)), 0)
     }
 
+    // MARK: - Reference parity
+
+    /// `Resources/glm5_next_tiny`, from `tools/glm5_next_parity/make_tiny_fixture.py`: a
+    /// 5-layer checkpoint saved by transformers' own `glm5_next` model, with that model's
+    /// float32 CPU log-probabilities for several prefill plans, teacher-forced on its greedy
+    /// tokens.
+    private struct TinyOracle: Decodable {
+        struct Case: Decodable {
+            let name: String
+            /// Ends of the prefill chunks; one-token decode steps follow.
+            let prefillEnds: [Int]
+            /// Log-softmax at every position of `prompt + greedy.dropLast()`.
+            let logprobs: [[Float]]
+
+            enum CodingKeys: String, CodingKey {
+                case name, logprobs
+                case prefillEnds = "prefill_ends"
+            }
+        }
+        let tolerance: Float
+        let prompt: [Int]
+        let greedy: [Int]
+        let cases: [Case]
+    }
+
+    private var tinyFixture: URL {
+        get throws {
+            try XCTUnwrap(Bundle.module.url(forResource: "glm5_next_tiny", withExtension: nil))
+        }
+    }
+
+    /// Through the model registry and `loadWeights`, so configuration decoding,
+    /// validation and `sanitize` all run on the checkpoint as transformers saved it.
+    private func loadTiny() async throws -> any LanguageModel {
+        let data = try Data(contentsOf: tinyFixture.appendingPathComponent("config.json"))
+        let base = try JSONDecoder().decode(BaseConfiguration.self, from: data)
+        XCTAssertEqual(base.modelType, "glm5_next")
+        let model = try await LLMTypeRegistry.shared.createModel(
+            configuration: data, modelType: base.modelType)
+        try await loadWeights(
+            modelDirectory: tinyFixture, model: model,
+            perLayerQuantization: base.perLayerQuantization)
+        return model
+    }
+
+    /// Prefill `tokens` in chunks ending at `prefillEnds`, then one token per step;
+    /// returns the float32 log-softmax at every position.
+    private func teacherForced(
+        _ model: any LanguageModel, tokens: [Int], prefillEnds: [Int]
+    ) throws -> [[Float]] {
+        let cache = try model.newCache(parameters: nil)
+        let ends =
+            prefillEnds + Array(stride(from: prefillEnds.last! + 1, through: tokens.count, by: 1))
+        var rows = [[Float]]()
+        var start = 0
+        for end in ends {
+            let chunk = MLXArray(tokens[start ..< end].map(Int32.init)).reshaped(1, end - start)
+            let logits = model(chunk, cache: cache)[0].asType(.float32)
+            let logprobs = logits - logSumExp(logits, axis: -1, keepDims: true)
+            eval(logprobs)
+            for row in 0 ..< (end - start) {
+                rows.append(logprobs[row].asArray(Float.self))
+            }
+            start = end
+        }
+        return rows
+    }
+
+    func testTinyCheckpointMatchesTransformersReference() async throws {
+        let oracle = try JSONDecoder().decode(
+            TinyOracle.self,
+            from: Data(contentsOf: tinyFixture.appendingPathComponent("oracle.json")))
+        XCTAssertEqual(
+            oracle.cases.map(\.name),
+            ["one_call", "chunks_5_13_22_32", "chunks_of_7", "token_by_token"])
+        let model = try await loadTiny()
+        let tokens = oracle.prompt + oracle.greedy.dropLast()
+
+        try Device.withDefaultDevice(.cpu) {
+            var worst: Float = 0
+            for item in oracle.cases {
+                let rows = try teacherForced(model, tokens: tokens, prefillEnds: item.prefillEnds)
+                XCTAssertEqual(rows.count, item.logprobs.count, item.name)
+                var difference: Float = 0
+                for (row, expected) in zip(rows, item.logprobs) {
+                    XCTAssertEqual(row.count, expected.count, item.name)
+                    for (a, b) in zip(row, expected) {
+                        difference = max(difference, abs(a - b))
+                    }
+                }
+                worst = max(worst, difference)
+                print("glm5_next parity \(item.name): max |dlogprob| = \(difference)")
+                XCTAssertLessThanOrEqual(difference, oracle.tolerance, item.name)
+
+                // The fixture's argmax margins exceed its threshold, so greedy agrees exactly.
+                let greedy = rows[(oracle.prompt.count - 1)...].map { row in
+                    row.indices.max { row[$0] < row[$1] }!
+                }
+                XCTAssertEqual(greedy, oracle.greedy, item.name)
+            }
+            print("glm5_next parity max |dlogprob| = \(worst) tolerance = \(oracle.tolerance)")
+        }
+    }
+
     // MARK: - Local checkpoint
 
     /// Greedy parity with a reference run of the Python model (mlx-vlm
