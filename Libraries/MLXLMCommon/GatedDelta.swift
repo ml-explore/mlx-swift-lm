@@ -505,11 +505,13 @@ private final class VectorizedGatedDeltaKernelManager: Sendable {
 /// Kimi Delta Attention.
 ///
 /// - Parameters:
-///   - q, k: `[B, T, Hk, Dk]`, already normalized and scaled
+///   - q: `[B, T, Hk, Dk]`, already normalized and scaled
+///   - k: `[B, T, Hk, Dk]`, already normalized and scaled
 ///   - v: `[B, T, Hv, Dv]`
 ///   - g: `[B, T, Hv, Dk]` multiplicative decay (not log-space)
 ///   - beta: `[B, T, Hv]`
 ///   - state: `[B, Hv, Dv, Dk]`, kept in float32
+///   - useKernel: use the Metal kernel when it is available; `false` forces the op path
 /// - Returns: `(y, state)` with `y: [B, T, Hv, Dv]` in `q.dtype`
 public func gatedDeltaUpdateVectorized(
     q: MLXArray,
