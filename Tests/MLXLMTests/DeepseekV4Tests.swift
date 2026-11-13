@@ -208,7 +208,15 @@ final class DeepseekV4Tests: XCTestCase {
                 XCTAssertEqual(logprobs.map(Self.argmax), item.greedy, label)
                 let difference = Self.maxDifference(logprobs, item.logprobs)
                 worst = max(worst, difference)
-                print("deepseek_v4 parity \(label): max |dlogprob| = \(difference)")
+                let firstOver = logprobs.indices.first {
+                    Self.maxDifference([logprobs[$0]], [item.logprobs[$0]]) > expected.tolerance
+                }
+                let argmaxes = logprobs.map(Self.argmax)
+                let firstToken = argmaxes.indices.first { argmaxes[$0] != item.greedy[$0] }
+                print(
+                    "deepseek_v4 parity \(label): max |dlogprob| = \(difference), first step over "
+                        + "tolerance = \(firstOver.map(String.init) ?? "none"), first differing "
+                        + "greedy token = \(firstToken.map(String.init) ?? "none")")
                 XCTAssertLessThanOrEqual(difference, expected.tolerance, label)
 
                 let picked = try selections(
@@ -359,16 +367,24 @@ final class DeepseekV4Tests: XCTestCase {
             let cache = DeepseekV4PoolCache(ratio: 4)
             let rows = MLXArray(0 ..< 11).asType(.float32).reshaped(1, 11, 1)
             // A 6-token chunk completes one window and buffers two rows.
+            XCTAssertTrue(cache.overlap)
+            // A 6-token chunk completes one window and buffers two rows. It is the first window
+            // of the sequence: nothing precedes it.
             var ready = cache.accumulateWindows(
                 kv: rows[0..., 0 ..< 6], gate: rows[0..., 0 ..< 6])
             XCTAssertEqual(ready.kv.asArray(Float.self), [0, 1, 2, 3])
             XCTAssertEqual(ready.base, 0)
+            XCTAssertNil(ready.previousKV)
+            XCTAssertNil(ready.previousGate)
             XCTAssertEqual(cache.remainder, 2)
-            // A 3-token chunk joins the buffered rows: one window from 4.
+            // A 3-token chunk joins the buffered rows: one window from 4, preceded by the window
+            // the previous call completed.
             ready = cache.accumulateWindows(
                 kv: rows[0..., 6 ..< 9], gate: rows[0..., 6 ..< 9])
             XCTAssertEqual(ready.kv.asArray(Float.self), [4, 5, 6, 7])
             XCTAssertEqual(ready.base, 4)
+            XCTAssertEqual(ready.previousKV?.asArray(Float.self), [0, 1, 2, 3])
+            XCTAssertEqual(ready.previousGate?.asArray(Float.self), [0, 1, 2, 3])
             XCTAssertEqual(cache.remainder, 1)
             _ = cache.appendPooled(MLXArray.zeros([1, 2, 1]))
             // Decode steps complete the next window on its fourth token.
@@ -376,13 +392,40 @@ final class DeepseekV4Tests: XCTestCase {
                 ready = cache.accumulateWindows(
                     kv: rows[0..., t ..< (t + 1)], gate: rows[0..., t ..< (t + 1)])
                 XCTAssertEqual(ready.kv.dim(1), 0)
+                XCTAssertNil(ready.previousKV)
             }
             ready = cache.accumulateWindows(
                 kv: MLXArray([Float(11)]).reshaped(1, 1, 1),
                 gate: MLXArray([Float(11)]).reshaped(1, 1, 1))
             XCTAssertEqual(ready.kv.asArray(Float.self), [8, 9, 10, 11])
             XCTAssertEqual(ready.base, 8)
+            XCTAssertEqual(ready.previousKV?.asArray(Float.self), [4, 5, 6, 7])
+            XCTAssertEqual(ready.previousGate?.asArray(Float.self), [4, 5, 6, 7])
+            XCTAssertEqual(cache.previousKV?.asArray(Float.self), [8, 9, 10, 11])
             XCTAssertEqual(cache.offset, 12)
+
+            // A multi-token call that completes no window appends all its rows to the buffer.
+            let short = DeepseekV4PoolCache(ratio: 4)
+            for (start, end) in [(0, 1), (1, 3)] {
+                let part = short.accumulateWindows(
+                    kv: rows[0..., start ..< end], gate: rows[0..., start ..< end])
+                XCTAssertEqual(part.kv.dim(1), 0)
+            }
+            XCTAssertEqual(short.remainder, 3)
+            let joined = short.accumulateWindows(kv: rows[0..., 3 ..< 6], gate: rows[0..., 3 ..< 6])
+            XCTAssertEqual(joined.kv.asArray(Float.self), [0, 1, 2, 3])
+            XCTAssertEqual(joined.gate.asArray(Float.self), [0, 1, 2, 3])
+            XCTAssertEqual(short.remainder, 2)
+
+            // Ratio-128 pools do not overlap and keep no previous window.
+            let wide = DeepseekV4PoolCache(ratio: 128)
+            XCTAssertFalse(wide.overlap)
+            let wideRows = MLXArray(0 ..< 300).asType(.float32).reshaped(1, 300, 1)
+            let wideReady = wide.accumulateWindows(kv: wideRows, gate: wideRows)
+            XCTAssertEqual(wideReady.kv.dim(1), 256)
+            XCTAssertNil(wideReady.previousKV)
+            XCTAssertNil(wide.previousKV)
+            XCTAssertNil(wide.accumulateWindows(kv: wideRows, gate: wideRows).previousKV)
 
             // Two pooled entries: visible to query t iff index < (t + 1) / 4.
             let mask = try XCTUnwrap(cache.poolMask(queries: 6, offset: 3))
@@ -395,6 +438,133 @@ final class DeepseekV4Tests: XCTestCase {
             XCTAssertEqual(copy.remainder, cache.remainder)
             XCTAssertEqual(copy.pooledCount, 2)
             XCTAssertEqual(copy.offset, 12)
+            XCTAssertEqual(copy.previousKV?.asArray(Float.self), [8, 9, 10, 11])
+            XCTAssertEqual(copy.previousGate?.asArray(Float.self), [8, 9, 10, 11])
+
+            // The state carries the previous window: the restored cache hands it to its next
+            // window, as the original does.
+            XCTAssertEqual(cache.state.count, 5)
+            let restored = DeepseekV4PoolCache(ratio: 4)
+            restored.state = cache.state
+            restored.metaState = cache.metaState
+            XCTAssertEqual(restored.pooledCount, 2)
+            XCTAssertEqual(restored.offset, 12)
+            let next = MLXArray((12 ..< 16).map(Float.init)).reshaped(1, 4, 1)
+            for resumed in [cache, copy, restored] {
+                let window = resumed.accumulateWindows(kv: next, gate: next)
+                XCTAssertEqual(window.kv.asArray(Float.self), [12, 13, 14, 15])
+                XCTAssertEqual(window.base, 12)
+                XCTAssertEqual(window.previousKV?.asArray(Float.self), [8, 9, 10, 11])
+                XCTAssertEqual(window.previousGate?.asArray(Float.self), [8, 9, 10, 11])
+            }
+        }
+    }
+
+    /// One-shot ratio-4 pooling against the reference's `overlap_transform` written out per
+    /// window: entry `w` pools the first half-channels of window `w - 1` (none for `w == 0`) and
+    /// the second half-channels of window `w`, `ape` added to both.
+    func testOverlapCompressionMatchesReferenceWindows() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = try loadTiny(indexBlock: 0, indexKeep: 0, float32: true)
+            for compressor in [
+                try XCTUnwrap(model.layers[1].attn.compressor),
+                try XCTUnwrap(model.layers[1].attn.indexer?.compressor),
+            ] {
+                XCTAssertTrue(compressor.overlap)
+                let (ratio, d) = (compressor.ratio, compressor.headDim)
+                let x = MLXRandom.normal(
+                    [1, 23, model.configuration.hiddenSize], key: MLXRandom.key(5))
+                let pool = compressor(x, cache: DeepseekV4PoolCache(ratio: ratio))
+                XCTAssertEqual(pool.shape, [1, 5, d])
+
+                let kv = compressor.wkv(x)[0]
+                let gate = compressor.wgate(x)[0]
+                var expected = [MLXArray]()
+                for w in 0 ..< 5 {
+                    let current = (w * ratio) ..< ((w + 1) * ratio)
+                    let previousKV: MLXArray
+                    let previousGate: MLXArray
+                    if w == 0 {
+                        previousKV = MLXArray.zeros([ratio, d])
+                        previousGate = MLXArray.full(
+                            [ratio, d], values: MLXArray(-Float.infinity), type: Float.self)
+                    } else {
+                        let before = ((w - 1) * ratio) ..< (w * ratio)
+                        previousKV = kv[before, ..<d]
+                        previousGate = gate[before, ..<d] + compressor.ape[0..., ..<d]
+                    }
+                    let rows = concatenated([previousKV, kv[current, d...]], axis: 0)
+                    let gates = concatenated(
+                        [previousGate, gate[current, d...] + compressor.ape[0..., d...]], axis: 0)
+                    expected.append((rows * softmax(gates, axis: 0, precise: true)).sum(axis: 0))
+                }
+                var reference = compressor.norm(stacked(expected).reshaped(1, 5, d))
+                reference = compressor.rope(expandedDimensions(reference, axis: 1), offset: 0)
+                    .squeezed(axis: 1)
+                let difference = abs(pool - reference).max().item(Float.self)
+                print("deepseek_v4 overlap vs reference windows: max |d| = \(difference)")
+                XCTAssertLessThanOrEqual(difference, 1e-5)
+            }
+        }
+    }
+
+    /// The pools of a ratio-4 layer (attention and indexer) and a ratio-128 layer, and the
+    /// logits of a continuation, do not depend on how the tokens are split into calls: one
+    /// prefill, uneven chunks (not multiples of either ratio), or one token at a time.
+    func testPoolsAndLogitsIndependentOfCallSplit() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = try loadTiny(indexBlock: 0, indexKeep: 0, float32: true)
+            XCTAssertEqual(model.layers.map(\.attn.ratio), [0, 4, 128, 4])
+            let tokens = (0 ..< 300).map { Int32(2 + $0 * 7 % 120) }
+            let continuation: [Int32] = [5, 77, 31, 64]
+            let splits: [(String, [Int])] = [
+                ("one-shot", [300]),
+                ("chunks", [7, 1, 130, 5, 61, 96]),
+                ("token-by-token", Array(repeating: 1, count: 300)),
+            ]
+
+            var runs = [(pools: [MLXArray], logits: [MLXArray])]()
+            for (_, sizes) in splits {
+                XCTAssertEqual(sizes.reduce(0, +), tokens.count)
+                let caches = model.makeCache()
+                var start = 0
+                for n in sizes {
+                    let chunk = MLXArray(Array(tokens[start ..< (start + n)])).reshaped(1, n)
+                    eval(model(chunk, cache: caches))
+                    eval(caches)
+                    start += n
+                }
+                var logits = [MLXArray]()
+                for token in continuation {
+                    let step = model(MLXArray([token]).reshaped(1, 1), cache: caches)[0, -1]
+                    eval(step)
+                    logits.append(step)
+                }
+                let pools = try [(1, 1), (1, 2), (2, 1), (3, 1), (3, 2)].map {
+                    item -> MLXArray in
+                    let (layer, slot) = item
+                    let list = try XCTUnwrap(caches[layer] as? CacheList)
+                    let pool = try XCTUnwrap(list[slot] as? DeepseekV4PoolCache)
+                    return try XCTUnwrap(pool.pooled)
+                }
+                runs.append((pools, logits))
+            }
+
+            // 304 tokens: 76 ratio-4 entries, 2 ratio-128 entries.
+            XCTAssertEqual(runs[0].pools.map { $0.dim(1) }, [76, 76, 2, 76, 76])
+            for (index, (label, _)) in splits.enumerated().dropFirst() {
+                for (a, b) in zip(runs[0].pools, runs[index].pools) {
+                    XCTAssertEqual(a.shape, b.shape, label)
+                    let difference = abs(a - b).max().item(Float.self)
+                    print("deepseek_v4 \(label) pool max |d| = \(difference)")
+                    XCTAssertLessThanOrEqual(difference, 1e-5, "pool, \(label)")
+                }
+                for (a, b) in zip(runs[0].logits, runs[index].logits) {
+                    let difference = abs(a - b).max().item(Float.self)
+                    print("deepseek_v4 \(label) logits max |d| = \(difference)")
+                    XCTAssertLessThanOrEqual(difference, 1e-4, "logits, \(label)")
+                }
+            }
         }
     }
 
