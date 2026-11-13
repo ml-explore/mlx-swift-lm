@@ -518,7 +518,8 @@ final class DeepseekV4Tests: XCTestCase {
                 try XCTUnwrap(model.layers[1].attn.indexer?.compressor),
             ] {
                 XCTAssertTrue(compressor.overlap)
-                XCTAssertEqual(compressor.wkv.weight.dtype, .bfloat16)
+                // Kept in float32 at load; bfloat16 values, so the expectation below is the same.
+                XCTAssertEqual(compressor.wkv.weight.dtype, .float32)
                 let (ratio, d) = (compressor.ratio, compressor.headDim)
                 let cache = DeepseekV4PoolCache(ratio: ratio)
                 let pool = compressor(x, cache: cache)
@@ -587,6 +588,56 @@ final class DeepseekV4Tests: XCTestCase {
                 XCTAssertEqual(difference, 0, "bfloat16 router weights")
             }
             print("deepseek_v4 bf16 router weights vs float32 reference: max |d| = \(routerWorst)")
+        }
+    }
+
+    /// The normal load of the bfloat16 checkpoint keeps the reference's float32 weights (logits
+    /// head, compressor projections, router) in float32 and every other parameter as stored.
+    /// Prefill and decode give exactly what casting those weights at use gives, which is also
+    /// the path after a caller casts them back to bfloat16.
+    func testBFloat16LoadKeepsReferenceFloat32Weights() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = try loadTiny(indexBlock: 0, indexKeep: 0)
+            let parameters = model.parameters().flattened()
+            let kept = parameters.filter { DeepseekV4Weights.isFloat32Weight($0.0) }
+            // 4 routers, 5 compressors (attention and indexer) with wkv and wgate, the head.
+            XCTAssertEqual(kept.count, 15)
+            // Stored as float32 in the checkpoint, as in the reference.
+            let storedFloat32 = ["_hc.", "hc_head.", ".ape", ".attn_sink", ".gate.bias"]
+            for (key, value) in parameters {
+                if DeepseekV4Weights.isFloat32Weight(key) {
+                    XCTAssertEqual(value.dtype, .float32, key)
+                } else if !storedFloat32.contains(where: key.contains) {
+                    XCTAssertNotEqual(value.dtype, .float32, key)
+                }
+            }
+            XCTAssertEqual(model.layers[1].attn.indexer?.weightsProj.weight.dtype, .bfloat16)
+
+            let castAtUse = try loadTiny(indexBlock: 0, indexKeep: 0)
+            let castBack = castAtUse.parameters().flattened().map { key, value in
+                (key, DeepseekV4Weights.isFloat32Weight(key) ? value.asType(.bfloat16) : value)
+            }
+            castAtUse.update(
+                parameters: ModuleParameters.unflattened(
+                    Dictionary(uniqueKeysWithValues: castBack)))
+            eval(castAtUse)
+            XCTAssertEqual(castAtUse.head.weight.dtype, .bfloat16)
+
+            let tokens = MLXArray((0 ..< 300).map { Int32(2 + $0 * 7 % 120) }).reshaped(1, 300)
+            var outputs = [[MLXArray]]()
+            for m in [model, castAtUse] {
+                let cache = m.makeCache()
+                var logits = [m(tokens, cache: cache)[0, -1]]
+                for token in [5, 77, 31] as [Int32] {
+                    logits.append(m(MLXArray([token]).reshaped(1, 1), cache: cache)[0, -1])
+                }
+                eval(logits)
+                outputs.append(logits)
+            }
+            for (a, b) in zip(outputs[0], outputs[1]) {
+                XCTAssertEqual(a.dtype, .float32)
+                XCTAssertEqual(abs(a - b).max().item(Float.self), 0, "float32 vs cast-at-use")
+            }
         }
     }
 

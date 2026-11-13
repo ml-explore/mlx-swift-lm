@@ -1477,6 +1477,8 @@ enum DeepseekV4Weights {
     /// Map MLX checkpoint names to module paths: drop `mtp.*` and layers past
     /// `num_hidden_layers`, stack per-expert weights into `switch_mlp`, group `wo_a`, move the
     /// hyper-connection tensors under `attn_hc`/`ffn_hc`/`hc_head`, and make `tid2eid` int32.
+    /// Dense (unquantized) weights the reference keeps in float32 become float32 here, so the
+    /// forward pass does not cast them each step.
     static func sanitize(
         _ weights: [String: MLXArray], configuration: DeepseekV4Configuration
     ) -> [String: MLXArray] {
@@ -1519,6 +1521,10 @@ enum DeepseekV4Weights {
             if mapped.hasSuffix(".tid2eid") {
                 tensor = tensor.asType(.int32)
             }
+            // A quantized module keeps its weight and casts at use.
+            if isFloat32Weight(mapped), weights["\(key.dropLast(".weight".count)).scales"] == nil {
+                tensor = tensor.asType(.float32)
+            }
             if mapped.contains(".attn.wo_a."), tensor.ndim == 2 {
                 tensor = tensor.reshaped(configuration.oGroups, configuration.oLoraRank, -1)
             }
@@ -1534,5 +1540,13 @@ enum DeepseekV4Weights {
             result[key] = stacked((0 ..< configuration.nRoutedExperts).map { byExpert[$0]! })
         }
         return result
+    }
+
+    /// The reference's float32 weights: the logits head, the compressor projections and the
+    /// router. Their forward passes also cast at use, so a later cast to another dtype only
+    /// brings back the per-step cast.
+    static func isFloat32Weight(_ name: String) -> Bool {
+        name == "head.weight" || name.hasSuffix(".compressor.wkv.weight")
+            || name.hasSuffix(".compressor.wgate.weight") || name.hasSuffix(".ffn.gate.weight")
     }
 }
