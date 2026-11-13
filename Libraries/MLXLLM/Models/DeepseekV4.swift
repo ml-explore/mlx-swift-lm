@@ -63,9 +63,12 @@ public struct DeepseekV4Configuration: Codable, Sendable {
     var indexNHeads: Int
     var indexHeadDim: Int
     var indexTopk: Int
-    /// Hierarchical (HISA) indexer selection: blocks of `indexBlock` pooled entries, of which
-    /// the best `indexKeep` are scored in full. The reference defaults them to 64 and 16; 0
-    /// selects over every entry.
+    /// Opt-in hierarchical (HISA) indexer selection, an mlx-vlm approximation that neither the
+    /// checkpoint configuration nor DeepSeek's reference has: blocks of `indexBlock` pooled
+    /// entries, of which the best `indexKeep` (by their mean entry) are scored in full. Only
+    /// whole blocks are candidates, so the entries of a trailing partial block
+    /// (`poolCount % indexBlock`) are never selected on this path. The default 0 selects the
+    /// exact top-k over every visible entry, as the reference does.
     var indexBlock: Int
     var indexKeep: Int
     var tieWordEmbeddings: Bool
@@ -145,22 +148,22 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         indexNHeads = try c.decodeIfPresent(Int.self, forKey: .indexNHeads) ?? 64
         indexHeadDim = try c.decodeIfPresent(Int.self, forKey: .indexHeadDim) ?? 128
         indexTopk = try c.decodeIfPresent(Int.self, forKey: .indexTopk) ?? 512
-        indexBlock = try c.decodeIfPresent(Int.self, forKey: .indexBlock) ?? 64
-        indexKeep = try c.decodeIfPresent(Int.self, forKey: .indexKeep) ?? 16
+        indexBlock = try c.decodeIfPresent(Int.self, forKey: .indexBlock) ?? 0
+        indexKeep = try c.decodeIfPresent(Int.self, forKey: .indexKeep) ?? 0
         tieWordEmbeddings =
             try c.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
 
         // Checkpoints list one ratio per layer plus the MTP stages; the text model takes the
-        // first `num_hidden_layers`.
-        if let ratios = try c.decodeIfPresent([Int].self, forKey: .compressRatios),
-            !ratios.isEmpty
-        {
-            compressRatios = Array(ratios.prefix(hiddenLayers))
-        } else {
-            let n = hiddenLayers
-            compressRatios =
-                [0] + (0 ..< max(n - 2, 0)).map { $0 % 2 == 1 ? 4 : 128 } + (n >= 2 ? [0] : [])
+        // first `num_hidden_layers`. There is no default layout to fall back on.
+        guard let ratios = try c.decodeIfPresent([Int].self, forKey: .compressRatios) else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.compressRatios,
+                DecodingError.Context(
+                    codingPath: c.codingPath,
+                    debugDescription:
+                        "deepseek_v4: compress_ratios is required (one ratio per layer)"))
         }
+        compressRatios = Array(ratios.prefix(hiddenLayers))
     }
 }
 
@@ -239,15 +242,17 @@ private func deepseekV4LimitedSwiGLU(limit: Float) -> @Sendable (MLXArray, MLXAr
 /// Interleaved RoPE on the last `dims` channels, optional YaRN (no mscale) and an inverse mode.
 /// With `freqScale`, pooled entry `i` of a call at `base` sits at token `base + i * freqScale`.
 /// Not `YarnRoPE`: this rotates the trailing channels (interleaved pairs) and has an inverse mode.
+/// The frequency tables of every rotated head width (`headDims`) are built here, forward and
+/// inverse.
 final class DeepseekV4RoPE {
     let dims: Int
     let freqScale: Int
-    private let freqs: MLXArray
-    private var cache = [Int: MLXArray]()
-    private let lock = NSLock()
+    /// Keyed by head width, negated for the inverse rotation.
+    private let tables: [Int: MLXArray]
 
     init(
-        dims: Int, base: Float, scaling: DeepseekV4Configuration.RopeScaling?, freqScale: Int = 1
+        dims: Int, headDims: [Int], base: Float, scaling: DeepseekV4Configuration.RopeScaling?,
+        freqScale: Int = 1
     ) {
         self.dims = dims
         self.freqScale = freqScale
@@ -272,32 +277,33 @@ final class DeepseekV4RoPE {
             let smooth = 1 - clip(ramp, min: 0, max: 1)
             invFreq = invFreq / factor * (1 - smooth) + invFreq * smooth
         }
-        self.freqs = 1.0 / invFreq
-    }
-
-    private func frequencies(headDim: Int, inverse: Bool) -> MLXArray {
-        let key = inverse ? -headDim : headDim
-        lock.lock()
-        defer { lock.unlock() }
-        if let cached = cache[key] { return cached }
-        var f = freqs
-        if freqScale != 1 { f = f / Float(freqScale) }
-        if inverse { f = -f }
-        let nopePairs = (headDim - dims) / 2
-        if nopePairs > 0 {
-            f = concatenated([MLXArray.full([nopePairs], values: MLXArray(Float.infinity)), f])
+        var freqs = 1.0 / invFreq
+        if freqScale != 1 { freqs = freqs / Float(freqScale) }
+        var tables = [Int: MLXArray]()
+        for headDim in headDims {
+            for inverse in [false, true] {
+                var f = inverse ? -freqs : freqs
+                let nopePairs = (headDim - dims) / 2
+                if nopePairs > 0 {
+                    f = concatenated([
+                        MLXArray.full([nopePairs], values: MLXArray(Float.infinity)), f,
+                    ])
+                }
+                tables[inverse ? -headDim : headDim] = f
+            }
         }
-        cache[key] = f
-        return f
+        self.tables = tables
     }
 
     /// Rotate `[..., T, headDim]` at positions `offset ..< offset + T`.
     func callAsFunction(_ x: MLXArray, offset: Int, inverse: Bool = false) -> MLXArray {
         let headDim = x.dim(-1)
+        guard let freqs = tables[inverse ? -headDim : headDim] else {
+            fatalError("DeepseekV4RoPE has no table for head width \(headDim)")
+        }
         return MLXFast.RoPE(
             x, dimensions: headDim, traditional: true, base: nil, scale: 1,
-            offset: freqScale != 1 ? offset / freqScale : offset,
-            freqs: frequencies(headDim: headDim, inverse: inverse))
+            offset: freqScale != 1 ? offset / freqScale : offset, freqs: freqs)
     }
 }
 
@@ -649,8 +655,12 @@ final class DeepseekV4PoolCache: BaseKVCache {
     var bufferGate: MLXArray?
     private(set) var remainder = 0
 
-    /// `[B, P, D]` compressed entries in token order, or `nil` before the first window.
-    private(set) var pooled: MLXArray?
+    /// `[B, capacity, D]` storage of the compressed entries in token order, grown `step` entries
+    /// at a time like `KVCacheSimple`; the first `pooledCount` are live. `nil` before the first
+    /// window.
+    private var pooledStorage: MLXArray?
+    private(set) var pooledCount = 0
+    var step = 256
 
     init(ratio: Int) {
         precondition(ratio > 0)
@@ -658,10 +668,15 @@ final class DeepseekV4PoolCache: BaseKVCache {
         super.init()
     }
 
-    var pooledCount: Int { pooled?.dim(1) ?? 0 }
+    /// `[B, pooledCount, D]` live entries, or `nil` before the first window.
+    var pooled: MLXArray? {
+        guard let pooledStorage else { return nil }
+        return pooledCount == pooledStorage.dim(1)
+            ? pooledStorage : pooledStorage[0..., ..<pooledCount]
+    }
 
     override func innerState() -> [MLXArray] {
-        [bufferKV, bufferGate, pooled].compactMap { $0 }
+        [bufferKV, bufferGate, pooledStorage].compactMap { $0 }
     }
 
     /// Rows of every window this call completes, `[B, W * ratio, D]` (empty when none), and the
@@ -714,31 +729,43 @@ final class DeepseekV4PoolCache: BaseKVCache {
 
     /// Append `[B, W, D]` new entries and return the whole pool (`[B, 0, D]` while empty).
     func appendPooled(_ entries: MLXArray) -> MLXArray {
-        if entries.dim(1) > 0 {
-            pooled = pooled.map { concatenated([$0, entries], axis: 1) } ?? entries
+        let (B, W, D) = (entries.dim(0), entries.dim(1), entries.dim(2))
+        guard W > 0 else { return pooled ?? entries }
+        let previous = pooledCount
+        if pooledStorage == nil || previous + W > pooledStorage!.dim(1) {
+            let grown = MLXArray.zeros([B, (W + step - 1) / step * step, D], dtype: entries.dtype)
+            if let current = pooledStorage {
+                pooledStorage = concatenated([current[0..., ..<previous], grown], axis: 1)
+            } else {
+                pooledStorage = grown
+            }
         }
-        return pooled ?? entries
+        pooledStorage![0..., previous ..< (previous + W)] = entries
+        pooledCount = previous + W
+        return pooledStorage![0..., ..<pooledCount]
     }
 
     /// `[L, P]` visibility of the pooled entries to the queries at `offset ..< offset + L`:
     /// entry `i` is visible to the query at `t` iff `i < (t + 1) / ratio`. `nil` for one query
     /// or an empty pool.
     func poolMask(queries L: Int, offset: Int) -> MLXArray? {
-        guard let pooled, L > 1 else { return nil }
-        let poolIndex = MLXArray.arange(pooled.dim(1), dtype: .int32)
+        guard pooledCount > 0, L > 1 else { return nil }
+        let poolIndex = MLXArray.arange(pooledCount, dtype: .int32)
         let queryIndex = MLXArray.arange(offset + 1, offset + L + 1, dtype: .int32)
         return poolIndex .< expandedDimensions(queryIndex.floorDivide(Int32(ratio)), axis: 1)
     }
 
+    /// The live arrays only: the pool is trimmed to `pooledCount`.
     override var state: [MLXArray] {
-        get { innerState() }
+        get { [bufferKV, bufferGate, pooled].compactMap { $0 } }
         set {
             guard [0, 2, 3].contains(newValue.count) else {
                 fatalError("DeepseekV4PoolCache state must have 0, 2 or 3 arrays")
             }
             bufferKV = newValue.count >= 2 ? newValue[0] : nil
             bufferGate = newValue.count >= 2 ? newValue[1] : nil
-            pooled = newValue.count == 3 ? newValue[2] : nil
+            pooledStorage = newValue.count == 3 ? newValue[2] : nil
+            pooledCount = pooledStorage?.dim(1) ?? 0
         }
     }
 
@@ -757,7 +784,9 @@ final class DeepseekV4PoolCache: BaseKVCache {
         let new = DeepseekV4PoolCache(ratio: ratio)
         new.bufferKV = bufferKV?[.ellipsis]
         new.bufferGate = bufferGate?[.ellipsis]
-        new.pooled = pooled?[.ellipsis]
+        new.pooledStorage = pooled?[.ellipsis]
+        new.pooledCount = pooledCount
+        new.step = step
         new.remainder = remainder
         new.offset = offset
         return new
@@ -821,7 +850,7 @@ final class DeepseekV4Compressor: Module {
         _ape.wrappedValue = MLXArray.zeros([ratio, outDim], dtype: .float32)
         _norm.wrappedValue = RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
         self.rope = DeepseekV4RoPE(
-            dims: config.qkRopeHeadDim, base: config.compressRopeTheta,
+            dims: config.qkRopeHeadDim, headDims: [headDim], base: config.compressRopeTheta,
             scaling: config.ropeScaling, freqScale: ratio)
         super.init()
     }
@@ -847,8 +876,8 @@ final class DeepseekV4Compressor: Module {
 }
 
 /// Lightning indexer: `sum_h relu(q_h . k) * scale * w_h(x) / sqrt(H)` over the ratio-4 index
-/// pool, then the top `index_topk` entries per query; large enough pools use the two-stage
-/// (HISA) block filter.
+/// pool, then the exact top `index_topk` entries per query. With the opt-in `index_block > 0`,
+/// large enough pools use the two-stage (HISA) block filter instead.
 final class DeepseekV4Indexer: Module {
     let heads: Int
     let headDim: Int
@@ -904,18 +933,35 @@ final class DeepseekV4Indexer: Module {
             return hisaPrefill(q: q, pooled: pooled, weights: weights, k: k, visible: visible)
         }
 
-        var scores = matmul(
-            q.asType(.float32),
-            expandedDimensions(pooled, axis: 1).swappedAxes(-1, -2).asType(.float32))
-        scores = maximum(scores, 0) * scale
-        scores = (scores * expandedDimensions(weights.swappedAxes(-1, -2), axis: -1)).sum(axis: 1)
-        if let poolMask {
-            scores = MLX.where(
-                expandedDimensions(poolMask, axis: 0), scores,
-                MLXArray(-Float.greatestFiniteMagnitude))
+        // Exact top-k as the reference, in query tiles that bound the `[B, H, tile, P]` scores.
+        let keys = expandedDimensions(pooled, axis: 1).swappedAxes(-1, -2).asType(.float32)
+        let q32 = q.asType(.float32)
+        let headWeights = expandedDimensions(weights.swappedAxes(-1, -2), axis: -1)  // [B,H,L,1]
+        let tile = max(
+            1, exactQueryTile ?? Self.exactScoreBudget / max(heads * poolCount * B, 1))
+        var parts = [MLXArray]()
+        for start in stride(from: 0, to: L, by: tile) {
+            let end = min(start + tile, L)
+            var scores = matmul(q32[0..., 0..., start ..< end], keys)
+            scores = maximum(scores, 0) * scale
+            scores = (scores * headWeights[0..., 0..., start ..< end]).sum(axis: 1)
+            if let poolMask {
+                scores = MLX.where(
+                    expandedDimensions(poolMask[start ..< end], axis: 0), scores,
+                    MLXArray(-Float.greatestFiniteMagnitude))
+            }
+            let selected = argPartition(-scores, kth: k - 1, axis: -1)[.ellipsis, ..<k]
+            if tile < L { eval(selected) }
+            parts.append(selected)
         }
-        return argPartition(-scores, kth: k - 1, axis: -1)[.ellipsis, ..<k]
+        return parts.count == 1 ? parts[0] : concatenated(parts, axis: 1)
     }
+
+    /// Float32 elements of one tile's `[B, H, tile, P]` exact scores.
+    private static let exactScoreBudget = 1 << 26
+
+    /// Queries per tile on the exact path; `nil` sizes tiles by `exactScoreBudget`.
+    var exactQueryTile: Int?
 
     /// One query per row, every pooled entry visible. Only whole blocks are candidates.
     private func hisaDecode(q: MLXArray, pooled: MLXArray, weights: MLXArray, k: Int) -> MLXArray {
@@ -1065,10 +1111,13 @@ final class DeepseekV4Attention: Module {
         // queries with the YaRN-scaled compress base.
         self.rope =
             ratio == 0
-            ? DeepseekV4RoPE(dims: config.qkRopeHeadDim, base: config.ropeTheta, scaling: nil)
+            ? DeepseekV4RoPE(
+                dims: config.qkRopeHeadDim, headDims: [headDim], base: config.ropeTheta,
+                scaling: nil)
             : DeepseekV4RoPE(
-                dims: config.qkRopeHeadDim, base: config.compressRopeTheta,
-                scaling: config.ropeScaling)
+                dims: config.qkRopeHeadDim,
+                headDims: ratio == 4 ? [headDim, config.indexHeadDim] : [headDim],
+                base: config.compressRopeTheta, scaling: config.ropeScaling)
         super.init()
     }
 

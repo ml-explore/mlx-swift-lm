@@ -398,6 +398,41 @@ final class DeepseekV4Tests: XCTestCase {
         }
     }
 
+    /// The pool grows `step` entries at a time; every reader sees only the live entries.
+    func testPoolGrowsInStepsAndReadsLiveEntries() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let cache = DeepseekV4PoolCache(ratio: 4)
+            cache.step = 2
+            // One buffered row, so the state carries the window buffers as in a model run.
+            _ = cache.accumulateWindows(
+                kv: MLXArray.zeros([1, 1, 1]), gate: MLXArray.zeros([1, 1, 1]))
+            XCTAssertEqual(cache.appendPooled(MLXArray.zeros([1, 0, 1])).dim(1), 0)
+            XCTAssertNil(cache.pooled)
+            var all = [Float]()
+            for values in [[1], [2, 3], [4], [5, 6, 7]] as [[Float]] {
+                all += values
+                let pool = cache.appendPooled(MLXArray(values).reshaped(1, values.count, 1))
+                XCTAssertEqual(pool.asArray(Float.self), all)
+                XCTAssertEqual(cache.pooledCount, all.count)
+                XCTAssertEqual(cache.pooled?.asArray(Float.self), all)
+                XCTAssertEqual(cache.state.last?.shape, [1, all.count, 1])
+            }
+            XCTAssertEqual(cache.appendPooled(MLXArray.zeros([1, 0, 1])).asArray(Float.self), all)
+            XCTAssertEqual(try XCTUnwrap(cache.poolMask(queries: 2, offset: 30)).shape, [2, 7])
+
+            let copy = try XCTUnwrap(cache.copy() as? DeepseekV4PoolCache)
+            XCTAssertEqual(copy.appendPooled(MLXArray([Float(8)]).reshaped(1, 1, 1))
+                .asArray(Float.self), all + [8])
+            XCTAssertEqual(cache.pooled?.asArray(Float.self), all)
+
+            let restored = DeepseekV4PoolCache(ratio: 4)
+            restored.state = cache.state
+            restored.metaState = cache.metaState
+            XCTAssertEqual(restored.pooledCount, 7)
+            XCTAssertEqual(restored.pooled?.asArray(Float.self), all)
+        }
+    }
+
     func testCheckpointConfigurationTakesOneRatioPerLayer() throws {
         let ratios = [0, 0] + (0 ..< 20).flatMap { _ in [4, 128] } + [4, 0, 0, 0]
         let json = """
@@ -412,9 +447,9 @@ final class DeepseekV4Tests: XCTestCase {
         XCTAssertEqual(config.compressRatios.filter { $0 == 4 }.count, 21)
         XCTAssertEqual(config.compressRatios.filter { $0 == 128 }.count, 20)
         XCTAssertEqual(config.compressRatios.last, 4)
-        // The reference enables HISA by default; the checkpoint sets neither key.
-        XCTAssertEqual(config.indexBlock, 64)
-        XCTAssertEqual(config.indexKeep, 16)
+        // The checkpoint sets neither key: exact top-k, as the reference.
+        XCTAssertEqual(config.indexBlock, 0)
+        XCTAssertEqual(config.indexKeep, 0)
     }
 
     func testRejectsInconsistentConfiguration() throws {
@@ -440,9 +475,48 @@ final class DeepseekV4Tests: XCTestCase {
         XCTAssertThrowsError(
             try configuration { $0["rope_scaling"] = ["type": "linear", "factor": 2] }
                 .validateModelConfiguration())
-        XCTAssertNoThrow(
-            try configuration { $0.removeValue(forKey: "compress_ratios") }
-                .validateModelConfiguration())
+        // There is no default layout: a configuration without compress_ratios does not decode.
+        XCTAssertThrowsError(try configuration { $0.removeValue(forKey: "compress_ratios") }) {
+            guard case DecodingError.keyNotFound(let key, _) = $0 else {
+                return XCTFail("expected keyNotFound, got \($0)")
+            }
+            XCTAssertEqual(key.stringValue, "compress_ratios")
+        }
+    }
+
+    /// The exact indexer path scored in query tiles picks exactly what one untiled pass picks,
+    /// for a first prefill chunk and for a later one.
+    func testExactIndexerTilesMatchUntiled() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = try loadTiny(indexBlock: 0, indexKeep: 0, float32: true)
+            let attn = model.layers[1].attn
+            let indexer = try XCTUnwrap(attn.indexer)
+            let hidden = model.configuration.hiddenSize
+            let x = MLXRandom.normal([1, 50, hidden], key: MLXRandom.key(3))
+            let qResidual = attn.qNorm(attn.wqA(x))
+            let cache = DeepseekV4PoolCache(ratio: 4)
+            for (start, end) in [(0, 41), (41, 50)] {
+                func pick(tile: Int?) throws -> [Int32] {
+                    indexer.exactQueryTile = tile
+                    defer { indexer.exactQueryTile = nil }
+                    let copy = try XCTUnwrap(cache.copy() as? DeepseekV4PoolCache)
+                    let picked = try XCTUnwrap(
+                        indexer(
+                            x[0..., start ..< end], qResidual: qResidual[0..., start ..< end],
+                            rope: attn.rope, cache: copy, offset: start))
+                    XCTAssertEqual(picked.shape, [1, end - start, indexer.topK])
+                    return picked.asArray(Int32.self)
+                }
+                let untiled = try pick(tile: nil)
+                for tile in [1, 3, 8] {
+                    XCTAssertEqual(try pick(tile: tile), untiled, "tile \(tile) from \(start)")
+                }
+                _ = indexer(
+                    x[0..., start ..< end], qResidual: qResidual[0..., start ..< end],
+                    rope: attn.rope, cache: cache, offset: start)
+                eval(cache.innerState())
+            }
+        }
     }
 
     func testSanitizeMapsCheckpointLayout() throws {
