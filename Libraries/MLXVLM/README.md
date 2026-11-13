@@ -86,6 +86,38 @@ Currently supported model types are:
 
 See [llm-tool](../../Tools/llm-tool)
 
+# LFM2-VL
+
+`LFM2VLProcessor` prepares images as transformers' `Lfm2VlProcessor` does. Callers who used
+it before will notice these behaviours:
+
+- `UserInput.Processing.resize` still fits each image in that size first, keeping its aspect
+  ratio, and the processor then lays out the fitted image. `ChatSession` passes 512 × 512 by
+  default. Pass `processing: .init()` to read large images at full size, split into up to 10
+  tiles plus a thumbnail.
+- File images follow their EXIF orientation. Images decode to 8-bit RGB, as transformers'
+  `load_image` does. sRGB and untagged PNG, GIF, WebP, BMP and TIFF files give the same
+  pixels, except 16-bit gray PNGs and transparent GIFs, whose transparent pixels decode as
+  black, as they did before. Images with another RGB color profile, such as Display P3 or
+  Adobe RGB, are still converted to sRGB, while `load_image` reads their stored values. A
+  `CIImage` is read in its color space. JPEG, MPO and Ultra HDR files decode through Core
+  Image, within 4 levels of `load_image`, and HEIC files through ImageIO. CMYK images can
+  differ by more than 100 levels.
+- The processor settings are read as mlx-vlm reads them: `processor_config.json` overrides
+  `preprocessor_config.json`, and a missing `resample` is bicubic. The tiling settings
+  (`do_image_splitting`, `min_tiles`, `max_tiles`, `use_thumbnail`) keep their defaults,
+  because LiquidAI's MLX repos turn tiling off. A value of the wrong type keeps its default. A
+  `resample` other than 2 (bilinear) or 3 (bicubic) fails the load.
+- Each image is wrapped in the image start, tile and end marker tokens. Each `<image>` in a
+  prompt stands for an image, and the processor throws when the counts differ, as
+  transformers does. When there are more `<image>` than images, those in system, assistant and
+  tool messages and in tool specs are read as text, so a reply that contains `<image>` does not
+  break the next turns. transformers raises on those too.
+- A prompt can hold several images of different sizes.
+- A video, a `resize` of 0 × 0, an image that cannot be read, an image too large for one
+  vision-tower view, an `image_mean` or `image_std` that is not 1 or 3 values long, and a
+  tokenizer without the image tokens now throw `VLMError`.
+
 # Adding a Model
 
 If the model follows the typical VLM pattern:
