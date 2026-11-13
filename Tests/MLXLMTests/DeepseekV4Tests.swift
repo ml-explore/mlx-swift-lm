@@ -8,8 +8,9 @@ import XCTest
 
 @testable import MLXLLM
 
-/// DeepSeek-V4 against mlx-vlm 0.7.10 on a 4-layer fixture (`Resources/deepseek_v4_tiny`, from
-/// `tools/deepseek_v4_parity/make_tiny_fixture.py`) covering every V4 path. Comparisons run
+/// DeepSeek-V4 against DeepSeek's reference `inference/model.py` on a 4-layer fixture
+/// (`Resources/deepseek_v4_tiny`, from `tools/deepseek_v4_parity/make_tiny_fixture.py`)
+/// covering every V4 path. Comparisons run
 /// teacher-forced in float32 on the CPU, except the GPU-only fused hyper-connection kernel check.
 final class DeepseekV4Tests: XCTestCase {
 
@@ -208,15 +209,7 @@ final class DeepseekV4Tests: XCTestCase {
                 XCTAssertEqual(logprobs.map(Self.argmax), item.greedy, label)
                 let difference = Self.maxDifference(logprobs, item.logprobs)
                 worst = max(worst, difference)
-                let firstOver = logprobs.indices.first {
-                    Self.maxDifference([logprobs[$0]], [item.logprobs[$0]]) > expected.tolerance
-                }
-                let argmaxes = logprobs.map(Self.argmax)
-                let firstToken = argmaxes.indices.first { argmaxes[$0] != item.greedy[$0] }
-                print(
-                    "deepseek_v4 parity \(label): max |dlogprob| = \(difference), first step over "
-                        + "tolerance = \(firstOver.map(String.init) ?? "none"), first differing "
-                        + "greedy token = \(firstToken.map(String.init) ?? "none")")
+                print("deepseek_v4 parity \(label): max |dlogprob| = \(difference)")
                 XCTAssertLessThanOrEqual(difference, expected.tolerance, label)
 
                 let picked = try selections(
