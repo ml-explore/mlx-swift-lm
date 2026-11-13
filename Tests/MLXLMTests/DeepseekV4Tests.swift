@@ -501,6 +501,95 @@ final class DeepseekV4Tests: XCTestCase {
         }
     }
 
+    /// On the bfloat16 checkpoint, ratio-4 pooling and routing keep the reference's float32
+    /// placement: the compressor projects, buffers, softmaxes and sums in float32 and casts the
+    /// entries back before the norm; the router's matmul, scores and weights are float32. The
+    /// expected values are those computations done in float32 and cast back where the reference
+    /// casts, so the port must match them exactly.
+    func testBFloat16PoolingAndRoutingFollowReferenceFloat32() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = try loadTiny(indexBlock: 0, indexKeep: 0)
+            let hidden = model.configuration.hiddenSize
+            let x = MLXRandom.normal([1, 23, hidden], key: MLXRandom.key(7)).asType(.bfloat16)
+            let x32 = x.asType(.float32)
+
+            for compressor in [
+                try XCTUnwrap(model.layers[1].attn.compressor),
+                try XCTUnwrap(model.layers[1].attn.indexer?.compressor),
+            ] {
+                XCTAssertTrue(compressor.overlap)
+                XCTAssertEqual(compressor.wkv.weight.dtype, .bfloat16)
+                let (ratio, d) = (compressor.ratio, compressor.headDim)
+                let cache = DeepseekV4PoolCache(ratio: ratio)
+                let pool = compressor(x, cache: cache)
+                XCTAssertEqual(pool.dtype, .bfloat16)
+                XCTAssertEqual(cache.previousKV?.dtype, .float32, "buffered rows")
+
+                let kv = matmul(x32, compressor.wkv.weight.asType(.float32).T)[0]
+                let gate = matmul(x32, compressor.wgate.weight.asType(.float32).T)[0]
+                let ape = compressor.ape.asType(.float32)
+                var expected = [MLXArray]()
+                for w in 0 ..< 5 {
+                    let current = (w * ratio) ..< ((w + 1) * ratio)
+                    let previousKV: MLXArray
+                    let previousGate: MLXArray
+                    if w == 0 {
+                        previousKV = MLXArray.zeros([ratio, d])
+                        previousGate = MLXArray.full(
+                            [ratio, d], values: MLXArray(-Float.infinity), type: Float.self)
+                    } else {
+                        let before = ((w - 1) * ratio) ..< (w * ratio)
+                        previousKV = kv[before, ..<d]
+                        previousGate = gate[before, ..<d] + ape[0..., ..<d]
+                    }
+                    let rows = concatenated([previousKV, kv[current, d...]], axis: 0)
+                    let gates = concatenated(
+                        [previousGate, gate[current, d...] + ape[0..., d...]], axis: 0)
+                    expected.append((rows * softmax(gates, axis: 0, precise: true)).sum(axis: 0))
+                }
+                var reference = compressor.norm(
+                    stacked(expected).reshaped(1, 5, d).asType(.bfloat16))
+                reference = compressor.rope(expandedDimensions(reference, axis: 1), offset: 0)
+                    .squeezed(axis: 1)
+                XCTAssertEqual(reference.dtype, .bfloat16)
+                let difference = abs(pool.asType(.float32) - reference.asType(.float32)).max()
+                    .item(Float.self)
+                print("deepseek_v4 bf16 overlap pooling vs float32: max |d| = \(difference)")
+                XCTAssertEqual(difference, 0, "bfloat16 overlap pooling")
+            }
+
+            let ids = MLXArray((0 ..< 23).map { Int32(2 + $0 * 5 % 120) }).reshaped(1, 23)
+            var routerWorst: Float = 0
+            for layer in model.layers {
+                let gate = layer.ffn.gate
+                let (indices, weights) = gate(x, inputIDs: ids)
+                XCTAssertEqual(weights.dtype, .float32)
+
+                let logits = matmul(x32, gate.weight.asType(.float32).T)
+                let scores = sqrt(softplus(logits))
+                if let tid2eid = gate.tid2eid {
+                    XCTAssertEqual(
+                        indices.asArray(Int32.self),
+                        take(tid2eid, ids, axis: 0).asArray(Int32.self))
+                } else {
+                    let biased = scores + gate.bias!.asType(.float32)
+                    let top = argPartition(-biased, kth: gate.topK - 1, axis: -1)[
+                        .ellipsis, ..<gate.topK
+                    ].asType(.int32)
+                    XCTAssertEqual(
+                        sorted(top, axis: -1).asArray(Int32.self),
+                        sorted(indices, axis: -1).asArray(Int32.self), "routed experts")
+                }
+                var expected = takeAlong(scores, indices, axis: -1)
+                expected = expected / expected.sum(axis: -1, keepDims: true) * gate.scaling
+                let difference = abs(weights - expected).max().item(Float.self)
+                routerWorst = max(routerWorst, difference)
+                XCTAssertEqual(difference, 0, "bfloat16 router weights")
+            }
+            print("deepseek_v4 bf16 router weights vs float32 reference: max |d| = \(routerWorst)")
+        }
+    }
+
     /// The pools of a ratio-4 layer (attention and indexer) and a ratio-128 layer, and the
     /// logits of a continuation, do not depend on how the tokens are split into calls: one
     /// prefill, uneven chunks (not multiples of either ratio), or one token at a time.

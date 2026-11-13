@@ -229,11 +229,25 @@ private func deepseekV4MultiLinear(_ module: Module, _ x: MLXArray) -> MLXArray 
     }
 }
 
-/// SwiGLU with `gate` clamped from above and `up` clamped to `[-limit, limit]`.
+/// SwiGLU with `gate` clamped from above and `up` clamped to `[-limit, limit]`, computed in
+/// float32 and returned in the input dtype, as the reference's `Expert`.
 private func deepseekV4LimitedSwiGLU(limit: Float) -> @Sendable (MLXArray, MLXArray) -> MLXArray {
-    guard limit > 0 else { return compiledSiluProduct }
+    guard limit > 0 else {
+        return compile(shapeless: true) { gate, up in
+            (silu(gate.asType(.float32)) * up.asType(.float32)).asType(gate.dtype)
+        }
+    }
     return compile(shapeless: true) { gate, up in
-        silu(minimum(gate, limit)) * clip(up, min: -limit, max: limit)
+        let (g, u) = (gate.asType(.float32), up.asType(.float32))
+        return (silu(minimum(g, limit)) * clip(u, min: -limit, max: limit)).asType(gate.dtype)
+    }
+}
+
+/// As the reference's `RMSNorm`: float32 input and weight, rounded once to the input dtype.
+final class DeepseekV4RMSNorm: RMSNorm {
+    override func callAsFunction(_ x: MLXArray) -> MLXArray {
+        MLXFast.rmsNorm(x.asType(.float32), weight: weight.asType(.float32), eps: eps)
+            .asType(x.dtype)
     }
 }
 
@@ -598,7 +612,8 @@ final class DeepseekV4MoEGate: Module {
     }
 
     func callAsFunction(_ x: MLXArray, inputIDs: MLXArray) -> (MLXArray, MLXArray) {
-        let logits = matmul(x, weight.T).asType(.float32)
+        // As the reference: the router logits are a float32 matmul.
+        let logits = matmul(x.asType(.float32), weight.asType(.float32).T)
         let scores = score(logits)
         let indices: MLXArray
         if let tid2eid {
@@ -634,11 +649,13 @@ final class DeepseekV4MoE: Module {
         super.init()
     }
 
-    /// Routed outputs weighted in their own dtype and summed, plus the shared expert.
+    /// Routed outputs weighted by the float32 router weights and summed with the shared expert
+    /// in float32, as the reference, then returned in the input dtype.
     func callAsFunction(_ x: MLXArray, inputIDs: MLXArray) -> MLXArray {
         let (indices, weights) = gate(x, inputIDs: inputIDs)
         let routed = switchMLP(x, indices)
-        return weightedExpertSum(routed, weights.asType(routed.dtype)) + sharedExperts(x)
+        let sum = weightedExpertSum(routed, weights.asType(.float32))
+        return (sum + sharedExperts(x).asType(.float32)).asType(x.dtype)
     }
 }
 
@@ -875,7 +892,7 @@ final class DeepseekV4Compressor: Module {
         _wkv.wrappedValue = Linear(config.hiddenSize, outDim, bias: false)
         _wgate.wrappedValue = Linear(config.hiddenSize, outDim, bias: false)
         _ape.wrappedValue = MLXArray.zeros([ratio, outDim], dtype: .float32)
-        _norm.wrappedValue = RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
+        _norm.wrappedValue = DeepseekV4RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
         self.rope = DeepseekV4RoPE(
             dims: config.qkRopeHeadDim, headDims: [headDim], base: config.compressRopeTheta,
             scaling: config.ropeScaling, freqScale: ratio)
@@ -886,7 +903,10 @@ final class DeepseekV4Compressor: Module {
     /// completes.
     func callAsFunction(_ x: MLXArray, cache: DeepseekV4PoolCache) -> MLXArray {
         let B = x.dim(0)
-        let ready = cache.accumulateWindows(kv: wkv(x), gate: wgate(x))
+        // As the reference, projections, buffered rows and pooling are float32; the pooled
+        // entries return to the input dtype before the norm.
+        let x32 = x.asType(.float32)
+        let ready = cache.accumulateWindows(kv: wkv(x32), gate: wgate(x32))
         guard ready.kv.dim(1) > 0 else {
             return cache.appendPooled(MLXArray.zeros([B, 0, headDim], dtype: x.dtype))
         }
@@ -906,7 +926,7 @@ final class DeepseekV4Compressor: Module {
         } else {
             entries = deepseekV4SimpleCompress(kv, gate, ape)
         }
-        entries = norm(entries)
+        entries = norm(entries.asType(x.dtype))
         entries = rope(expandedDimensions(entries, axis: 1), offset: ready.base).squeezed(axis: 1)
         return cache.appendPooled(entries)
     }
@@ -954,7 +974,8 @@ final class DeepseekV4Indexer: Module {
         q = rope(q, offset: offset)
         let k = min(topK, poolCount)
         let poolMask = cache.poolMask(queries: L, offset: offset)
-        let weights = weightsProj(x).asType(.float32) * pow(Float(heads), -0.5)
+        let projected = weightsProj(x)
+        let weights = projected.asType(.float32) * pow(Float(heads), -0.5)
 
         if block > 0, poolCount >= block * keep, keep * block >= k {
             if L == 1 {
@@ -971,21 +992,21 @@ final class DeepseekV4Indexer: Module {
         }
 
         // Exact top-k as the reference, in query tiles that bound the `[B, H, tile, P]` scores.
-        let keys = expandedDimensions(pooled, axis: 1).swappedAxes(-1, -2).asType(.float32)
-        let q32 = q.asType(.float32)
-        let headWeights = expandedDimensions(weights.swappedAxes(-1, -2), axis: -1)  // [B,H,L,1]
+        // The reference scores in the activation dtype (`weights_proj` is bfloat16).
+        let keys = expandedDimensions(pooled, axis: 1).swappedAxes(-1, -2)
+        let headWeights = expandedDimensions(
+            (projected * pow(Float(heads), -0.5)).swappedAxes(-1, -2), axis: -1)  // [B,H,L,1]
         let tile = max(
             1, exactQueryTile ?? Self.exactScoreBudget / max(heads * poolCount * B, 1))
         var parts = [MLXArray]()
         for start in stride(from: 0, to: L, by: tile) {
             let end = min(start + tile, L)
-            var scores = matmul(q32[0..., 0..., start ..< end], keys)
+            var scores = matmul(q[0..., 0..., start ..< end], keys)
             scores = maximum(scores, 0) * scale
             scores = (scores * headWeights[0..., 0..., start ..< end]).sum(axis: 1)
             if let poolMask {
-                scores = MLX.where(
-                    expandedDimensions(poolMask[start ..< end], axis: 0), scores,
-                    MLXArray(-Float.greatestFiniteMagnitude))
+                scores = deepseekV4MaskScores(
+                    scores, expandedDimensions(poolMask[start ..< end], axis: 0))
             }
             let selected = argPartition(-scores, kth: k - 1, axis: -1)[.ellipsis, ..<k]
             if tile < L { eval(selected) }
@@ -1129,10 +1150,11 @@ final class DeepseekV4Attention: Module {
         self.normEps = config.rmsNormEps
 
         _wqA.wrappedValue = Linear(config.hiddenSize, config.qLoraRank, bias: false)
-        _qNorm.wrappedValue = RMSNorm(dimensions: config.qLoraRank, eps: config.rmsNormEps)
+        _qNorm.wrappedValue = DeepseekV4RMSNorm(
+            dimensions: config.qLoraRank, eps: config.rmsNormEps)
         _wqB.wrappedValue = Linear(config.qLoraRank, heads * headDim, bias: false)
         _wkv.wrappedValue = Linear(config.hiddenSize, headDim, bias: false)
-        _kvNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
+        _kvNorm.wrappedValue = DeepseekV4RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
         _woA.wrappedValue = MultiLinear(
             inputDims: heads * headDim / groups, outputDims: config.oLoraRank, numHeads: groups)
         _woB.wrappedValue = Linear(
@@ -1166,7 +1188,8 @@ final class DeepseekV4Attention: Module {
 
         let qResidual = qNorm(wqA(x))
         var q = wqB(qResidual).reshaped(B, L, heads, headDim)
-        q = MLXFast.rmsNorm(q, weight: MLXArray.mlxNone, eps: normEps)
+        // The reference normalizes the query heads in the activation dtype, not float32.
+        q = q * rsqrt(mean(square(q), axis: -1, keepDims: true) + normEps)
         q = rope(q.transposed(0, 2, 1, 3), offset: offset)
         var kv = kvNorm(wkv(x)).reshaped(B, 1, L, headDim)
         kv = rope(kv, offset: offset)
@@ -1189,6 +1212,7 @@ final class DeepseekV4Attention: Module {
         let L = x.dim(1)
         let (local, _) = cache.local.update(keys: kv, values: kv)
         let localMask = alignLocalMask(mask, length: local.dim(2))
+        // MLX attention takes its sinks in the query dtype.
         let sinks = attnSink.asType(q.dtype)
 
         guard let compressor, let poolCache = cache.pool else {
@@ -1214,7 +1238,7 @@ final class DeepseekV4Attention: Module {
             }
             return sparsePooledAttention(
                 q: q, local: local, pooled: pooled, topk: topk, localMask: localMask,
-                pooledMask: sparseMask, sinks: sinks)
+                pooledMask: sparseMask, sinks: attnSink.asType(.float32))
         }
         let full = concatenated([local, expandedDimensions(pooled, axis: 1)], axis: 2)
         return sdpa(
@@ -1267,21 +1291,23 @@ final class DeepseekV4Attention: Module {
                 .reshaped(B, L, k, D)
         }
 
-        let qScaled = q * scale
+        // As the reference's sparse attention kernel: float32 scores, softmax and sink.
+        let (local32, gathered32) = (local.asType(.float32), gathered.asType(.float32))
+        let qScaled = q.asType(.float32) * scale
         let localScores = deepseekV4MaskScores(
-            matmul(qScaled, local.swappedAxes(-1, -2)), localMask)
+            matmul(qScaled, local32.swappedAxes(-1, -2)), localMask)
         var normalizer = logSumExp(localScores, axis: -1, keepDims: true)
         let qByToken = qScaled.transposed(0, 2, 1, 3)
         let pooledScores = deepseekV4MaskScores(
-            matmul(qByToken, gathered.swappedAxes(-1, -2)).transposed(0, 2, 1, 3), pooledMask)
+            matmul(qByToken, gathered32.swappedAxes(-1, -2)).transposed(0, 2, 1, 3), pooledMask)
         normalizer = logAddExp(normalizer, logSumExp(pooledScores, axis: -1, keepDims: true))
         normalizer = logAddExp(normalizer, sinks.reshaped(1, -1, 1, 1))
         let localWeights = exp(localScores - normalizer)
         let pooledWeights = exp(pooledScores - normalizer)
 
         let out =
-            matmul(localWeights, local)
-            + matmul(pooledWeights.transposed(0, 2, 1, 3), gathered).transposed(0, 2, 1, 3)
+            matmul(localWeights, local32)
+            + matmul(pooledWeights.transposed(0, 2, 1, 3), gathered32).transposed(0, 2, 1, 3)
         return out.asType(q.dtype)
     }
 }
@@ -1299,8 +1325,10 @@ final class DeepseekV4Block: Module {
     init(_ config: DeepseekV4Configuration, layerIdx: Int) {
         _attn.wrappedValue = DeepseekV4Attention(config, layerIdx: layerIdx)
         _ffn.wrappedValue = DeepseekV4MoE(config, layerIdx: layerIdx)
-        _attnNorm.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        _ffnNorm.wrappedValue = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        _attnNorm.wrappedValue = DeepseekV4RMSNorm(
+            dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        _ffnNorm.wrappedValue = DeepseekV4RMSNorm(
+            dimensions: config.hiddenSize, eps: config.rmsNormEps)
         _attnHC.wrappedValue = DeepseekV4HyperConnection(config)
         _ffnHC.wrappedValue = DeepseekV4HyperConnection(config)
         super.init()
@@ -1359,7 +1387,7 @@ public final class DeepseekV4Model: Module, LLMModel {
         _layers.wrappedValue = (0 ..< configuration.hiddenLayers).map {
             DeepseekV4Block(configuration, layerIdx: $0)
         }
-        _norm.wrappedValue = RMSNorm(
+        _norm.wrappedValue = DeepseekV4RMSNorm(
             dimensions: configuration.hiddenSize, eps: configuration.rmsNormEps)
         _hcHead.wrappedValue = DeepseekV4HyperHead(configuration)
         _head.wrappedValue = Linear(
@@ -1437,8 +1465,9 @@ extension DeepseekV4Model: HiddenStateLanguageModel {
         return norm(hcHead(h))
     }
 
+    /// As the reference, the logits are a float32 projection of the normalized hidden states.
     package func projectLogits(_ hiddenStates: MLXArray) -> MLXArray {
-        head(hiddenStates)
+        head(hiddenStates.asType(.float32))
     }
 }
 
