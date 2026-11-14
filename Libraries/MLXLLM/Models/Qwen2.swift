@@ -164,7 +164,9 @@ public class Qwen2ModelInner: Module {
     }
 }
 
-public class Qwen2Model: Module, LLMModel, KVCacheDimensionProvider {
+public class Qwen2Model: Module, LLMModel, KVCacheDimensionProvider, InputOnlyEmbeddingsProviding {
+    public var inputOnlyEmbeddings: [Embedding] { lmHead == nil ? [] : [model.embedTokens] }
+
     public let vocabularySize: Int
     public let kvHeads: [Int]
 

@@ -29,6 +29,26 @@ print(try await session.respond(to: "What are two things to see in San Francisco
 print(try await session.respond(to: "How about a great place to eat?"))
 ```
 
+## Embedding storage
+
+``EmbeddingStoragePolicy/automatic`` keeps supported frozen input-only tables in
+file-backed storage so unused rows can be reclaimed. Models declare these tables with
+``InputOnlyEmbeddingsProviding``. Tensor values and precision are unchanged.
+Tied output tables, custom embeddings, and unsupported formats keep normal storage.
+
+Compatible checkpoint tensors map directly. Other eligible tables use temporary files,
+with one copy per load and additional disk space. Loading peak memory can remain unchanged.
+Select ``EmbeddingStoragePolicy/resident`` to keep normal MLX storage.
+
+A table that a checkpoint splits by rows into several tensors can use ``ShardedEmbedding``.
+List its ``ShardedEmbedding/shards`` as input-only tables, and each shard is stored the same way.
+
+> Important: Do not rewrite or truncate checkpoint files while the model is in use.
+> Use ``EmbeddingStoragePolicy/resident`` if files must change in place.
+
+MLX allocation counters include the full mapped table. Wiring all MLX buffers can keep
+all its pages resident, even when the process footprint is lower.
+
 ## Downloaders and Tokenizers
 
 There are 3 general ways to select and use concrete Downloader and Tokenizer implementations:

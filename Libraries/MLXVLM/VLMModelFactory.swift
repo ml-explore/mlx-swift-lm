@@ -487,7 +487,8 @@ public final class VLMModelFactory: GenericModelFactory {
             modelDirectory: modelDirectory, model: model,
             perLayerQuantization: baseConfig.perLayerQuantization,
             weightFileSelection: configuration.weightFileSelection,
-            excludedComponents: configuration.excludedComponents)
+            excludedComponents: configuration.excludedComponents,
+            embeddingStorage: configuration.embeddingStorage)
 
         let tokenizer = try await tokenizerTask
         let processorConfiguration: VLMProcessorConfiguration
@@ -531,7 +532,8 @@ public final class VLMModelFactory: GenericModelFactory {
             toolCallFormat: mutableConfiguration.toolCallFormat,
             reasoningConfig: mutableConfiguration.reasoningConfig,
             messageGenerator: mutableConfiguration.messageGenerator,
-            generationConfig: mutableConfiguration.generationConfig)
+            generationConfig: mutableConfiguration.generationConfig,
+            embeddingStorage: configuration.embeddingStorage)
 
         return .init(
             configuration: modelConfig, model: model, processor: processor,
