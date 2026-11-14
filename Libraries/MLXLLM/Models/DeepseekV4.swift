@@ -229,17 +229,46 @@ private func deepseekV4MultiLinear(_ module: Module, _ x: MLXArray) -> MLXArray 
     }
 }
 
+// MLX keys its compile cache on the C++ default stream, which `Device.withDefaultDevice` does not
+// change (the Swift default device is task-local), so a function traced under one device would
+// replay that device's kernels under the other. These compile one function per device type.
+
+private func deepseekV4PerDevice(
+    _ make: () -> @Sendable (MLXArray, MLXArray) -> MLXArray
+) -> @Sendable (MLXArray, MLXArray) -> MLXArray {
+    let (cpu, gpu) = (make(), make())
+    return { Device.defaultDevice().deviceType == .gpu ? gpu($0, $1) : cpu($0, $1) }
+}
+
+private func deepseekV4PerDevice(
+    _ make: () -> @Sendable (MLXArray, MLXArray, MLXArray) -> MLXArray
+) -> @Sendable (MLXArray, MLXArray, MLXArray) -> MLXArray {
+    let (cpu, gpu) = (make(), make())
+    return { Device.defaultDevice().deviceType == .gpu ? gpu($0, $1, $2) : cpu($0, $1, $2) }
+}
+
+private func deepseekV4PerDevice(
+    _ make: () -> @Sendable ([MLXArray]) -> [MLXArray]
+) -> @Sendable ([MLXArray]) -> [MLXArray] {
+    let (cpu, gpu) = (make(), make())
+    return { Device.defaultDevice().deviceType == .gpu ? gpu($0) : cpu($0) }
+}
+
 /// SwiGLU with `gate` clamped from above and `up` clamped to `[-limit, limit]`, computed in
 /// float32 and returned in the input dtype, as the reference's `Expert`.
 private func deepseekV4LimitedSwiGLU(limit: Float) -> @Sendable (MLXArray, MLXArray) -> MLXArray {
     guard limit > 0 else {
-        return compile(shapeless: true) { gate, up in
-            (silu(gate.asType(.float32)) * up.asType(.float32)).asType(gate.dtype)
+        return deepseekV4PerDevice {
+            compile(shapeless: true) { gate, up in
+                (silu(gate.asType(.float32)) * up.asType(.float32)).asType(gate.dtype)
+            }
         }
     }
-    return compile(shapeless: true) { gate, up in
-        let (g, u) = (gate.asType(.float32), up.asType(.float32))
-        return (silu(minimum(g, limit)) * clip(u, min: -limit, max: limit)).asType(gate.dtype)
+    return deepseekV4PerDevice {
+        compile(shapeless: true) { gate, up in
+            let (g, u) = (gate.asType(.float32), up.asType(.float32))
+            return (silu(minimum(g, limit)) * clip(u, min: -limit, max: limit)).asType(gate.dtype)
+        }
     }
 }
 
@@ -332,7 +361,7 @@ final class DeepseekV4RoPE {
 /// `post * x + comb^T @ residual`: the residual update of one mHC branch.
 /// Inputs: branch output `[B, L, D]`, residual `[B, L, hc, D]`, post `[B, L, hc]`,
 /// comb `[B, L, hc, hc]`.
-let deepseekV4HCExpand: @Sendable ([MLXArray]) -> [MLXArray] =
+let deepseekV4HCExpand: @Sendable ([MLXArray]) -> [MLXArray] = deepseekV4PerDevice {
     compile(shapeless: true) { args in
         let (x, residual, post, comb) = (args[0], args[1], args[2], args[3])
         let expanded =
@@ -340,6 +369,7 @@ let deepseekV4HCExpand: @Sendable ([MLXArray]) -> [MLXArray] =
         let mixed = matmul(comb.swappedAxes(-1, -2), residual.asType(.float32))
         return [(expanded + mixed).asType(x.dtype)]
     }
+}
 
 /// For `hc_mult == 4`: the `pre`/`post` sigmoids, the Sinkhorn-normalized `comb` and the
 /// `pre`-weighted collapse of the streams. Inputs: `x_in` `[B, L, 4, D]`, `mixes` `[B, L, 24]`,
@@ -484,24 +514,28 @@ final class DeepseekV4HyperConnection: Module {
         _base.wrappedValue = MLXArray.zeros([mix], dtype: .float32)
         _scale.wrappedValue = MLXArray.ones([3], dtype: .float32)
 
-        self.sinkhorn = compile(shapeless: false) { args in
-            let mixes = args[0].asType(.float32)
-            let scale = args[1].asType(.float32)
-            let base = args[2].asType(.float32)
-            let pre = sigmoid(mixes[.ellipsis, ..<hc] * scale[0] + base[..<hc]) + eps
-            let post =
-                2 * sigmoid(mixes[.ellipsis, hc ..< (2 * hc)] * scale[1] + base[hc ..< (2 * hc)])
-            let leading = Array(mixes.shape.dropLast())
-            var comb =
-                mixes[.ellipsis, (2 * hc)...].reshaped(leading + [hc, hc]) * scale[2]
-                + base[(2 * hc)...].reshaped(hc, hc)
-            comb = softmax(comb, axis: -1, precise: true) + eps
-            comb = comb / (comb.sum(axis: -2, keepDims: true) + eps)
-            for _ in 0 ..< max(iterations - 1, 0) {
-                comb = comb / (comb.sum(axis: -1, keepDims: true) + eps)
+        self.sinkhorn = deepseekV4PerDevice {
+            compile(shapeless: false) { args in
+                let mixes = args[0].asType(.float32)
+                let scale = args[1].asType(.float32)
+                let base = args[2].asType(.float32)
+                let pre = sigmoid(mixes[.ellipsis, ..<hc] * scale[0] + base[..<hc]) + eps
+                let post =
+                    2
+                    * sigmoid(
+                        mixes[.ellipsis, hc ..< (2 * hc)] * scale[1] + base[hc ..< (2 * hc)])
+                let leading = Array(mixes.shape.dropLast())
+                var comb =
+                    mixes[.ellipsis, (2 * hc)...].reshaped(leading + [hc, hc]) * scale[2]
+                    + base[(2 * hc)...].reshaped(hc, hc)
+                comb = softmax(comb, axis: -1, precise: true) + eps
                 comb = comb / (comb.sum(axis: -2, keepDims: true) + eps)
+                for _ in 0 ..< max(iterations - 1, 0) {
+                    comb = comb / (comb.sum(axis: -1, keepDims: true) + eps)
+                    comb = comb / (comb.sum(axis: -2, keepDims: true) + eps)
+                }
+                return [pre, post, comb]
             }
-            return [pre, post, comb]
         }
         super.init()
     }
@@ -852,15 +886,18 @@ final class DeepseekV4PoolCache: BaseKVCache {
 // MARK: - Compressor and indexer
 
 /// `x` rounded to the dtype of `like` and back to float32.
-let deepseekV4RoundThrough: @Sendable (MLXArray, MLXArray) -> MLXArray =
+let deepseekV4RoundThrough: @Sendable (MLXArray, MLXArray) -> MLXArray = deepseekV4PerDevice {
     compile(shapeless: true) { x, like in
         x.asType(like.dtype).asType(.float32)
     }
+}
 
 private let deepseekV4SimpleCompress: @Sendable (MLXArray, MLXArray, MLXArray) -> MLXArray =
-    compile(shapeless: true) { kv, gate, ape in
-        let weights = softmax(gate.asType(.float32) + ape, axis: -2).asType(kv.dtype)
-        return (kv * weights).sum(axis: -2)
+    deepseekV4PerDevice {
+        compile(shapeless: true) { kv, gate, ape in
+            let weights = softmax(gate.asType(.float32) + ape, axis: -2).asType(kv.dtype)
+            return (kv * weights).sum(axis: -2)
+        }
     }
 
 /// Ratio-4 overlapping windows, as the reference's `overlap_transform`: each entry pools the
@@ -868,7 +905,7 @@ private let deepseekV4SimpleCompress: @Sendable (MLXArray, MLXArray, MLXArray) -
 /// half-channels of its own window, `ape` added to both. Inputs: `kv`/`gate` `[B, W, R, 2D]`
 /// windows, `ape` `[R, 2D]`, and the `[B, 1, R, 2D]` window before the first one (zeros and
 /// gate `-inf` for the first window of the sequence, which has none).
-private let deepseekV4OverlapCompress: @Sendable ([MLXArray]) -> [MLXArray] =
+private let deepseekV4OverlapCompress: @Sendable ([MLXArray]) -> [MLXArray] = deepseekV4PerDevice {
     compile { args in
         let (kv, gate, ape) = (args[0], args[1], args[2])
         let (previousKV, previousGate) = (args[3], args[4])
@@ -882,6 +919,7 @@ private let deepseekV4OverlapCompress: @Sendable ([MLXArray]) -> [MLXArray] =
         let weights = softmax(mixedGate, axis: -2, precise: true)
         return [(mixedKV * weights).sum(axis: -2)]
     }
+}
 
 /// Pools every complete window of `ratio` tokens into one entry: the `softmax(gate + ape)`
 /// weighted sum of the window's kv, RMSNorm, then RoPE at the window's start position.
