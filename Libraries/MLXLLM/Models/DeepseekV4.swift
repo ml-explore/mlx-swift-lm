@@ -248,8 +248,12 @@ private func deepseekV4LimitedSwiGLU(limit: Float) -> @Sendable (MLXArray, MLXAr
 /// caller has set to another dtype.
 final class DeepseekV4RMSNorm: RMSNorm {
     override func callAsFunction(_ x: MLXArray) -> MLXArray {
-        MLXFast.rmsNorm(x.asType(.float32), weight: weight.asType(.float32), eps: eps)
-            .asType(x.dtype)
+        self(float32: x.asType(.float32), dtype: x.dtype)
+    }
+
+    /// The norm of an input that is already float32, rounded to `dtype`.
+    func callAsFunction(float32 x: MLXArray, dtype: DType) -> MLXArray {
+        MLXFast.rmsNorm(x, weight: weight.asType(.float32), eps: eps).asType(dtype)
     }
 }
 
@@ -847,6 +851,12 @@ final class DeepseekV4PoolCache: BaseKVCache {
 
 // MARK: - Compressor and indexer
 
+/// `x` rounded to the dtype of `like` and back to float32.
+let deepseekV4RoundThrough: @Sendable (MLXArray, MLXArray) -> MLXArray =
+    compile(shapeless: true) { x, like in
+        x.asType(like.dtype).asType(.float32)
+    }
+
 private let deepseekV4SimpleCompress: @Sendable (MLXArray, MLXArray, MLXArray) -> MLXArray =
     compile(shapeless: true) { kv, gate, ape in
         let weights = softmax(gate.asType(.float32) + ape, axis: -2).asType(kv.dtype)
@@ -883,7 +893,7 @@ final class DeepseekV4Compressor: Module {
     @ModuleInfo(key: "wkv") var wkv: Linear
     @ModuleInfo(key: "wgate") var wgate: Linear
     @ParameterInfo(key: "ape") var ape: MLXArray
-    @ModuleInfo(key: "norm") var norm: RMSNorm
+    @ModuleInfo(key: "norm") var norm: DeepseekV4RMSNorm
     let rope: DeepseekV4RoPE
 
     init(_ config: DeepseekV4Configuration, ratio: Int, headDim: Int) {
@@ -902,12 +912,15 @@ final class DeepseekV4Compressor: Module {
     }
 
     /// The whole pool `[B, P, headDim]` after adding the windows that `x` (`[B, L, hidden]`)
-    /// completes.
-    func callAsFunction(_ x: MLXArray, cache: DeepseekV4PoolCache) -> MLXArray {
+    /// completes. A caller that already has `x` in float32 passes it as `projectionInput` (the
+    /// two compressors of a ratio-4 layer share it).
+    func callAsFunction(
+        _ x: MLXArray, cache: DeepseekV4PoolCache, projectionInput: MLXArray? = nil
+    ) -> MLXArray {
         let B = x.dim(0)
         // As the reference, projections, buffered rows and pooling are float32; the pooled
         // entries return to the input dtype before the norm.
-        let x32 = x.asType(.float32)
+        let x32 = projectionInput ?? x.asType(.float32)
         let ready = cache.accumulateWindows(kv: wkv(x32), gate: wgate(x32))
         guard ready.kv.dim(1) > 0 else {
             return cache.appendPooled(MLXArray.zeros([B, 0, headDim], dtype: x.dtype))
@@ -928,7 +941,8 @@ final class DeepseekV4Compressor: Module {
         } else {
             entries = deepseekV4SimpleCompress(kv, gate, ape)
         }
-        entries = norm(entries.asType(x.dtype))
+        // The round trip through the input dtype as one kernel, then the float32 norm.
+        entries = norm(float32: deepseekV4RoundThrough(entries, x), dtype: x.dtype)
         entries = rope(expandedDimensions(entries, axis: 1), offset: ready.base).squeezed(axis: 1)
         return cache.appendPooled(entries)
     }
@@ -965,10 +979,10 @@ final class DeepseekV4Indexer: Module {
     /// `[B, L, k]` pooled indices, or `nil` while the pool is empty.
     func callAsFunction(
         _ x: MLXArray, qResidual: MLXArray, rope: DeepseekV4RoPE, cache: DeepseekV4PoolCache,
-        offset: Int
+        offset: Int, projectionInput: MLXArray? = nil
     ) -> MLXArray? {
         let (B, L) = (x.dim(0), x.dim(1))
-        let pooled = compressor(x, cache: cache)
+        let pooled = compressor(x, cache: cache, projectionInput: projectionInput)
         let poolCount = pooled.dim(1)
         guard poolCount > 0 else { return nil }
 
@@ -1238,11 +1252,14 @@ final class DeepseekV4Attention: Module {
         guard let compressor, let poolCache = cache.pool else {
             return sdpa(q, local, mask: localMask, sinks: sinks)
         }
-        let pooled = compressor(x, cache: poolCache)
+        let projectionInput = x.asType(.float32)
+        let pooled = compressor(x, cache: poolCache, projectionInput: projectionInput)
         let poolMask = poolCache.poolMask(queries: L, offset: offset)
         let topk: MLXArray?
         if let indexer, let indexCache = cache.indexPool {
-            topk = indexer(x, qResidual: qResidual, rope: rope, cache: indexCache, offset: offset)
+            topk = indexer(
+                x, qResidual: qResidual, rope: rope, cache: indexCache, offset: offset,
+                projectionInput: projectionInput)
         } else {
             topk = nil
         }
