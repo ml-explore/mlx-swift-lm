@@ -8,6 +8,10 @@ import XCTest
 
 @testable import MLXLLM
 
+#if canImport(Metal)
+import Metal
+#endif
+
 /// DeepSeek-V4 against DeepSeek's reference `inference/model.py` on a 4-layer fixture
 /// (`Resources/deepseek_v4_tiny`, from `tools/deepseek_v4_parity/make_tiny_fixture.py`)
 /// covering every V4 path. Comparisons run
@@ -640,6 +644,97 @@ final class DeepseekV4Tests: XCTestCase {
                 XCTAssertEqual(a.dtype, .float32)
                 XCTAssertEqual(abs(a - b).max().item(Float.self), 0, "float32 vs cast-at-use")
             }
+        }
+    }
+
+    /// Doubling a norm weight with `update(parameters:)` after a forward pass gives exactly the
+    /// logits of a fresh model with the doubled weight: nothing derived from the old weight
+    /// survives the update.
+    func testNormWeightUpdateReachesNextForward() throws {
+        try Device.withDefaultDevice(.cpu) {
+            // 40 tokens complete ratio-4 windows, so the compressor norms take part.
+            let tokens = MLXArray((0 ..< 40).map { Int32(2 + $0 * 7 % 120) }).reshaped(1, 40)
+            func logits(_ model: DeepseekV4Model) -> MLXArray {
+                let out = model(tokens, cache: model.makeCache())
+                eval(out)
+                return out
+            }
+            for key in [
+                "layers.0.ffn_norm.weight", "layers.1.attn_norm.weight",
+                "layers.1.attn.compressor.norm.weight", "norm.weight",
+            ] {
+                let updated = try loadTiny(indexBlock: 4, indexKeep: 2)
+                let before = logits(updated)
+                let weight = try XCTUnwrap(
+                    updated.parameters().flattened().first { $0.0 == key }?.1, key)
+                let doubled = weight * 2
+                eval(doubled)
+                updated.update(parameters: ModuleParameters.unflattened([key: doubled]))
+                eval(updated)
+                let after = logits(updated)
+
+                let fresh = try loadTiny(indexBlock: 4, indexKeep: 2)
+                fresh.update(parameters: ModuleParameters.unflattened([key: doubled]))
+                eval(fresh)
+                let expected = logits(fresh)
+
+                XCTAssertTrue(any(before .!= expected).item(Bool.self), "\(key) moves the logits")
+                XCTAssertEqual(abs(after - expected).max().item(Float.self), 0, key)
+            }
+        }
+    }
+
+    /// Runs `body` on a new thread. MLX's compile cache is per thread, so every compiled
+    /// function is traced afresh there, whatever ran earlier in the process.
+    private static func onNewThread(_ body: @escaping @Sendable () -> Void) {
+        let done = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            body()
+            done.signal()
+        }
+        thread.stackSize = 16 << 20
+        thread.start()
+        done.wait()
+    }
+
+    /// MLX keys a compiled graph on the C++ default stream, which `Device.withDefaultDevice`
+    /// does not change, so a function traced on one device would replay that device's kernels
+    /// on the other. float32 logits on each device are bit for bit the same whether or not the
+    /// other device ran first on the same thread.
+    func testLogitsIndependentOfDeviceThatRanFirst() throws {
+        #if canImport(Metal)
+        try XCTSkipUnless(MTLCreateSystemDefaultDevice() != nil, "no GPU")
+        #else
+        throw XCTSkip("no GPU")
+        #endif
+        nonisolated(unsafe) let model = try loadTiny(indexBlock: 4, indexKeep: 2, float32: true)
+        // 300 tokens complete ratio-4 and ratio-128 windows; the decode steps carry the overlap.
+        let tokens = (0 ..< 300).map { Int32(2 + $0 * 7 % 120) }
+        func logits(after devices: [DeviceType]) -> [Float] {
+            nonisolated(unsafe) var result = [Float]()
+            Self.onNewThread {
+                for device in devices {
+                    result = Device.withDefaultDevice(Device(device)) {
+                        let cache = model.makeCache()
+                        var rows = [model(MLXArray(tokens).reshaped(1, 300), cache: cache)[0, -1]]
+                        for token in [5, 77, 31] as [Int32] {
+                            rows.append(
+                                model(MLXArray([token]).reshaped(1, 1), cache: cache)[0, -1])
+                        }
+                        return concatenated(rows).asArray(Float.self)
+                    }
+                }
+            }
+            return result
+        }
+        for (device, other) in [(DeviceType.gpu, DeviceType.cpu), (.cpu, .gpu)] {
+            let alone = logits(after: [device])
+            let second = logits(after: [other, device])
+            XCTAssertEqual(alone.count, second.count)
+            let differing = zip(alone, second).filter { $0.bitPattern != $1.bitPattern }.count
+            print("deepseek_v4 \(device) logits after \(other): \(differing) differ")
+            XCTAssertFalse(alone.contains { $0.isNaN }, "\(device)")
+            XCTAssertEqual(differing, 0, "\(device) logits after a \(other) run")
         }
     }
 
