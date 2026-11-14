@@ -438,6 +438,28 @@ final class FileBackedEmbeddingTests: XCTestCase {
         }
     }
 
+    func testModelMemoryReportsFileBackedTables() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try saveCheckpoint(
+            Model(embedding()), url: directory.appendingPathComponent("model.safetensors"))
+
+        let backed = Model(embedding())
+        try loadWeights(modelDirectory: directory, model: backed)
+        XCTAssertTrue(backed.embedding is FileBackedQuantizedEmbedding)
+        let backedMemory = try backed.memory()
+        XCTAssertGreaterThan(backedMemory.fileBacked, 0)
+        XCTAssertEqual(backedMemory.fileBacked, backedMemory.model)
+
+        let resident = Model(embedding())
+        try loadWeights(modelDirectory: directory, model: resident, embeddingStorage: .resident)
+        let residentMemory = try resident.memory()
+        XCTAssertGreaterThan(residentMemory.model, 0)
+        XCTAssertEqual(residentMemory.fileBacked, 0)
+    }
+
     func testOversizedBackingFailsBeforeReadingTheArray() throws {
         let array = MLXArray.zeros([131073, 16384], dtype: .uint8)
         let active = Memory.activeMemory

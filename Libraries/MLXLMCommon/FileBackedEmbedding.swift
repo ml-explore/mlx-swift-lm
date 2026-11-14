@@ -7,7 +7,6 @@ import MLXNN
 #if canImport(Darwin)
 import Cmlx
 import Darwin
-import os
 #endif
 
 /// Storage for embedding tables during model loading.
@@ -25,8 +24,7 @@ public protocol InputOnlyEmbeddingsProviding: Module {
 }
 
 #if canImport(Darwin)
-private let embeddingStorageLogger = Logger(
-    subsystem: "mlx-swift-lm", category: "embedding-storage")
+private let embeddingStorageLogger = MLXLogger(label: "embedding-storage")
 #endif
 
 package func prepareEmbeddingStorage(
@@ -45,6 +43,20 @@ package func prepareEmbeddingStorage(
     }
     #else
     return 0
+    #endif
+}
+
+/// The arrays of the file-backed embedding tables in `module`.
+func fileBackedEmbeddingArrays(in module: Module) -> [MLXArray] {
+    #if canImport(Darwin)
+    return module.namedModules().flatMap { _, module -> [MLXArray] in
+        guard module is FileBackedEmbedding || module is FileBackedQuantizedEmbedding else {
+            return []
+        }
+        return module.parameters().flattened().map(\.1)
+    }
+    #else
+    return []
     #endif
 }
 
