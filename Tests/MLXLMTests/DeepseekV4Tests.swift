@@ -592,7 +592,8 @@ final class DeepseekV4Tests: XCTestCase {
     }
 
     /// The normal load of the bfloat16 checkpoint keeps the reference's float32 weights (logits
-    /// head, compressor projections, router) in float32 and every other parameter as stored.
+    /// head, compressor projections, router, RMSNorm weights) in float32 and every other
+    /// parameter as stored.
     /// Prefill and decode give exactly what casting those weights at use gives, which is also
     /// the path after a caller casts them back to bfloat16.
     func testBFloat16LoadKeepsReferenceFloat32Weights() throws {
@@ -600,8 +601,9 @@ final class DeepseekV4Tests: XCTestCase {
             let model = try loadTiny(indexBlock: 0, indexKeep: 0)
             let parameters = model.parameters().flattened()
             let kept = parameters.filter { DeepseekV4Weights.isFloat32Weight($0.0) }
-            // 4 routers, 5 compressors (attention and indexer) with wkv and wgate, the head.
-            XCTAssertEqual(kept.count, 15)
+            // 4 routers, 5 compressors (attention and indexer) with wkv and wgate, the head;
+            // norms: 4 per layer (attn, ffn, q, kv), one per compressor, the final one.
+            XCTAssertEqual(kept.count, 15 + 22)
             // Stored as float32 in the checkpoint, as in the reference.
             let storedFloat32 = ["_hc.", "hc_head.", ".ape", ".attn_sink", ".gate.bias"]
             for (key, value) in parameters {

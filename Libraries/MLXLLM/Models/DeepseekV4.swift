@@ -244,6 +244,8 @@ private func deepseekV4LimitedSwiGLU(limit: Float) -> @Sendable (MLXArray, MLXAr
 }
 
 /// As the reference's `RMSNorm`: float32 input and weight, rounded once to the input dtype.
+/// The weight is stored in float32 (`sanitize`), so its cast here only acts on a weight that a
+/// caller has set to another dtype.
 final class DeepseekV4RMSNorm: RMSNorm {
     override func callAsFunction(_ x: MLXArray) -> MLXArray {
         MLXFast.rmsNorm(x.asType(.float32), weight: weight.asType(.float32), eps: eps)
@@ -1542,11 +1544,13 @@ enum DeepseekV4Weights {
         return result
     }
 
-    /// The reference's float32 weights: the logits head, the compressor projections and the
-    /// router. Their forward passes also cast at use, so a later cast to another dtype only
-    /// brings back the per-step cast.
+    /// The reference's float32 weights: the logits head, the compressor projections, the router
+    /// and the RMSNorm weights. Their forward passes also cast at use, so a later cast to another
+    /// dtype only brings back the per-step cast.
     static func isFloat32Weight(_ name: String) -> Bool {
         name == "head.weight" || name.hasSuffix(".compressor.wkv.weight")
             || name.hasSuffix(".compressor.wgate.weight") || name.hasSuffix(".ffn.gate.weight")
+            || name == "norm.weight" || name.hasSuffix("_norm.weight")
+            || name.hasSuffix(".compressor.norm.weight")
     }
 }
