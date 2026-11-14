@@ -1130,6 +1130,8 @@ final class DeepseekV4Attention: Module {
     let groups: Int
     let scale: Float
     let normEps: Float
+    /// Per-head query RMS normalization without a weight, in the activation dtype.
+    let queryNorm: @Sendable (MLXArray) -> MLXArray
 
     @ModuleInfo(key: "wq_a") var wqA: Linear
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
@@ -1150,6 +1152,22 @@ final class DeepseekV4Attention: Module {
         self.groups = config.oGroups
         self.scale = pow(Float(config.headDim), -0.5)
         self.normEps = config.rmsNormEps
+        let eps = config.rmsNormEps
+        // The reference's ops in the activation dtype. Compiled on the GPU, where the fused
+        // steps after the reduction round exactly as when run one by one; the CPU's compiled
+        // float32 kernel does not, so the CPU runs them one by one. `mean` is its sum times
+        // `1 / headDim` in the input dtype, written out so the traced graph holds a constant.
+        let inverseCount = 1 / Double(config.headDim)
+        let compiled = compile(shapeless: true) { (q: MLXArray) -> MLXArray in
+            let meanSquare =
+                square(q).sum(axis: -1, keepDims: true)
+                * MLXArray(Float(inverseCount)).asType(q.dtype)
+            return q * rsqrt(meanSquare + eps)
+        }
+        self.queryNorm = { q in
+            if Device.defaultDevice().deviceType == .gpu { return compiled(q) }
+            return q * rsqrt(mean(square(q), axis: -1, keepDims: true) + eps)
+        }
 
         _wqA.wrappedValue = Linear(config.hiddenSize, config.qLoraRank, bias: false)
         _qNorm.wrappedValue = DeepseekV4RMSNorm(
@@ -1191,7 +1209,7 @@ final class DeepseekV4Attention: Module {
         let qResidual = qNorm(wqA(x))
         var q = wqB(qResidual).reshaped(B, L, heads, headDim)
         // The reference normalizes the query heads in the activation dtype, not float32.
-        q = q * rsqrt(mean(square(q), axis: -1, keepDims: true) + normEps)
+        q = queryNorm(q)
         q = rope(q.transposed(0, 2, 1, 3), offset: offset)
         var kv = kvNorm(wkv(x)).reshaped(B, 1, L, headDim)
         kv = rope(kv, offset: offset)
