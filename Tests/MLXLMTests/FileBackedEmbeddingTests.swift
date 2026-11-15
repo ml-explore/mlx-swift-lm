@@ -68,6 +68,12 @@ final class FileBackedEmbeddingTests: XCTestCase {
             file: file, line: line)
     }
 
+    private func address(of array: MLXArray) -> UInt? {
+        array.asData(access: .noCopy).data.withUnsafeBytes {
+            $0.baseAddress.map(UInt.init(bitPattern:))
+        }
+    }
+
     func testLoaderSelectsDeclaredSparseTablesAndHonorsResidentOverride() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             UUID().uuidString)
@@ -483,7 +489,7 @@ final class FileBackedEmbeddingTests: XCTestCase {
         try rebased.write(to: url)
     }
 
-    func testCheckpointMappingSelectsAlignedStorageAndPreservesAllBits() throws {
+    func testCheckpointMappingBacksEveryOffsetAndPreservesAllBits() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
@@ -498,25 +504,15 @@ final class FileBackedEmbeddingTests: XCTestCase {
                         let model = Model(embedding(dtype: dtype, bits: bits))
                         let storage = try XCTUnwrap(
                             CheckpointTensorStorage(
-                                model: model, policy: .automatic, urls: [url]))
+                                model: model, policy: .automatic, urls: [url],
+                                directory: directory))
                         var checkpoint = try loadModelCheckpoint(
                             urls: [url], mappings: storage.mappings)
                         storage.record(checkpoint.weights)
                         let loadedWeight = try XCTUnwrap(checkpoint.weights["embedding.weight"])
-                        let retained = try storage.array(matching: loadedWeight)
-                        XCTAssertEqual(
-                            retained != nil, offset.isMultiple(of: MemoryLayout<UInt64>.alignment))
-                        let loadedAddress = loadedWeight.asData(access: .noCopy).data
-                            .withUnsafeBytes {
-                                $0.baseAddress.map(UInt.init(bitPattern:))
-                            }
-                        if let retained {
-                            let retainedAddress = retained.asData(access: .noCopy).data
-                                .withUnsafeBytes {
-                                    $0.baseAddress.map(UInt.init(bitPattern:))
-                                }
-                            XCTAssertEqual(loadedAddress, retainedAddress)
-                        }
+                        // The loader already returns file-backed storage, mapped or copied.
+                        let retained = try XCTUnwrap(storage.array(matching: loadedWeight))
+                        XCTAssertEqual(address(of: loadedWeight), address(of: retained))
                         try applyCheckpoint(checkpoint, to: model)
                         checkpoint.weights.removeAll()
                         XCTAssertEqual(
@@ -559,6 +555,66 @@ final class FileBackedEmbeddingTests: XCTestCase {
         XCTAssertEqual(
             try FileManager.default.contentsOfDirectory(atPath: directory.path),
             ["model.safetensors"])
+    }
+
+    func testLoaderCopiesMisalignedTablesFromTheCheckpoint() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("model.safetensors")
+        // More than one copy chunk, and the last tensor in the file, so the copy ends at its end.
+        let rows = 8193
+        let values = MLXArray.arange(rows * 1024, dtype: .float32).reshaped(rows, 1024)
+        let source = Model(Embedding(weight: values))
+        source.embedding.freeze()
+        try saveCheckpoint(source, url: url, offset: 3)
+        let model = Model(Embedding(embeddingCount: rows, dimensions: 1024))
+        model.embedding.freeze()
+        let storage = try XCTUnwrap(
+            CheckpointTensorStorage(
+                model: model, policy: .automatic, urls: [url], directory: directory))
+        let checkpoint = try loadModelCheckpoint(urls: [url], mappings: storage.mappings)
+        storage.record(checkpoint.weights)
+        let loaded = try XCTUnwrap(checkpoint.weights["embedding.weight"])
+        let retained = try XCTUnwrap(storage.array(matching: loaded))
+        XCTAssertEqual(address(of: loaded), address(of: retained))
+        assertIdentical(loaded, values)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: directory.path),
+            ["model.safetensors"])
+
+        try loadWeights(modelDirectory: directory, model: model)
+        XCTAssertTrue(model.embedding is FileBackedEmbedding)
+        assertIdentical(model.embedding.weight, values)
+        let indices = MLXArray([0, 4096, 8191, 8192, -1])
+        assertIdentical(model.embedding(indices), values.take(indices, axis: 0))
+    }
+
+    func testFailedCopyLoadsTheTableAndBacksItAfterLoading() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("model.safetensors")
+        let source = Model(embedding())
+        try saveCheckpoint(source, url: url, offset: 3)
+        let model = Model(embedding())
+        let storage = try XCTUnwrap(
+            CheckpointTensorStorage(
+                model: model, policy: .automatic, urls: [url],
+                directory: directory.appendingPathComponent("missing")))
+        var checkpoint = try loadModelCheckpoint(urls: [url], mappings: storage.mappings)
+        storage.record(checkpoint.weights)
+        let loaded = try XCTUnwrap(checkpoint.weights["embedding.weight"])
+        XCTAssertThrowsError(try storage.array(matching: loaded))
+        try applyCheckpoint(checkpoint, to: model)
+        checkpoint.weights.removeAll()
+        XCTAssertEqual(
+            try prepareEmbeddingStorage(in: model, directory: directory, checkpoint: storage), 1)
+        XCTAssertTrue(model.embedding is FileBackedQuantizedEmbedding)
+        assertIdentical(
+            model.embedding(MLXArray([0, 256, -1])), source.embedding(MLXArray([0, 256, -1])))
     }
 
     func testEarlyMappingRequiresKnownAffineQuantization() throws {

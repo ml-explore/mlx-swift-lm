@@ -65,58 +65,126 @@ func fileBackedEmbeddingArrays(in module: Module) -> [MLXArray] {
 /// Copy one array into page-aligned temporary storage. The mapping owns its disk blocks.
 package func fileBackedArray(_ source: MLXArray, directory: URL) throws -> MLXArray {
     try withExtendedLifetime(source) {
-        let page = Int(getpagesize())
-        let (padded, overflow) = source.nbytes.addingReportingOverflow(page - 1)
-        guard source.nbytes > 0, !overflow else { throw POSIXError(.EINVAL) }
-        let pageCount = padded / page
-        let length = pageCount * page
-        guard length / source.itemSize <= Int32.max,
-            length <= GPU.deviceInfo().maxBufferSize
-        else { throw POSIXError(.EOVERFLOW) }
-        var path = Array(directory.appendingPathComponent("mlx-embedding-XXXXXX").path.utf8CString)
-        let descriptor = mkstemp(&path)
-        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        defer { close(descriptor) }
-        guard unlink(path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        // Do not fill the file cache with rows that inference may never read.
-        _ = fcntl(descriptor, F_NOCACHE, 1)
-        guard ftruncate(descriptor, off_t(length)) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        let data = source.asData(access: .noCopyIfContiguous).data
-        try data.withUnsafeBytes { bytes in
-            guard let base = bytes.baseAddress else { throw POSIXError(.EINVAL) }
-            var position = 0
-            while position < bytes.count {
-                let count = pwrite(
-                    descriptor, base.advanced(by: position),
-                    min(bytes.count - position, 8 * 1024 * 1024),
-                    off_t(position)
-                )
-                if count < 0 && errno == EINTR { continue }
-                guard count > 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-                position += count
+        try temporaryFileArray(like: source, directory: directory) { descriptor in
+            let data = source.asData(access: .noCopyIfContiguous).data
+            try data.withUnsafeBytes { bytes in
+                guard let base = bytes.baseAddress else { throw POSIXError(.EINVAL) }
+                try transfer(bytes.count) {
+                    pwrite(descriptor, base + $0, min(bytes.count - $0, chunkSize), off_t($0))
+                }
             }
         }
-        guard let pointer = mmap(nil, length, PROT_READ | PROT_WRITE, MAP_PRIVATE, descriptor, 0),
-            pointer != MAP_FAILED
-        else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+}
+
+/// Copy the bytes of an array shaped like `template` at `offset` in `descriptor` into
+/// page-aligned temporary storage, one chunk at a time.
+func fileBackedArray(
+    like template: MLXArray, copying descriptor: Int32, offset: Int64, directory: URL
+) throws -> MLXArray {
+    try temporaryFileArray(like: template, directory: directory) {
+        try copyFileBytes(template.nbytes, from: descriptor, at: offset, to: $0)
+    }
+}
+
+/// Map the bytes of an array shaped like `template` at `offset` in `descriptor`. The offset
+/// must be a multiple of the element size. The array owns the private mapping.
+func fileBackedArray(
+    like template: MLXArray, mapping descriptor: Int32, offset: Int64
+) throws -> MLXArray {
+    let page = Int(getpagesize())
+    let leading = Int(offset % Int64(page))
+    let length = try mappingLength(of: template, leading: leading)
+    guard
+        let pointer = mmap(
+            nil, length, PROT_READ | PROT_WRITE, MAP_PRIVATE, descriptor, offset - Int64(leading)),
+        pointer != MAP_FAILED
+    else { throw POSIXError.lastError }
+    // Sparse lookups do not need read-ahead for neighboring rows.
+    _ = madvise(pointer, length, MADV_RANDOM)
+    let storage = MLXArray(
+        rawPointer: pointer, [length / page, page / template.itemSize], dtype: template.dtype
+    ) {
+        munmap(pointer, length)
+    }
+    guard
+        mlx_array_data_uint8(storage.ctx).map(UnsafeRawPointer.init)
+            == UnsafeRawPointer(pointer)
+    else { throw POSIXError(.ENOTSUP) }
+    let array = asStrided(
+        storage, template.shape, offset: leading / template.itemSize, stream: .cpu)
+    eval(array)
+    return array
+}
+
+// Bytes per read or write. Smaller chunks made cold loads measurably slower.
+private let chunkSize = 32 * 1024 * 1024
+
+/// The page-rounded length of a mapping that holds `template` after `leading` bytes.
+private func mappingLength(of template: MLXArray, leading: Int) throws -> Int {
+    guard template.nbytes > 0 else { throw POSIXError(.EINVAL) }
+    let page = Int(getpagesize())
+    let (extent, overflow) = template.nbytes.addingReportingOverflow(leading + page - 1)
+    let length = extent / page * page
+    guard !overflow, length / template.itemSize <= Int32.max,
+        length <= GPU.deviceInfo().maxBufferSize
+    else { throw POSIXError(.EOVERFLOW) }
+    return length
+}
+
+/// An array shaped like `template` in an unlinked temporary file that `fill` writes.
+private func temporaryFileArray(
+    like template: MLXArray, directory: URL, fill: (Int32) throws -> Void
+) throws -> MLXArray {
+    let length = try mappingLength(of: template, leading: 0)
+    var path = Array(directory.appendingPathComponent("mlx-embedding-XXXXXX").path.utf8CString)
+    let descriptor = mkstemp(&path)
+    guard descriptor >= 0 else { throw POSIXError.lastError }
+    defer { close(descriptor) }
+    guard unlink(path) == 0 else { throw POSIXError.lastError }
+    // Do not fill the file cache with rows that inference may never read.
+    _ = fcntl(descriptor, F_NOCACHE, 1)
+    guard ftruncate(descriptor, off_t(length)) == 0 else { throw POSIXError.lastError }
+    try fill(descriptor)
+    return try fileBackedArray(like: template, mapping: descriptor, offset: 0)
+}
+
+/// Copy `count` bytes at `offset` in `source` to the start of `destination`.
+private func copyFileBytes(
+    _ count: Int, from source: Int32, at offset: Int64, to destination: Int32
+) throws {
+    // Page alignment lets the writes bypass the file cache.
+    let buffer = UnsafeMutableRawPointer.allocate(
+        byteCount: min(chunkSize, count), alignment: Int(getpagesize()))
+    defer { buffer.deallocate() }
+    var copied = 0
+    while copied < count {
+        let length = min(chunkSize, count - copied)
+        try transfer(length) {
+            pread(source, buffer + $0, length - $0, offset + Int64(copied + $0))
         }
-        // Sparse lookups do not need read-ahead for neighboring rows.
-        _ = madvise(pointer, length, MADV_RANDOM)
-        let storage = MLXArray(
-            rawPointer: pointer, [pageCount, page / source.itemSize], dtype: source.dtype
-        ) {
-            munmap(pointer, length)
+        try transfer(length) {
+            pwrite(destination, buffer + $0, length - $0, off_t(copied + $0))
         }
-        guard
-            mlx_array_data_uint8(storage.ctx).map(UnsafeRawPointer.init)
-                == UnsafeRawPointer(pointer)
-        else { throw POSIXError(.ENOTSUP) }
-        let array = asStrided(storage, source.shape, stream: .cpu)
-        eval(array)
-        return array
+        copied += length
+    }
+}
+
+/// Call `step` with the bytes done so far until `count` bytes are done.
+private func transfer(_ count: Int, _ step: (Int) -> Int) throws {
+    var done = 0
+    while done < count {
+        let result = step(done)
+        if result < 0 && errno == EINTR { continue }
+        guard result > 0 else { throw result < 0 ? POSIXError.lastError : POSIXError(.EIO) }
+        done += result
+    }
+}
+
+extension POSIXError {
+    /// The error for the current `errno`.
+    fileprivate static var lastError: POSIXError {
+        POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
 }
 

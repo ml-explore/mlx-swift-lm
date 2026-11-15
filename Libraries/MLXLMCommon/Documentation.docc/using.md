@@ -36,8 +36,9 @@ file-backed storage so unused rows can be reclaimed. Models declare these tables
 ``InputOnlyEmbeddingsProviding``. Tensor values and precision are unchanged.
 Tied output tables, custom embeddings, and unsupported formats keep normal storage.
 
-Compatible checkpoint tensors map directly. Other eligible tables use temporary files,
-with one copy per load and additional disk space. Loading peak memory can remain unchanged.
+Tables at 8-byte aligned file offsets map straight from the checkpoint. Other tables are
+copied once per load from the checkpoint into temporary files, which use extra disk space.
+Neither way loads the whole table into memory.
 Select ``EmbeddingStoragePolicy/resident`` to keep normal MLX storage.
 
 A table that a checkpoint splits by rows into several tensors can use ``ShardedEmbedding``.

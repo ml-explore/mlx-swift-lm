@@ -17,10 +17,10 @@ package final class CheckpointTensorStorage {
         let handle: FileHandle
         let url: URL
         let status: stat
-        let maximumLength: Int
+        let directory: URL
         private let mappedAddresses = OSAllocatedUnfairLock(initialState: Set<UInt>())
 
-        init(url: URL, maximumLength: Int) throws {
+        init(url: URL, directory: URL) throws {
             let handle = try FileHandle(forReadingFrom: url)
             var status = stat()
             guard fstat(handle.fileDescriptor, &status) == 0,
@@ -29,7 +29,7 @@ package final class CheckpointTensorStorage {
             self.handle = handle
             self.url = url
             self.status = status
-            self.maximumLength = maximumLength
+            self.directory = directory
         }
 
         deinit { try? handle.close() }
@@ -55,48 +55,25 @@ package final class CheckpointTensorStorage {
             mappedAddresses.withLock { $0.contains(address) }
         }
 
+        /// The tensor in file-backed storage, or nil if the file changed.
         func array(for array: MLXArray, span: SafetensorSpan) throws -> MLXArray? {
-            // Keep larger scalar views aligned on runtimes with typed item reads.
-            guard unchanged(checkPath: false),
-                span.byteOffset.isMultiple(of: Int64(MemoryLayout<UInt64>.alignment))
-            else { return nil }
-            let page = Int(getpagesize())
+            guard unchanged(checkPath: false) else { return nil }
             guard span.byteOffset >= 0, span.byteCount > 0,
                 span.byteCount == array.nbytes,
                 span.byteOffset <= status.st_size,
                 span.byteCount <= status.st_size - span.byteOffset
             else { throw POSIXError(.EINVAL) }
-            let alignedOffset = span.byteOffset / Int64(page) * Int64(page)
-            let offset = Int(span.byteOffset - alignedOffset)
-            let (extent, overflow) = array.nbytes.addingReportingOverflow(offset + page - 1)
-            guard !overflow else { throw POSIXError(.EOVERFLOW) }
-            let pageCount = extent / page
-            guard pageCount * page / array.itemSize <= Int32.max,
-                pageCount * page <= maximumLength
-            else {
-                throw POSIXError(.EOVERFLOW)
-            }
-            let length = pageCount * page
-            guard
-                let pointer = mmap(
-                    nil, length, PROT_READ | PROT_WRITE, MAP_PRIVATE,
-                    handle.fileDescriptor, off_t(alignedOffset)),
-                pointer != MAP_FAILED
-            else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-            _ = madvise(pointer, length, MADV_RANDOM)
-            let storage = MLXArray(
-                rawPointer: pointer, [pageCount, page / array.itemSize], dtype: array.dtype
-            ) {
-                munmap(pointer, length)
-            }
-            guard
-                mlx_array_data_uint8(storage.ctx).map(UnsafeRawPointer.init)
-                    == UnsafeRawPointer(pointer)
-            else { return nil }
-            let result = asStrided(
-                storage, array.shape, offset: offset / array.itemSize, stream: .cpu)
-            eval(result)
-            let address = UInt(bitPattern: pointer) + UInt(offset)
+            // Typed reads need aligned views, so tensors at other offsets are copied first.
+            let result =
+                if span.byteOffset.isMultiple(of: Int64(MemoryLayout<UInt64>.alignment)) {
+                    try fileBackedArray(
+                        like: array, mapping: handle.fileDescriptor, offset: span.byteOffset)
+                } else {
+                    try fileBackedArray(
+                        like: array, copying: handle.fileDescriptor, offset: span.byteOffset,
+                        directory: directory)
+                }
+            let address = UInt(bitPattern: mlx_array_data_uint8(result.ctx))
             mappedAddresses.withLock { _ = $0.insert(address) }
             return result
         }
@@ -130,21 +107,22 @@ package final class CheckpointTensorStorage {
 
     let mappings: [String: Mapping]
 
+    /// Tensors that cannot map in place are copied into unlinked files in `directory`.
     init?(
         model: BaseLanguageModel, policy: EmbeddingStoragePolicy, urls: [URL],
-        quantization: BaseConfiguration.PerLayerQuantization? = nil
+        quantization: BaseConfiguration.PerLayerQuantization? = nil,
+        directory: URL = FileManager.default.temporaryDirectory
     ) {
         #if canImport(Darwin)
         guard policy == .automatic,
             let provider = model as? any InputOnlyEmbeddingsProviding,
-            !provider.inputOnlyEmbeddings.isEmpty
+            !provider.inputOnlyEmbeddings.isEmpty,
+            GPU.deviceInfo().maxBufferSize > 0
         else { return nil }
-        let maximumLength = GPU.deviceInfo().maxBufferSize
-        guard maximumLength > 0 else { return nil }
         var locations: [String: Mapping] = [:]
         do {
             for url in urls {
-                let file = try File(url: url, maximumLength: maximumLength)
+                let file = try File(url: url, directory: directory)
                 for span in try safetensorSpansInFileOrder(url: url) {
                     locations[span.name] = Mapping(file: file, span: span)
                 }
