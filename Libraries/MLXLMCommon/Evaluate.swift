@@ -2925,7 +2925,7 @@ private func generateLoopTask<
             // settles any in-flight evaluation at the end of the task body.
             tokenLoop: while !Task.isCancelled {
                 if let steering, handler.canEndForSteering, steering.requestsEarlyBoundary {
-                    stopReason = .steered
+                    stopReason = steering.isInterrupted ? .interrupted : .steered
                     break
                 }
                 guard let token = autoreleasepool(invoking: { iterator.next() }) else { break }
@@ -3097,6 +3097,10 @@ public enum GenerateStopReason: Sendable {
     /// This model step ended at a supported boundary to apply pending steering.
     /// The owning chat turn continues with the additional user input.
     case steered
+
+    /// This model step ended at a supported boundary because its chat response was
+    /// interrupted. The response keeps its output and ends.
+    case interrupted
 
     /// Generation stopped due to explicit task cancellation or early stream termination.
     case cancelled

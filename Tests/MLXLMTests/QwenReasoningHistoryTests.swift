@@ -224,20 +224,7 @@ final class QwenReasoningHistoryTests: XCTestCase {
 
     func testSteeringInsideAThoughtRecordsItAndContinuesTheCache() async throws {
         let (observations, continuation) = AsyncStream<[RecordedMessage]>.makeStream()
-        let tokenizer = ByteTokenizer()
-        let outputTokens =
-            tokenizer.encode(text: "Plan</think>answer", addSpecialTokens: false) + [256]
-        let processor = RecordingProcessor(
-            promptTail: "<think>\n", tokenizer: tokenizer, continuation: continuation,
-            replaysReasoning: true)
-        let context = ModelContext(
-            configuration: ModelConfiguration(
-                id: "steered-reasoning-test", eosTokenIds: [256],
-                reasoningConfig: QwenReasoningProtocol.tagged),
-            model: ScriptedModel(output: outputTokens), processor: processor, tokenizer: tokenizer)
-        let session = ChatSession(
-            context,
-            generateParameters: GenerateParameters(maxTokens: outputTokens.count, temperature: 0))
+        let session = thoughtSession(recording: continuation)
 
         let stream = session.streamDetails(to: "first")
         let id = try session.steer("shorter")
@@ -260,6 +247,50 @@ final class QwenReasoningHistoryTests: XCTestCase {
         XCTAssertEqual(
             infos.last?.cachedPromptTokenCount,
             infos.first.map { $0.promptTokenCount + $0.generationTokenCount })
+    }
+
+    func testInterruptInsideAThoughtKeepsItForTheNextCall() async throws {
+        let (observations, continuation) = AsyncStream<[RecordedMessage]>.makeStream()
+        let session = thoughtSession(recording: continuation)
+
+        let stream = session.streamDetails(to: "first")
+        try session.interrupt()
+        var interrupted: GenerateCompletionInfo?
+        for try await event in stream { interrupted = event.info ?? interrupted }
+        var next: GenerateCompletionInfo?
+        for try await event in session.streamDetails(to: "second") { next = event.info ?? next }
+        continuation.finish()
+        var renders: [[RecordedMessage]] = []
+        for await messages in observations { renders.append(messages) }
+
+        XCTAssertEqual(interrupted?.stopReason, .interrupted)
+        let assistant = try XCTUnwrap(renders.last?.first { $0.role == .assistant })
+        XCTAssertEqual(assistant.reasoning, "P")
+        XCTAssertEqual(assistant.content, "")
+        XCTAssertEqual(
+            next?.cachedPromptTokenCount,
+            interrupted.map { $0.promptTokenCount + $0.generationTokenCount })
+    }
+
+    /// A session whose prompt primes a thought, and whose transcript replays it as Qwen
+    /// templates do. Its model starts thinking at once.
+    private func thoughtSession(
+        recording continuation: AsyncStream<[RecordedMessage]>.Continuation
+    ) -> ChatSession {
+        let tokenizer = ByteTokenizer()
+        let outputTokens =
+            tokenizer.encode(text: "Plan</think>answer", addSpecialTokens: false) + [256]
+        let processor = RecordingProcessor(
+            promptTail: "<think>\n", tokenizer: tokenizer, continuation: continuation,
+            replaysReasoning: true)
+        let context = ModelContext(
+            configuration: ModelConfiguration(
+                id: "thought-test", eosTokenIds: [256],
+                reasoningConfig: QwenReasoningProtocol.tagged),
+            model: ScriptedModel(output: outputTokens), processor: processor, tokenizer: tokenizer)
+        return ChatSession(
+            context,
+            generateParameters: GenerateParameters(maxTokens: outputTokens.count, temperature: 0))
     }
 
     /// A regenerated prompt can extend the cache by no more than its prefill, as

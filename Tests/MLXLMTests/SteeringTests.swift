@@ -191,6 +191,20 @@ final class SteeringTests: XCTestCase {
         XCTAssertEqual(result.generatedTokens, [1, 4, 4])
     }
 
+    func testInterruptedStepEndsAtTheNextSafePoint() async throws {
+        let control = SteeringControl()
+        try control.interrupt()
+        let (stream, task) = generateTaskRecordingTokens(
+            promptTokenCount: 2, modelConfiguration: ModelConfiguration(id: "test"),
+            tokenizer: BoundaryTokenizer(), iterator: FinalizingIterator(tokens: [1, 4, 4]),
+            steering: control)
+        var info: GenerateCompletionInfo?
+        for await event in stream { info = event.info ?? info }
+        let result = (await task.value).consume()
+        XCTAssertEqual(result.generatedTokens, [1, 4])
+        XCTAssertEqual(info?.stopReason, .interrupted)
+    }
+
     func testMailboxBoundsAndPromotion() throws {
         let control = SteeringControl()
         var ids: [UUID] = []
@@ -210,6 +224,23 @@ final class SteeringTests: XCTestCase {
         XCTAssertEqual(try control.take(closeIfEmpty: false).count, 1)
         XCTAssertTrue(try control.take(closeIfEmpty: true).isEmpty)
         XCTAssertThrowsError(try control.enqueue("closed", policy: .nextSafeBoundary))
+    }
+
+    func testInterruptEndsTheResponseAtItsNextSafePointAndRefusesInput() throws {
+        let control = SteeringControl()
+        let pending = try control.enqueue("queued", policy: .nextStepBoundary)
+        XCTAssertFalse(control.requestsEarlyBoundary)
+        try control.interrupt()
+        try control.interrupt()
+        XCTAssertTrue(control.requestsEarlyBoundary)
+        XCTAssertFalse(control.isOpen)
+        XCTAssertThrowsError(try control.enqueue("late", policy: .nextSafeBoundary)) {
+            XCTAssertEqual($0 as? SteeringError, .responseEnded)
+        }
+        XCTAssertEqual(try control.closeAndTake().map(\.id), [pending])
+        XCTAssertThrowsError(try control.interrupt()) {
+            XCTAssertEqual($0 as? SteeringError, .responseEnded)
+        }
     }
 
     func testAcceptanceRacingCompletionIsNeverLost() async {
@@ -320,6 +351,22 @@ final class SteeringTests: XCTestCase {
             XCTAssertEqual($0 as? SteeringError, .responseEnded)
         }
         XCTAssertTrue(try live.take(closeIfEmpty: false).isEmpty)
+    }
+
+    func testInterruptTargetsTheRunningResponseAndEndsItsSteering() throws {
+        let session = SessionSteering()
+        XCTAssertThrowsError(try session.interrupt(nil)) {
+            XCTAssertEqual($0 as? SteeringError, .noActiveResponse)
+        }
+        let control = SteeringControl()
+        session.register(control)
+        session.start(control)
+        try session.interrupt(nil)
+        XCTAssertTrue(control.isInterrupted)
+        XCTAssertFalse(session.canSteer(nil))
+        XCTAssertThrowsError(try session.steer("late", policy: .nextSafeBoundary, response: nil)) {
+            XCTAssertEqual($0 as? SteeringError, .responseEnded)
+        }
     }
 
     func testNamedResponseIsNeverRetargeted() throws {
