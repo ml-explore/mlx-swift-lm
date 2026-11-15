@@ -277,8 +277,8 @@ public final class ChatSession {
         /// for an empty generation and rolled back along with the user's message.
         var producedReasoning = false
 
-        /// Reasoning the model finished: an answer or a tool call followed it.
-        /// Recorded beside the message for templates that replay it.
+        /// Reasoning the model finished: an answer or a tool call followed it, or the
+        /// step ended for steering. Recorded beside the message for templates that replay it.
         var finishedReasoning = ""
 
         /// Reasoning with nothing after it yet. A turn that ends here was cut off
@@ -293,7 +293,9 @@ public final class ChatSession {
         }
 
         mutating func consume(_ item: Generation) {
-            if item.chunk != nil || item.toolCall != nil {
+            // A steered step ends at a safe point, so its thought is complete as far as
+            // the cache goes. Recording it lets the next step continue that cache.
+            if item.chunk != nil || item.toolCall != nil || item.info?.stopReason == .steered {
                 finishedReasoning += openReasoning
                 openReasoning = ""
             }

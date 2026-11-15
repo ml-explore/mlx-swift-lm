@@ -23,7 +23,6 @@ struct SteeringIntegrationTests {
     func steersRunningResponse(policy: SteeringPolicy) async throws {
         let container = try await models.vlmContainer(
             for: .init(id: "mlx-community/Qwen3-VL-4B-Instruct-4bit"))
-        let configuration = await container.configuration
         let session = ChatSession(
             container, generateParameters: GenerateParameters(maxTokens: 128, temperature: 0))
         let stream = session.streamDetails(
@@ -55,7 +54,7 @@ struct SteeringIntegrationTests {
         let id = try #require(accepted)
         #expect(applied == [id])
         #expect(infos.count == 2)
-        if case .nextSafeBoundary = policy, configuration.reasoningConfig == nil {
+        if case .nextSafeBoundary = policy {
             #expect(infos.first?.stopReason == .steered)
         } else {
             #expect(infos.first?.stopReason != .steered)

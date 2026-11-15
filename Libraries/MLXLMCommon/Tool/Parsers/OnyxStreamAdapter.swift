@@ -171,6 +171,10 @@ private struct OnyxProtocolDecoder {
     private var responseDetokenizer: any StreamingDetokenizer
     private(set) var isInsideReasoning = false
 
+    /// Whether the latest token streamed private or visible text that ends in a
+    /// visible character. Headers, tool frames, and closing markers never do.
+    private(set) var endsInVisibleText = false
+
     init?(
         tokenizer: any Tokenizer, tools: [[String: any Sendable]]?,
         toolCallPolicy: ToolCallPolicy = .init()
@@ -193,6 +197,7 @@ private struct OnyxProtocolDecoder {
     }
 
     private mutating func route(_ step: OnyxParseStep) -> TokenStreamEvent? {
+        endsInVisibleText = false
         switch step {
         case .consumed:
             isInsideReasoning = false
@@ -206,12 +211,14 @@ private struct OnyxProtocolDecoder {
                 isInsideReasoning = true
                 reasoningDetokenizer.append(token: token)
                 if let text = reasoningDetokenizer.next(), !text.isEmpty {
+                    endsInVisibleText = text.last?.isWhitespace == false
                     return .reasoning(text)
                 }
             case .user:
                 isInsideReasoning = false
                 responseDetokenizer.append(token: token)
                 if let text = responseDetokenizer.next(), !text.isEmpty {
+                    endsInVisibleText = text.last?.isWhitespace == false
                     return .response(text)
                 }
             case .tool, .unknown:
@@ -279,6 +286,12 @@ struct OnyxStreamAdapter: TokenStreamDecoder {
     let receivesStopTokens = true
 
     var isInsideReasoning: Bool { protocolDecoder.isInsideReasoning }
+
+    /// A step can end inside a private or visible frame, after text that ends in a
+    /// visible character, with no stop-string prefix held back.
+    var canEndForSteering: Bool {
+        protocolDecoder.endsInVisibleText && stopStringFilter.buffer.isEmpty
+    }
 
     init?(
         tokenizer: any Tokenizer,

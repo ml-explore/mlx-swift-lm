@@ -296,6 +296,30 @@ struct HarmonyOutputRouterTests {
         #expect(adapter.rejectedToolCallCount == 2)
     }
 
+    @Test("the stream adapter can end for steering only after analysis or public text")
+    func adapterEndsForSteeringOnlyAfterFrameText() throws {
+        func check(_ script: [(piece: String, canEnd: Bool)]) throws {
+            let tokenizer = RouterDeterministicTokenizer(
+                tokens: script.map(\.piece) + routerControlTokens)
+            var adapter = try #require(
+                HarmonyStreamAdapter(tokenizer: tokenizer, tools: nil, stopStrings: []))
+            for (piece, canEnd) in script {
+                _ = adapter.push(try #require(tokenizer.convertTokenToId(piece))) { _ in true }
+                #expect(adapter.canEndForSteering == canEnd, "after \(piece.debugDescription)")
+            }
+        }
+        try check([
+            ("<|channel|>", false), ("analysis", false), ("<|message|>", false),
+            ("Plan", true), (" it\n", false), ("<|end|>", false),
+            ("<|start|>", false), ("assistant", false), ("<|channel|>", false), ("final", false),
+            ("<|message|>", false), ("Done", true), (".\n", false), ("<|return|>", false),
+        ])
+        try check([
+            ("<|channel|>", false), ("commentary to=functions.search", false),
+            ("<|message|>", false), (#"{"q":"x"}"#, false), ("<|call|>", false),
+        ])
+    }
+
     @Test("markers spelled out in the middle of analysis stay private reasoning")
     func literalMarkersInsideAnalysis() throws {
         let thought = "a frame ends with <|end|> and <|channel|>final<|message|> opens the answer"

@@ -13,8 +13,8 @@ public enum SteeringEvent: Sendable, Equatable {
 
 /// When a steering instruction may enter the model's context.
 public enum SteeringPolicy: Sendable {
-    /// End decoding at the first supported text boundary. Prefill, tools,
-    /// reasoning models, and framed protocols finish their step.
+    /// End decoding at the next safe point, in the answer or inside a thought.
+    /// Prefill and dispatched tools finish first.
     case nextSafeBoundary
     /// Allow the current model step and dispatched tools to finish.
     case nextStepBoundary

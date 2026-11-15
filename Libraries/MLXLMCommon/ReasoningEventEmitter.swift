@@ -227,6 +227,13 @@ public struct ReasoningEventEmitter: Sendable {
         }
     }
 
+    /// Whether the stream can end here with nothing held back: no partial
+    /// delimiter, no unresolved label, and no trailing whitespace of a thought.
+    var canEndForSteering: Bool {
+        if case .label = state { return false }
+        return pendingPrefix.isEmpty && heldWhitespace.isEmpty
+    }
+
     /// Ingests one decoded chunk and returns the segments it resolves to.
     ///
     /// May return zero segments (e.g. the chunk only advanced a partial

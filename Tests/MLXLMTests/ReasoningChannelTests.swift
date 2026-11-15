@@ -284,6 +284,14 @@ struct ReasoningChannelTests {
         #expect(!emitter.isInsideReasoning)
     }
 
+    @Test func steeringWaitsUntilTheLabelIsRead() {
+        var emitter = ReasoningEventEmitter(config: Self.gemma4, primedInside: false)
+        _ = emitter.process("<|channel>")
+        #expect(!emitter.canEndForSteering)
+        _ = emitter.process("thought\nweighing it up")
+        #expect(emitter.canEndForSteering)
+    }
+
     @Test func hasClosedReasoningLatchesForThoughtOnly() {
         var thought = ReasoningEventEmitter(config: Self.gemma4, primedInside: false)
         _ = thought.process("<|channel>thought\nx<channel|>")

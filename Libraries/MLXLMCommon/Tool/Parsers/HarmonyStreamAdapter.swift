@@ -14,6 +14,10 @@ struct HarmonyStreamAdapter: TokenStreamDecoder {
     let receivesStopTokens = true
     var isInsideReasoning: Bool { parser.isInsideReasoning }
 
+    /// A step can end inside an analysis or public frame, after text that ends in a
+    /// visible character, with no stop-string prefix held back.
+    var canEndForSteering: Bool { router.endsInVisibleText && stopStringFilter.buffer.isEmpty }
+
     init?(
         tokenizer: any Tokenizer,
         tools: [[String: any Sendable]]?,

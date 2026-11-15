@@ -222,6 +222,46 @@ final class QwenReasoningHistoryTests: XCTestCase {
         XCTAssertEqual(try text(in: raw), "")
     }
 
+    func testSteeringInsideAThoughtRecordsItAndContinuesTheCache() async throws {
+        let (observations, continuation) = AsyncStream<[RecordedMessage]>.makeStream()
+        let tokenizer = ByteTokenizer()
+        let outputTokens =
+            tokenizer.encode(text: "Plan</think>answer", addSpecialTokens: false) + [256]
+        let processor = RecordingProcessor(
+            promptTail: "<think>\n", tokenizer: tokenizer, continuation: continuation,
+            replaysReasoning: true)
+        let context = ModelContext(
+            configuration: ModelConfiguration(
+                id: "steered-reasoning-test", eosTokenIds: [256],
+                reasoningConfig: QwenReasoningProtocol.tagged),
+            model: ScriptedModel(output: outputTokens), processor: processor, tokenizer: tokenizer)
+        let session = ChatSession(
+            context,
+            generateParameters: GenerateParameters(maxTokens: outputTokens.count, temperature: 0))
+
+        let stream = session.streamDetails(to: "first")
+        let id = try session.steer("shorter")
+        var applied: [UUID] = []
+        var infos: [GenerateCompletionInfo] = []
+        for try await event in stream {
+            if case .steering(.applied(let ids)) = event { applied += ids }
+            if let info = event.info { infos.append(info) }
+        }
+        continuation.finish()
+        var renders: [[RecordedMessage]] = []
+        for await messages in observations { renders.append(messages) }
+
+        XCTAssertEqual(applied, [id])
+        XCTAssertEqual(infos.map(\.stopReason), [.steered, .stop])
+        let steered = try XCTUnwrap(renders.last?.first { $0.role == .assistant })
+        XCTAssertEqual(steered.reasoning, "P")
+        XCTAssertEqual(steered.content, "")
+        // The next step prefills only what follows the thought the cache already holds.
+        XCTAssertEqual(
+            infos.last?.cachedPromptTokenCount,
+            infos.first.map { $0.promptTokenCount + $0.generationTokenCount })
+    }
+
     /// A regenerated prompt can extend the cache by no more than its prefill, as
     /// when thinking is switched on after a thinking-off turn. Priming must be
     /// read from the whole prompt, not from the suffix the cache leaves to prefill.
@@ -288,6 +328,8 @@ final class QwenReasoningHistoryTests: XCTestCase {
         let promptTail: String
         let tokenizer: ByteTokenizer
         let continuation: AsyncStream<[RecordedMessage]>.Continuation
+        /// Replays an assistant turn's reasoning before its answer, as Qwen templates do.
+        var replaysReasoning = false
 
         func prepare(input: UserInput) throws -> LMInput {
             guard case .chat(let messages) = input.prompt else {
@@ -300,7 +342,13 @@ final class QwenReasoningHistoryTests: XCTestCase {
                         prefilledReasoningStartDelimiter: $0.prefilledReasoningStartDelimiter,
                         reasoning: $0.reasoning)
                 })
-            let transcript = messages.map { "\($0.role.rawValue): \($0.content)\n" }.joined()
+            let transcript = messages.map { message in
+                guard replaysReasoning, message.role == .assistant else {
+                    return "\(message.role.rawValue): \(message.content)\n"
+                }
+                let reasoning = message.reasoning ?? ""
+                return "assistant:\n<think>\n\(reasoning)\n</think>\n\n\(message.content)\n"
+            }.joined()
             let prompt = transcript + "assistant:\n" + promptTail
             return LMInput(
                 tokens: MLXArray(tokenizer.encode(text: prompt, addSpecialTokens: false)))
