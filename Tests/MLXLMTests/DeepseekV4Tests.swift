@@ -710,13 +710,25 @@ final class DeepseekV4Tests: XCTestCase {
         nonisolated(unsafe) let model = try loadTiny(indexBlock: 4, indexKeep: 2, float32: true)
         // 300 tokens complete ratio-4 and ratio-128 windows; the decode steps carry the overlap.
         let tokens = (0 ..< 300).map { Int32(2 + $0 * 7 % 120) }
+        // MLX's sorted gathered quantized matmul reads past the last weight column on some GPUs
+        // when the width is not a multiple of 64, and the fixture's expert width is 32. Chunks of
+        // 7 tokens give 14 expert routes per call, below the 16 at which SwitchGLU sorts them.
+        let chunkSize = 7
         func logits(after devices: [DeviceType]) -> [Float] {
             nonisolated(unsafe) var result = [Float]()
             Self.onNewThread {
                 for device in devices {
                     result = Device.withDefaultDevice(Device(device)) {
                         let cache = model.makeCache()
-                        var rows = [model(MLXArray(tokens).reshaped(1, 300), cache: cache)[0, -1]]
+                        var last = MLXArray()
+                        for start in stride(from: 0, to: tokens.count, by: chunkSize) {
+                            let end = min(start + chunkSize, tokens.count)
+                            let chunk = MLXArray(Array(tokens[start ..< end]))
+                            last = model(chunk.reshaped(1, end - start), cache: cache)[0, -1]
+                            eval(last)
+                            eval(cache)
+                        }
+                        var rows = [last]
                         for token in [5, 77, 31] as [Int32] {
                             rows.append(
                                 model(MLXArray([token]).reshaped(1, 1), cache: cache)[0, -1])
