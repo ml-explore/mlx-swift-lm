@@ -22,7 +22,7 @@ public struct ToolCall: Hashable, Codable, Sendable {
         }
 
         var argumentsObject: [String: any Sendable] {
-            arguments.mapValues { $0.sendableValue }
+            arguments.mapValues { $0.templateValue }
         }
     }
 
