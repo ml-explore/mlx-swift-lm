@@ -1683,6 +1683,30 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         #expect(relativeRMSError(cachedValues, values) < 0.5)
     }
 
+    @Test func testVarianceNormalizedKVCacheExposesLiveKeyValues() throws {
+        let cache = VarianceNormalizedKVCache(
+            tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
+        #expect(cache.currentKeyValues() == nil)
+
+        let keys = MLXRandom.normal([1, 1, 40, 32]).asType(.float16)
+        let values = MLXRandom.normal([1, 1, 40, 32]).asType(.float16)
+        let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
+        let live = try #require(cache.currentKeyValues())
+        eval(cachedKeys, cachedValues, live.keys, live.values)
+
+        #expect(live.keys.shape == keys.shape)
+        #expect(live.values.shape == values.shape)
+        #expect(allClose(live.keys, cachedKeys, rtol: 0, atol: 0).item(Bool.self))
+        #expect(allClose(live.values, cachedValues, rtol: 0, atol: 0).item(Bool.self))
+        #expect(relativeRMSError(live.keys, keys) < 0.5)
+        #expect(relativeRMSError(live.values, values) < 0.5)
+
+        cache.trim(10)
+        let trimmed = try #require(cache.currentKeyValues())
+        #expect(trimmed.keys.dim(2) == 30)
+        #expect(trimmed.values.dim(2) == 30)
+    }
+
     @Test func testVarianceNormalizedKVCacheInnerStateHoldsTheStoredSlabs() throws {
         let cache = VarianceNormalizedKVCache(
             tileSize: 32, keyBits: 4, valueBits: 4, sinkhornIterations: 2)
