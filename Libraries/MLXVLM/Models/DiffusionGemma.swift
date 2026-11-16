@@ -125,31 +125,30 @@ public final class DiffusionGemma: Module, VLMModel, BlockDiffusionLanguageModel
         try diffusionCore.newCache(parameters: parameters)
     }
 
-    private func projectedVisionFeatures(
-        pixels: MLXArray?,
-        outputLength: Int
-    ) -> MLXArray? {
-        guard let pixels else {
-            return nil
-        }
-        let features = embedVision(visionTower(pixels, outputLength: outputLength))
-        return features.reshaped(-1, features.dim(-1))
-    }
+    /// Encodes each image or video frame at its own size, as Gemma 4 does: the processor
+    /// pads them onto one canvas and records each real size in `frames`. Neighbouring
+    /// items of the same size share one tower call. Returns one `[tokens, D]` block per item.
+    private func visionFeatureBlocks(pixels: MLXArray?, frames: [THW]?) -> [MLXArray] {
+        guard var pixels else { return [] }
+        if pixels.ndim == 3 { pixels = expandedDimensions(pixels, axis: 0) }
+        let frames =
+            frames
+            ?? Array(repeating: THW(1, pixels.dim(2), pixels.dim(3)), count: pixels.dim(0))
 
-    private func splitFeatureBlocks(_ features: MLXArray?, sequenceLength: Int) -> [MLXArray] {
-        guard let features, sequenceLength > 0 else {
-            return []
+        var blocks: [MLXArray] = []
+        var start = 0
+        while start < frames.count {
+            let size = frames[start]
+            var end = start + 1
+            while end < frames.count, frames[end].h == size.h, frames[end].w == size.w {
+                end += 1
+            }
+            let features = embedVision(
+                visionTower(pixels[start ..< end, 0..., ..<size.h, ..<size.w]))
+            blocks += (0 ..< features.dim(0)).map { features[$0] }
+            start = end
         }
-
-        let blockCount = features.dim(0) / sequenceLength
-        guard blockCount > 0 else {
-            return []
-        }
-
-        return (0 ..< blockCount).map { blockIndex in
-            let start = blockIndex * sequenceLength
-            return features[start ..< (start + sequenceLength), 0...]
-        }
+        return blocks
     }
 
     private func visualBlockTypes(_ multimodalTokenTypes: MLXArray?) -> [Int32] {
@@ -176,45 +175,13 @@ public final class DiffusionGemma: Module, VLMModel, BlockDiffusionLanguageModel
         return result
     }
 
-    private func visualBlockLengths(_ multimodalTokenTypes: MLXArray?, matching tokenType: Int32)
-        -> [Int]
-    {
-        guard let multimodalTokenTypes else {
-            return []
-        }
-
-        let rawTypes =
-            multimodalTokenTypes.ndim == 2
-            ? multimodalTokenTypes[0, 0...].asArray(Int32.self)
-            : multimodalTokenTypes.asArray(Int32.self)
-
-        var result = [Int]()
-        var currentLength = 0
-        for type in rawTypes {
-            if type == tokenType {
-                currentLength += 1
-            } else if currentLength > 0 {
-                result.append(currentLength)
-                currentLength = 0
-            }
-        }
-        if currentLength > 0 {
-            result.append(currentLength)
-        }
-        return result
-    }
-
     private func orderedVisionFeatures(
-        imageFeatures: MLXArray?,
-        videoFeatures: MLXArray?,
-        multimodalTokenTypes: MLXArray?,
-        videoSequenceLength: Int
+        imageBlocks: [MLXArray],
+        videoBlocks: [MLXArray],
+        multimodalTokenTypes: MLXArray?
     ) -> MLXArray? {
-        var imageBlocks = splitFeatureBlocks(
-            imageFeatures, sequenceLength: config.visionSoftTokensPerImage)
-        var videoBlocks = splitFeatureBlocks(
-            videoFeatures,
-            sequenceLength: videoSequenceLength)
+        var imageBlocks = imageBlocks
+        var videoBlocks = videoBlocks
 
         var blocks = [MLXArray]()
         let blockTypes = visualBlockTypes(multimodalTokenTypes)
@@ -255,21 +222,13 @@ public final class DiffusionGemma: Module, VLMModel, BlockDiffusionLanguageModel
         let embeddingIds = MLX.where(scatterMask, MLXArray(config.imageTokenId), inputIds)
         var inputsEmbeds = diffusionCore.inputEmbeddings(inputIds: embeddingIds)
 
-        let imageFeatures = projectedVisionFeatures(
-            pixels: input.image?.pixels,
-            outputLength: config.visionSoftTokensPerImage)
-        let videoSequenceLength =
-            visualBlockLengths(input.multimodalTokenTypes, matching: 2).first
-            ?? DiffusionGemma4ProcessorConfiguration.defaultVideoSeqLength
-        let videoFeatures = projectedVisionFeatures(
-            pixels: input.video?.pixels,
-            outputLength: videoSequenceLength)
         guard
             let visionFeatures = orderedVisionFeatures(
-                imageFeatures: imageFeatures,
-                videoFeatures: videoFeatures,
-                multimodalTokenTypes: input.multimodalTokenTypes,
-                videoSequenceLength: videoSequenceLength)
+                imageBlocks: visionFeatureBlocks(
+                    pixels: input.image?.pixels, frames: input.image?.frames),
+                videoBlocks: visionFeatureBlocks(
+                    pixels: input.video?.pixels, frames: input.video?.frames),
+                multimodalTokenTypes: input.multimodalTokenTypes)
         else {
             return inputsEmbeds
         }
@@ -409,30 +368,40 @@ public struct DiffusionGemma4Processor: UserInputProcessor {
         self.videoTokenId = tokenizer.convertTokenToId("<|video|>")
     }
 
-    public func preprocess(images: [CIImage], processing: UserInput.Processing?) throws -> (
-        MLXArray, THW
-    ) {
-        var userProcessing = processing ?? UserInput.Processing()
-        userProcessing.resize = config.fixedSize
+    /// Resizes an image or video frame for the Gemma 4 vision tower: it keeps its aspect
+    /// ratio and fills at most `maxSoftTokens` pooled cells, as in ``Gemma4Processor``.
+    public func preprocess(image: CIImage, processing: UserInput.Processing?, maxSoftTokens: Int)
+        -> CIImage
+    {
+        let processedImage = MediaProcessing.apply(image, processing: processing)
+        let srgbImage = MediaProcessing.inSRGBToneCurveSpace(processedImage)
+        let targetSize = config.targetSize(
+            for: srgbImage.extent.size, maxSoftTokens: maxSoftTokens)
+        let resizedImage =
+            srgbImage.extent.size == targetSize
+            ? srgbImage
+            : MediaProcessing.resampleBicubic(srgbImage, to: targetSize)
+        guard config.doNormalize else { return resizedImage }
+        return MediaProcessing.normalize(
+            resizedImage, mean: config.imageMeanTuple, std: config.imageStdTuple)
+    }
 
-        let processedImages = images.map { image in
-            let processedImage = MediaProcessing.apply(image, processing: userProcessing)
-            let srgbImage = MediaProcessing.inSRGBToneCurveSpace(processedImage)
-            let resizedImage = MediaProcessing.resampleBicubic(srgbImage, to: config.fixedSize)
-            let finalImage =
-                if config.doNormalize {
-                    MediaProcessing.normalize(
-                        resizedImage, mean: config.imageMeanTuple, std: config.imageStdTuple)
-                } else {
-                    resizedImage
-                }
-            return MediaProcessing.asMLXArray(finalImage)
+    /// Zero-pads `[1, C, H, W]` items of different sizes onto the largest canvas. The
+    /// frames record each real size, so the model encodes every item on its own.
+    private func canvas(_ items: [MLXArray]) -> (pixels: MLXArray, frames: [THW]) {
+        let frames = items.map { THW(1, $0.dim(2), $0.dim(3)) }
+        let height = frames.map(\.h).max() ?? 0
+        let width = frames.map(\.w).max() ?? 0
+        let padded = items.map { pixels in
+            pixels.dim(2) == height && pixels.dim(3) == width
+                ? pixels
+                : MLX.padded(
+                    pixels,
+                    widths: [
+                        0, 0, .init((0, height - pixels.dim(2))), .init((0, width - pixels.dim(3))),
+                    ])
         }
-
-        return (
-            concatenated(processedImages),
-            THW(images.count, Int(config.fixedSize.height), Int(config.fixedSize.width))
-        )
+        return (concatenated(padded), frames)
     }
 
     private struct VisualPlaceholder {
@@ -505,82 +474,66 @@ public struct DiffusionGemma4Processor: UserInputProcessor {
             messages: messages, tools: input.tools,
             additionalContext: input.additionalContext)
 
-        var imagePixelsAndFrames: [(MLXArray, THW)] = []
-        if !input.images.isEmpty {
-            imagePixelsAndFrames = try input.images.map {
-                try preprocess(images: [$0.asCIImage()], processing: input.processing)
-            }
+        let images = try input.images.map {
+            MediaProcessing.asMLXArray(
+                preprocess(
+                    image: try $0.asCIImage(), processing: input.processing,
+                    maxSoftTokens: config.imageSeqLength))
         }
 
-        var videoPixelsAndFrames: [(MLXArray, THW)] = []
-        var videoFrameCounts = [Int]()
-        if !input.videos.isEmpty {
-            for video in input.videos {
-                let sequence = try await MediaProcessing.asProcessedSequence(
-                    video,
-                    targetFPS: { _ in 1.0 },
-                    maxFrames: config.videoFrameLimit,
-                    frameProcessing: { frame in
-                        var userProcessing = input.processing
-                        userProcessing.resize = config.fixedSize
-                        let processedImage = MediaProcessing.apply(
-                            try frame.image.asCIImage(), processing: userProcessing)
-                        let srgbImage = MediaProcessing.inSRGBToneCurveSpace(processedImage)
-                        let resizedImage = MediaProcessing.resampleBicubic(
-                            srgbImage, to: config.fixedSize)
-                        let finalImage =
-                            if config.doNormalize {
-                                MediaProcessing.normalize(
-                                    resizedImage,
-                                    mean: config.imageMeanTuple,
-                                    std: config.imageStdTuple)
-                            } else {
-                                resizedImage
-                            }
-                        return VideoFrame(image: .ciImage(finalImage), timeStamp: frame.timeStamp)
-                    })
-                videoFrameCounts.append(sequence.frames.count)
-                videoPixelsAndFrames += sequence.frames.map {
-                    ($0, THW(1, Int(config.fixedSize.height), Int(config.fixedSize.width)))
-                }
-            }
-        }
-
-        var placeholders = imagePixelsAndFrames.map { _ in
-            VisualPlaceholder(
-                tokenId: config.imageTokenId,
-                tokenType: 1,
-                blockCount: 1,
-                sequenceLength: config.imageSeqLength)
-        }
-        if let videoTokenId {
-            placeholders.append(
-                contentsOf: videoFrameCounts.map {
+        var videoFrames: [MLXArray] = []
+        var videoPlaceholders: [VisualPlaceholder] = []
+        for video in input.videos {
+            let sequence = try await MediaProcessing.asProcessedSequence(
+                video,
+                targetFPS: { _ in 1.0 },
+                maxFrames: config.videoFrameLimit,
+                frameProcessing: { frame in
+                    VideoFrame(
+                        image: .ciImage(
+                            preprocess(
+                                image: try frame.image.asCIImage(), processing: input.processing,
+                                maxSoftTokens: config.videoSeqLength)),
+                        timeStamp: frame.timeStamp)
+                })
+            videoFrames += sequence.frames
+            if let videoTokenId {
+                // Frames of one video share its size, so they share a token count.
+                videoPlaceholders.append(
                     VisualPlaceholder(
                         tokenId: videoTokenId,
                         tokenType: 2,
-                        blockCount: $0,
-                        sequenceLength: config.videoSeqLength)
-                })
+                        blockCount: sequence.frames.count,
+                        sequenceLength: sequence.frames.first.map {
+                            config.softTokenCount(height: $0.dim(2), width: $0.dim(3))
+                        } ?? 0))
+            }
         }
+
+        let placeholders =
+            images.map {
+                VisualPlaceholder(
+                    tokenId: config.imageTokenId,
+                    tokenType: 1,
+                    blockCount: 1,
+                    sequenceLength: config.softTokenCount(height: $0.dim(2), width: $0.dim(3)))
+            } + videoPlaceholders
         let expanded = expandPromptTokens(promptTokens, placeholders: placeholders)
 
         let promptArray = MLXArray(expanded.tokens).expandedDimensions(axis: 0)
         let mask = ones(like: promptArray).asType(.int8)
         let tokenTypes = MLXArray(expanded.tokenTypes, [1, expanded.tokenTypes.count])
 
-        let imageInput =
-            imagePixelsAndFrames.isEmpty
-            ? nil
-            : LMInput.ProcessedImage(
-                pixels: concatenated(imagePixelsAndFrames.map { $0.0 }),
-                frames: imagePixelsAndFrames.map { $0.1 })
-        let videoInput =
-            videoPixelsAndFrames.isEmpty
-            ? nil
-            : LMInput.ProcessedVideo(
-                pixels: concatenated(videoPixelsAndFrames.map { $0.0 }),
-                frames: videoPixelsAndFrames.map { $0.1 })
+        var imageInput: LMInput.ProcessedImage?
+        if !images.isEmpty {
+            let (pixels, frames) = canvas(images)
+            imageInput = LMInput.ProcessedImage(pixels: pixels, frames: frames)
+        }
+        var videoInput: LMInput.ProcessedVideo?
+        if !videoFrames.isEmpty {
+            let (pixels, frames) = canvas(videoFrames)
+            videoInput = LMInput.ProcessedVideo(pixels: pixels, frames: frames)
+        }
 
         return LMInput(
             text: .init(tokens: promptArray, mask: mask),
@@ -602,7 +555,8 @@ public struct DiffusionGemma4ProcessorConfiguration: Codable, Sendable {
     public let imageTokenId: Int
     public let boiTokenId: Int
     public let eoiTokenId: Int?
-    public let size: Gemma3ProcessorConfiguration.ImageSize?
+    public let patchSize: Int
+    public let poolingKernelSize: Int
     public let videoFrameLimit: Int
 
     enum CodingKeys: String, CodingKey {
@@ -616,7 +570,8 @@ public struct DiffusionGemma4ProcessorConfiguration: Codable, Sendable {
         case imageTokenId = "image_token_id"
         case boiTokenId = "boi_token_id"
         case eoiTokenId = "eoi_token_id"
-        case size
+        case patchSize = "patch_size"
+        case poolingKernelSize = "pooling_kernel_size"
         case videoFrameLimit = "num_frames"
         case maxSoftTokens = "max_soft_tokens"
     }
@@ -627,7 +582,8 @@ public struct DiffusionGemma4ProcessorConfiguration: Codable, Sendable {
         let imageStd: [CGFloat]?
         let imageSeqLength: Int?
         let maxSoftTokens: Int?
-        let size: Gemma3ProcessorConfiguration.ImageSize?
+        let patchSize: Int?
+        let poolingKernelSize: Int?
         let videoFrameLimit: Int?
 
         enum CodingKeys: String, CodingKey {
@@ -636,7 +592,8 @@ public struct DiffusionGemma4ProcessorConfiguration: Codable, Sendable {
             case imageStd = "image_std"
             case imageSeqLength = "image_seq_length"
             case maxSoftTokens = "max_soft_tokens"
-            case size
+            case patchSize = "patch_size"
+            case poolingKernelSize = "pooling_kernel_size"
             case videoFrameLimit = "num_frames"
         }
     }
@@ -651,8 +608,9 @@ public struct DiffusionGemma4ProcessorConfiguration: Codable, Sendable {
         let topLevelImageMean = try c.decodeIfPresent([CGFloat].self, forKey: .imageMean)
         let topLevelImageStd = try c.decodeIfPresent([CGFloat].self, forKey: .imageStd)
         let topLevelImageSeqLength = try c.decodeIfPresent(Int.self, forKey: .imageSeqLength)
-        let topLevelSize = try c.decodeIfPresent(
-            Gemma3ProcessorConfiguration.ImageSize.self, forKey: .size)
+        let topLevelPatchSize = try c.decodeIfPresent(Int.self, forKey: .patchSize)
+        let topLevelPoolingKernelSize = try c.decodeIfPresent(
+            Int.self, forKey: .poolingKernelSize)
 
         processorClass =
             try c.decodeIfPresent(String.self, forKey: .processorClass)
@@ -670,7 +628,8 @@ public struct DiffusionGemma4ProcessorConfiguration: Codable, Sendable {
         imageTokenId = try c.decodeIfPresent(Int.self, forKey: .imageTokenId) ?? 258_880
         boiTokenId = try c.decodeIfPresent(Int.self, forKey: .boiTokenId) ?? 255_999
         eoiTokenId = try c.decodeIfPresent(Int.self, forKey: .eoiTokenId) ?? 258_882
-        size = imageProcessor?.size ?? topLevelSize
+        patchSize = imageProcessor?.patchSize ?? topLevelPatchSize ?? 16
+        poolingKernelSize = imageProcessor?.poolingKernelSize ?? topLevelPoolingKernelSize ?? 3
         videoFrameLimit = videoProcessor?.videoFrameLimit ?? 32
     }
 
@@ -684,7 +643,8 @@ public struct DiffusionGemma4ProcessorConfiguration: Codable, Sendable {
         try c.encode(imageTokenId, forKey: .imageTokenId)
         try c.encode(boiTokenId, forKey: .boiTokenId)
         try c.encodeIfPresent(eoiTokenId, forKey: .eoiTokenId)
-        try c.encodeIfPresent(size, forKey: .size)
+        try c.encode(patchSize, forKey: .patchSize)
+        try c.encode(poolingKernelSize, forKey: .poolingKernelSize)
         try c.encode(videoFrameLimit, forKey: .videoFrameLimit)
     }
 
@@ -696,10 +656,16 @@ public struct DiffusionGemma4ProcessorConfiguration: Codable, Sendable {
         (imageStd[0], imageStd[1], imageStd[2])
     }
 
-    public var fixedSize: CGSize {
-        if let size {
-            return CGSize(width: size.width, height: size.height)
-        }
-        return CGSize(width: 224, height: 224)
+    /// The size an image or video frame is resized to so it fills at most
+    /// `maxSoftTokens` pooled cells and keeps its aspect ratio, as in Gemma 4.
+    public func targetSize(for imageSize: CGSize, maxSoftTokens: Int) -> CGSize {
+        Gemma4ProcessorConfiguration.aspectPreservingTargetSize(
+            for: imageSize, maxSoftTokens: maxSoftTokens, patchSize: patchSize,
+            poolingKernelSize: poolingKernelSize)
+    }
+
+    /// Soft tokens the vision tower produces for a resized image or frame.
+    public func softTokenCount(height: Int, width: Int) -> Int {
+        ((height / patchSize) * (width / patchSize)) / (poolingKernelSize * poolingKernelSize)
     }
 }

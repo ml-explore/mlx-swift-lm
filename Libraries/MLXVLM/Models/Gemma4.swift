@@ -2467,7 +2467,16 @@ public struct Gemma4ProcessorConfiguration: Codable, Sendable {
     ///   - imageSize: Original image dimensions.
     ///   - budget: Soft tokens to fit; defaults to `maxSoftTokens`.
     public func aspectPreservingTargetSize(for imageSize: CGSize, budget: Int? = nil) -> CGSize {
-        let maxSoftTokens = budget ?? self.maxSoftTokens
+        Self.aspectPreservingTargetSize(
+            for: imageSize, maxSoftTokens: budget ?? maxSoftTokens, patchSize: patchSize,
+            poolingKernelSize: poolingKernelSize)
+    }
+
+    /// The same resize for any Gemma 4 vision geometry, shared with processors that
+    /// carry their own configuration, as Python's `get_aspect_ratio_preserving_size`.
+    static func aspectPreservingTargetSize(
+        for imageSize: CGSize, maxSoftTokens: Int, patchSize: Int, poolingKernelSize: Int
+    ) -> CGSize {
         let kernelArea = poolingKernelSize * poolingKernelSize
         let maxPatches = maxSoftTokens * kernelArea
         let sideMultiple = poolingKernelSize * patchSize

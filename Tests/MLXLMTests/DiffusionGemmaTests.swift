@@ -446,21 +446,22 @@ struct DiffusionGemmaTests {
         let config = try JSONDecoder().decode(
             DiffusionGemma4ProcessorConfiguration.self,
             from: Data(
-                #"{"processor_class":"DiffusionGemma4Processor","image_seq_length":4}"#.utf8))
+                #"{"processor_class":"DiffusionGemma4Processor","image_seq_length":8}"#.utf8))
         let processor = DiffusionGemma4Processor(
             config,
             tokenizer: DiffusionGemmaPromptTokenizer(tokens: [7, 258_880, 9]))
-        let image = CIImage(color: .red).cropped(to: CGRect(x: 0, y: 0, width: 16, height: 16))
+        let image = CIImage(color: .red).cropped(to: CGRect(x: 0, y: 0, width: 32, height: 16))
 
         let input = try await processor.prepare(
             input: UserInput(prompt: "describe", images: [.ciImage(image)]))
 
         #expect(
-            input.text.tokens.asArray(Int.self) == [
-                7, 255_999, 258_880, 258_880, 258_880, 258_880, 258_882, 9,
-            ])
-        #expect(input.multimodalTokenTypes?.asArray(Int32.self) == [0, 0, 1, 1, 1, 1, 0, 0])
-        #expect(input.image?.pixels.shape == [1, 3, 224, 224])
+            input.text.tokens.asArray(Int.self)
+                == [7, 255_999] + Array(repeating: 258_880, count: 8) + [258_882, 9])
+        #expect(
+            input.multimodalTokenTypes?.asArray(Int32.self)
+                == [0, 0] + Array(repeating: 1, count: 8) + [0, 0])
+        #expect(input.image?.pixels.shape == [1, 3, 96, 192])
     }
 
     @Test("DiffusionGemma VLM processor expands video tokens and token types")
@@ -468,7 +469,7 @@ struct DiffusionGemmaTests {
         let config = try JSONDecoder().decode(
             DiffusionGemma4ProcessorConfiguration.self,
             from: Data(
-                #"{"processor_class":"DiffusionGemma4Processor","image_seq_length":4,"video_processor":{"max_soft_tokens":3,"num_frames":1}}"#
+                #"{"processor_class":"DiffusionGemma4Processor","image_seq_length":4,"video_processor":{"max_soft_tokens":4,"num_frames":1}}"#
                     .utf8))
         let videoTokenId = 262_143
         let processor = DiffusionGemma4Processor(
@@ -483,10 +484,10 @@ struct DiffusionGemmaTests {
 
         #expect(
             input.text.tokens.asArray(Int.self) == [
-                7, 255_999, videoTokenId, videoTokenId, videoTokenId, 258_882, 9,
+                7, 255_999, videoTokenId, videoTokenId, videoTokenId, videoTokenId, 258_882, 9,
             ])
-        #expect(input.multimodalTokenTypes?.asArray(Int32.self) == [0, 0, 2, 2, 2, 0, 0])
-        #expect(input.video?.pixels.shape == [1, 3, 224, 224])
+        #expect(input.multimodalTokenTypes?.asArray(Int32.self) == [0, 0, 2, 2, 2, 2, 0, 0])
+        #expect(input.video?.pixels.shape == [1, 3, 96, 96])
     }
 
     @Test("DiffusionGemma VLM processor preserves mixed visual prompt order")
@@ -494,7 +495,7 @@ struct DiffusionGemmaTests {
         let config = try JSONDecoder().decode(
             DiffusionGemma4ProcessorConfiguration.self,
             from: Data(
-                #"{"processor_class":"DiffusionGemma4Processor","image_seq_length":2,"video_processor":{"max_soft_tokens":3,"num_frames":1}}"#
+                #"{"processor_class":"DiffusionGemma4Processor","image_seq_length":4,"video_processor":{"max_soft_tokens":1,"num_frames":1}}"#
                     .utf8))
         let videoTokenId = 262_143
         let processor = DiffusionGemma4Processor(
@@ -510,11 +511,11 @@ struct DiffusionGemmaTests {
 
         #expect(
             input.text.tokens.asArray(Int.self) == [
-                7, 255_999, videoTokenId, videoTokenId, videoTokenId, 258_882, 8, 255_999, 258_880,
-                258_880, 258_882, 9,
+                7, 255_999, videoTokenId, 258_882, 8, 255_999, 258_880, 258_880, 258_880, 258_880,
+                258_882, 9,
             ])
         #expect(
-            input.multimodalTokenTypes?.asArray(Int32.self) == [0, 0, 2, 2, 2, 0, 0, 0, 1, 1, 0, 0])
+            input.multimodalTokenTypes?.asArray(Int32.self) == [0, 0, 2, 0, 0, 0, 1, 1, 1, 1, 0, 0])
     }
 
     @Test("DiffusionGemma VLM processor preserves separate video placeholders")
@@ -522,7 +523,7 @@ struct DiffusionGemmaTests {
         let config = try JSONDecoder().decode(
             DiffusionGemma4ProcessorConfiguration.self,
             from: Data(
-                #"{"processor_class":"DiffusionGemma4Processor","video_processor":{"max_soft_tokens":2,"num_frames":2}}"#
+                #"{"processor_class":"DiffusionGemma4Processor","video_processor":{"max_soft_tokens":1,"num_frames":2}}"#
                     .utf8))
         let videoTokenId = 262_143
         let processor = DiffusionGemma4Processor(
@@ -545,14 +546,55 @@ struct DiffusionGemmaTests {
 
         #expect(
             input.text.tokens.asArray(Int.self) == [
-                7, 255_999, videoTokenId, videoTokenId, 258_882, 8, 255_999, videoTokenId,
-                videoTokenId, 258_882, 9,
+                7, 255_999, videoTokenId, 258_882, 8, 255_999, videoTokenId, 258_882, 9,
             ])
         #expect(
-            input.multimodalTokenTypes?.asArray(Int32.self) == [
-                0, 0, 2, 2, 0, 0, 0, 2, 2, 0, 0,
-            ])
-        #expect(input.video?.pixels.shape == [2, 3, 224, 224])
+            input.multimodalTokenTypes?.asArray(Int32.self) == [0, 0, 2, 0, 0, 0, 2, 0, 0])
+        #expect(input.video?.pixels.shape == [2, 3, 48, 48])
+    }
+
+    @Test("DiffusionGemma VLM encodes each image and frame at its own size")
+    func vlmEncodesVisualInputsAtTheirOwnSize() async throws {
+        let modelConfig = try JSONDecoder().decode(
+            DiffusionGemmaVLMConfiguration.self,
+            from: Data(
+                Self.vlmConfigurationJSON.replacingOccurrences(
+                    of: #""canvas_length": 4,"#,
+                    with: #""canvas_length": 4, "image_token_id": 3,"#
+                ).utf8))
+        let model = DiffusionGemma(modelConfig)
+        let processorConfig = try JSONDecoder().decode(
+            DiffusionGemma4ProcessorConfiguration.self,
+            from: Data(
+                #"""
+                {"processor_class":"DiffusionGemma4Processor","image_token_id":3,"boi_token_id":4,
+                 "eoi_token_id":5,"image_processor":{"max_soft_tokens":8,"pooling_kernel_size":1},
+                 "video_processor":{"max_soft_tokens":4,"num_frames":2}}
+                """#.utf8))
+        let processor = DiffusionGemma4Processor(
+            processorConfig,
+            tokenizer: DiffusionGemmaPromptTokenizer(
+                tokens: [7, 6, 6, 8, 3, 3, 9], videoTokenId: 6))
+        let wide = CIImage(color: .red).cropped(to: CGRect(x: 0, y: 0, width: 32, height: 16))
+        let square = CIImage(color: .blue).cropped(to: CGRect(x: 0, y: 0, width: 16, height: 16))
+        let tall = CIImage(color: .green).cropped(to: CGRect(x: 0, y: 0, width: 16, height: 32))
+        let video = UserInput.Video.frames([.init(image: .ciImage(tall), timeStamp: .zero)])
+
+        let input = try await processor.prepare(
+            input: UserInput(
+                prompt: "describe", images: [.ciImage(wide), .ciImage(square)],
+                videos: [video, video]))
+
+        let tokens = input.text.tokens.asArray(Int.self)
+        #expect(input.image?.pixels.shape == [2, 3, 32, 64])
+        #expect(input.image?.frames?.map { [$0.h, $0.w] } == [[32, 64], [32, 32]])
+        #expect(input.video?.pixels.shape == [2, 3, 32, 16])
+        #expect(tokens.filter { $0 == 3 }.count == 12)
+        #expect(tokens.filter { $0 == 6 }.count == 4)
+
+        let cache = try model.newCache(parameters: nil)
+        try model.prepareDiffusion(input, cache: cache, windowSize: nil)
+        #expect(cache.allSatisfy { $0.offset == tokens.count })
     }
 
     @Test("TokenIterator preserves state returned from logits prefill")
