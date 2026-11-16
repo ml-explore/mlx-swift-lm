@@ -42,8 +42,11 @@ import MLXLMCommon
 @testable import MLXFoundationModels
 @testable import MLXGuidedGeneration
 
-@Suite(.serialized)
-struct MalformedSchemaErrorParityTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct MalformedSchemaErrorParityTests {}
+}
+
+extension ModelLoadingSuite.MalformedSchemaErrorParityTests {
 
     /// Malformed schema inputs that must each be rejected at grammar-compile
     /// time as `GrammarError.invalidJSONSchema`.

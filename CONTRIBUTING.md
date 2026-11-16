@@ -74,7 +74,7 @@ xcodebuild test \
   -scheme IntegrationTesting \
   -destination 'platform=macOS' \
   -skipPackagePluginValidation \
-  -only-testing:IntegrationTestingTests/ToolCallIntegrationTests/qwen35FormatAutoDetection\(\)
+  -only-testing:IntegrationTestingTests/ModelLoadingSuite/ToolCallIntegrationTests/qwen35FormatAutoDetection\(\)
 ```
 
 See [Libraries/IntegrationTestHelpers/README.md](Libraries/IntegrationTestHelpers/README.md) for more details.

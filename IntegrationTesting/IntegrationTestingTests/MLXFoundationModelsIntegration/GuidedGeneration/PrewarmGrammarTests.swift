@@ -9,8 +9,11 @@ import FoundationModels
 @testable import MLXGuidedGeneration
 
 /// Tests that `warmUp()` pre-creates the GrammarTokenizer for guided generation.
-@Suite(.serialized, .timeLimit(.minutes(5)))
-struct PrewarmGrammarTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(5))) struct PrewarmGrammarTests {}
+}
+
+extension ModelLoadingSuite.PrewarmGrammarTests {
 
     @Test
     func prewarmCreatesGrammarTokenizer() async throws {

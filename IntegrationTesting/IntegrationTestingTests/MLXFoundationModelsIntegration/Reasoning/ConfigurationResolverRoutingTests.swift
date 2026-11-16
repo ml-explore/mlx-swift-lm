@@ -13,8 +13,11 @@ import MLXLMCommon
 /// routing in `Executor.respond`. Pairs the unit-level behavior assertions
 /// (override-the-baseline; capability-gate suppression) here; on-device
 /// characterization lives in `ReasoningCapabilityGateTests`.
-@Suite(.serialized, .timeLimit(.minutes(15)))
-struct ConfigurationResolverRoutingTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(15))) struct ConfigurationResolverRoutingTests {}
+}
+
+extension ModelLoadingSuite.ConfigurationResolverRoutingTests {
 
     enum Models {
         static let qwen3 = "mlx-community/Qwen3-1.7B-4bit"

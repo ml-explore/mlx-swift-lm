@@ -18,8 +18,11 @@ import FoundationModels
 /// expected Swift type. Semantic correctness is not asserted -- the 0.5B
 /// model may produce surprising values, but the grammar constraint must
 /// guarantee structural validity.
-@Suite(.serialized, .timeLimit(.minutes(10)))
-struct GenerableRoundTripTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(10))) struct GenerableRoundTripTests {}
+}
+
+extension ModelLoadingSuite.GenerableRoundTripTests {
 
     // MARK: - Helpers
 
