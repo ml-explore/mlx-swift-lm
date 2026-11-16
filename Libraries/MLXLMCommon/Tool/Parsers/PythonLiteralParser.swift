@@ -46,9 +46,8 @@ struct PythonLiteralParser {
         defer { depth -= 1 }
         skipWhitespace()
 
+        if isAtString { return parseString() }
         switch current {
-        case "'", "\"":
-            return parseString()
         case "[", "(":
             return parseArray()
         case "{":
@@ -104,7 +103,31 @@ struct PythonLiteralParser {
         }
     }
 
+    /// Python joins adjacent string literals, as in `('first part ' 'second part')`.
     private mutating func parseString() -> String? {
+        guard var result = parseStringLiteral() else { return nil }
+        skipWhitespace()
+        while isAtString {
+            guard let next = parseStringLiteral() else { return nil }
+            result += next
+            skipWhitespace()
+        }
+        return result
+    }
+
+    /// Whether a string literal starts here, with or without an `r` or `u` prefix.
+    private var isAtString: Bool {
+        var rest = source[index...]
+        if let prefix = rest.first, "rRuU".contains(prefix) { rest = rest.dropFirst() }
+        return rest.first == "'" || rest.first == "\""
+    }
+
+    private mutating func parseStringLiteral() -> String? {
+        var isRaw = false
+        if let prefix = current, "rRuU".contains(prefix) {
+            isRaw = prefix == "r" || prefix == "R"
+            advance()
+        }
         guard let quote = current, quote == "'" || quote == "\"" else { return nil }
         advance()
 
@@ -136,6 +159,13 @@ struct PythonLiteralParser {
 
             guard let escaped = current else { return nil }
             advance()
+
+            // A raw string keeps the backslash; it only stops a quote from closing the string.
+            if isRaw {
+                result.append(character)
+                result.append(escaped)
+                continue
+            }
 
             switch escaped {
             case "\\": result.append("\\")

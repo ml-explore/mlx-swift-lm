@@ -794,6 +794,34 @@ struct ToolTests {
         #expect(toolCall.function.arguments["code"] == .string("print('hello')"))
     }
 
+    @Test("Test Pythonic Tool Call Parser - Raw and Adjacent String Arguments")
+    func testPythonicParserRawAndAdjacentStrings() throws {
+        let parser = PythonicToolCallParser(
+            startTag: "<|tool_call_start|>", endTag: "<|tool_call_end|>")
+        let content =
+            #"<|tool_call_start|>[grep(pattern=r"\d{3}-\d{4}", path=('notes/'"#
+            + "\n" + #" 'calls.txt'))]<|tool_call_end|>"#
+        let tools: [[String: any Sendable]] = [
+            [
+                "function": [
+                    "name": "grep",
+                    "parameters": [
+                        "properties": [
+                            "pattern": ["type": "string"],
+                            "path": ["type": "string"],
+                        ]
+                    ],
+                ] as [String: any Sendable]
+            ]
+        ]
+
+        for schemas in [nil, tools] {
+            let toolCall = try #require(parser.parse(content: content, tools: schemas))
+            #expect(toolCall.function.arguments["pattern"] == .string(#"\d{3}-\d{4}"#))
+            #expect(toolCall.function.arguments["path"] == .string("notes/calls.txt"))
+        }
+    }
+
     @Test("Test Pythonic Tool Call Parser - No Arguments")
     func testPythonicParserNoArguments() throws {
         let parser = PythonicToolCallParser(
