@@ -27,8 +27,11 @@ import Tokenizers
 private let e4bTarget = "mlx-community/gemma-4-e4b-it-4bit"
 private let e2bTarget = "mlx-community/gemma-4-e2b-it-4bit"
 
-@Suite(.serialized)
-struct Gemma4EseriesLoadIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct Gemma4EseriesLoadIntegrationTests {}
+}
+
+extension ModelLoadingSuite.Gemma4EseriesLoadIntegrationTests {
 
     @Test(.enabled(if: hfSnapshotDir(modelId: e4bTarget) != nil))
     func testE4BTargetLoadsAndGenerates() async throws {
@@ -45,8 +48,10 @@ struct Gemma4EseriesLoadIntegrationTests {
 
         // The load itself is the regression surface — pre-fix this threw
         // keyNotFound on the KV-shared tail layers.
-        let context = try await VLMModelFactory.shared.load(
-            from: dir, using: #huggingFaceTokenizerLoader())
+        let context = try await TestModelManager.shared.load("vlm-context:\(dir.path)") {
+            try await VLMModelFactory.shared.load(
+                from: dir, using: #huggingFaceTokenizerLoader())
+        }
 
         let input = try await context.processor.prepare(
             input: UserInput(chat: [.user("Why is the sky blue? One sentence.")]))

@@ -74,8 +74,11 @@ import MLXLMCommon
 @testable import MLXFoundationModels
 @testable import MLXGuidedGeneration
 
-@Suite(.serialized)
-struct GoldenReplayTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct GoldenReplayTests {}
+}
+
+extension ModelLoadingSuite.GoldenReplayTests {
 
     @Test(
         "tier1 (~11 steps, 3-property flat object) replays with functional parity against goldens"

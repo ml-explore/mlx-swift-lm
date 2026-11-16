@@ -15,8 +15,11 @@ import MLXLMCommon
 /// `ReasoningCapabilityGateOnDeviceTests`. Here we keep the
 /// suite focused on the throwing-path that fires before any token is
 /// generated, which can run anywhere the FM trait compiles.
-@Suite(.serialized, .timeLimit(.minutes(15)))
-struct ReasoningCapabilityGateTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(15))) struct ReasoningCapabilityGateTests {}
+}
+
+extension ModelLoadingSuite.ReasoningCapabilityGateTests {
 
     enum Models {
         static let qwen3 = "mlx-community/Qwen3-1.7B-4bit"

@@ -44,8 +44,11 @@ private let citySchema = #"""
     {"type":"object","properties":{"name":{"type":"string"},"country":{"type":"string"}},"required":["name","country"],"additionalProperties":false}
     """#
 
-@Suite(.serialized, .timeLimit(.minutes(5)))
-struct GuidedGenerationUsageTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(5))) struct GuidedGenerationUsageTests {}
+}
+
+extension ModelLoadingSuite.GuidedGenerationUsageTests {
 
     // MARK: - Built-in FoundationModels path
 

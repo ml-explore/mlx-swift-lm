@@ -81,15 +81,19 @@ private struct StructuredToolOutputProfile: LanguageModelSession.DynamicProfile 
 /// through `xcodebuild`, set `TEST_RUNNER_MLX_RUN_FM_TOOL_INTEGRATION=1` on
 /// macOS or iOS; Xcode strips the `TEST_RUNNER_` prefix before launching the
 /// test process.
-@Suite(
-    .serialized,
-    .timeLimit(.minutes(10)),
-    .enabled(
-        if: ProcessInfo.processInfo.environment[
-            "MLX_RUN_FM_TOOL_INTEGRATION"
-        ] == "1")
-)
-struct StructuredToolOutputSessionTests {
+extension ModelLoadingSuite {
+    @Suite(
+        .serialized,
+        .timeLimit(.minutes(10)),
+        .enabled(
+            if: ProcessInfo.processInfo.environment[
+                "MLX_RUN_FM_TOOL_INTEGRATION"
+            ] == "1")
+    )
+    struct StructuredToolOutputSessionTests {}
+}
+
+extension ModelLoadingSuite.StructuredToolOutputSessionTests {
     static let models = [TestFixtures.gemma4ModelID, TestFixtures.qwen3ModelID]
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
@@ -106,7 +110,7 @@ struct StructuredToolOutputSessionTests {
         await releaseAllGPUMemory()
     }
 
-    @Test(arguments: StructuredToolOutputSessionTests.models)
+    @Test(arguments: ModelLoadingSuite.StructuredToolOutputSessionTests.models)
     func languageModelSessionUsesGenerableToolOutput(modelID: String) async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
 

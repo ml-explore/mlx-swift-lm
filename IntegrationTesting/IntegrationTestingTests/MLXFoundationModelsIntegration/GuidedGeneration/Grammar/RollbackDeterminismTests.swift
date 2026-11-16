@@ -27,8 +27,11 @@ import MLXLMCommon
 @testable import MLXFoundationModels
 @testable import MLXGuidedGeneration
 
-@Suite(.serialized)
-struct RollbackDeterminismTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct RollbackDeterminismTests {}
+}
+
+extension ModelLoadingSuite.RollbackDeterminismTests {
 
     @Test("rolling back N commits restores the pre-commit mask bit-for-bit")
     func testRollbackProducesBitIdenticalMask() async throws {

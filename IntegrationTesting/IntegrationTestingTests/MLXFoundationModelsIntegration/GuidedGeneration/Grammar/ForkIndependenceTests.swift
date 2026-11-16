@@ -29,8 +29,11 @@ import MLXLMCommon
 @testable import MLXFoundationModels
 @testable import MLXGuidedGeneration
 
-@Suite(.serialized)
-struct ForkIndependenceTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct ForkIndependenceTests {}
+}
+
+extension ModelLoadingSuite.ForkIndependenceTests {
 
     @Test(
         "fork of a matcher diverges from parent on independent commits",

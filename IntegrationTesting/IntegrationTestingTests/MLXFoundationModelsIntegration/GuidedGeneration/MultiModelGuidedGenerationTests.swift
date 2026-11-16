@@ -15,8 +15,11 @@ import FoundationModels
 /// Runs guided generation round-trip tests against multiple model families
 /// to validate vocabulary extraction correctness across tokenizer
 /// implementations.
-@Suite(.serialized, .timeLimit(.minutes(15)))
-struct MultiModelGuidedGenerationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(15))) struct MultiModelGuidedGenerationTests {}
+}
+
+extension ModelLoadingSuite.MultiModelGuidedGenerationTests {
 
     /// Models to test. Each is downloaded on first run (~100-500MB each).
     static let modelIDs = [
