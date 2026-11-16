@@ -1999,9 +1999,7 @@ public final class ChatSession {
                         try Task.checkCancellation()
                         // Let the assistant answer tool results before adding a user turn.
                         // An interrupted response takes no more instructions.
-                        if !steering.isInterrupted,
-                            !pendingMessages.contains(where: { $0.role == .tool })
-                        {
+                        if !pendingMessages.contains(where: { $0.role == .tool }) {
                             applyingSteering = try steering.take(
                                 closeIfEmpty: pendingMessages.isEmpty)
                         }

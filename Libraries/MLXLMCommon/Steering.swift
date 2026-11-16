@@ -190,10 +190,12 @@ final class SteeringControl: @unchecked Sendable {
     }
 
     /// Atomically resolve the last-input/completion race. A producer either
-    /// joins the next step or observes a closed response.
+    /// joins the next step or observes a closed response. An interrupted
+    /// response takes nothing: ``closeAndTake()`` reports what it holds.
     func take(closeIfEmpty: Bool) throws -> [Request] {
         try lock.withLock {
             if cancelled { throw CancellationError() }
+            guard !interrupted else { return [] }
             let batch = pending
             pending.removeAll(keepingCapacity: true)
             pendingBytes = 0

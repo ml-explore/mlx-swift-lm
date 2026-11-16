@@ -237,6 +237,7 @@ final class SteeringTests: XCTestCase {
         XCTAssertThrowsError(try control.enqueue("late", policy: .nextSafeBoundary)) {
             XCTAssertEqual($0 as? SteeringError, .responseEnded)
         }
+        XCTAssertTrue(try control.take(closeIfEmpty: true).isEmpty)
         XCTAssertEqual(try control.closeAndTake().map(\.id), [pending])
         XCTAssertThrowsError(try control.interrupt()) {
             XCTAssertEqual($0 as? SteeringError, .responseEnded)
