@@ -357,4 +357,37 @@ final class VLMProcessorTests: XCTestCase {
                 height: 400, width: 27, factor: 28,
                 minPixels: 56 * 56, maxPixels: 28 * 28 * 1280))
     }
+
+    func testQwenVLTargetSizeRoundsHalvesToEvenLikePython() throws {
+        // smart_resize uses Python's `round`, which rounds halves to even:
+        // 70 / 28 = 2.5 rounds to 2, and 1022 / 28 = 36.5 rounds to 36.
+        let square = try QwenVL.targetSize(
+            height: 70, width: 70, factor: 28, minPixels: 3136, maxPixels: 12_845_056)
+        XCTAssertEqual(square.0, 56)
+        XCTAssertEqual(square.1, 56)
+
+        let photo = try QwenVL.targetSize(
+            height: 1022, width: 770, factor: 28, minPixels: 3136, maxPixels: 12_845_056)
+        XCTAssertEqual(photo.0, 1008)
+        XCTAssertEqual(photo.1, 784)
+
+        // After scaling a 27 × 500 image up, its width is 518 = 18.5 × 28.
+        let scaled = try QwenVL.targetSize(
+            height: 27, width: 500, factor: 28,
+            minPixels: 12544 / 2, maxPixels: 9_633_792 / 2, scaleUpSmallSides: true)
+        XCTAssertEqual(scaled.0, 28)
+        XCTAssertEqual(scaled.1, 504)
+    }
+
+    func testQwenVLTargetSizeComparesAspectRatioAsFloatingPoint() throws {
+        // 10010 / 50 is 200.2, which smart_resize rejects.
+        XCTAssertThrowsError(
+            try QwenVL.targetSize(
+                height: 10010, width: 50, factor: 28, minPixels: 3136, maxPixels: 12_845_056))
+
+        let tall = try QwenVL.targetSize(
+            height: 9800, width: 50, factor: 28, minPixels: 3136, maxPixels: 12_845_056)
+        XCTAssertEqual(tall.0, 9800)
+        XCTAssertEqual(tall.1, 56)
+    }
 }
