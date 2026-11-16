@@ -790,7 +790,8 @@ public struct GlmOcrProcessor: UserInputProcessor {
             height: Int(size.height), width: Int(size.width),
             factor: config.patchSize * config.mergeSize,
             minPixels: config.minPixels / config.temporalPatchSize,
-            maxPixels: config.maxPixels / config.temporalPatchSize)
+            maxPixels: config.maxPixels / config.temporalPatchSize,
+            scaleUpSmallSides: true)
         let resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
 
         let processedImages = images.map { image in
