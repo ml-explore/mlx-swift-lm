@@ -42,8 +42,12 @@ private struct WeatherArgs {
 /// NOTE on the budget question (`maximumResponseTokens` semantics under reasoning):
 /// deliberately NOT measured here — it's a protocol-contract question better settled
 /// against AFM / SKILL.md than a single MLX run. Tracked separately.
-@Suite(.serialized, .timeLimit(.minutes(10)))
-struct ToolCallingReasoningCharacterizationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(10))) struct ToolCallingReasoningCharacterizationTests {
+    }
+}
+
+extension ModelLoadingSuite.ToolCallingReasoningCharacterizationTests {
 
     static let qwen3 = "mlx-community/Qwen3-1.7B-4bit"
     static let r1Distill = "mlx-community/DeepSeek-R1-Distill-Qwen-1.5B-4bit"

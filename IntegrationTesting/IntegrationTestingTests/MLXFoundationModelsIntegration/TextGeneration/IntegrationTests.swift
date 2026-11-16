@@ -15,8 +15,11 @@ import Testing
 ///
 /// Note: These tests have a 5-minute timeout to allow for model download
 /// and first-run shader compilation.
-@Suite(.serialized, .timeLimit(.minutes(5)))
-struct IntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(5))) struct IntegrationTests {}
+}
+
+extension ModelLoadingSuite.IntegrationTests {
 
     // MARK: - Real Inference Tests
 

@@ -22,8 +22,11 @@ import MLXLMCommon
 /// starting points; confirm on the first run that high-top-k genuinely produces
 /// more distinct completions than greedy on the chosen model, and adjust if the
 /// prompt is too constrained for sampling to diverge.
-@Suite(.serialized, .timeLimit(.minutes(15)))
-struct SamplingModeBehaviorTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(15))) struct SamplingModeBehaviorTests {}
+}
+
+extension ModelLoadingSuite.SamplingModeBehaviorTests {
 
     private static let sampleCount = 12
     private static let creativePrompt =

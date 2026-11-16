@@ -11,8 +11,11 @@ import Tokenizers
 private let harmonyDownloader: any Downloader = #hubDownloader()
 private let harmonyTokenizerLoader: any TokenizerLoader = #huggingFaceTokenizerLoader()
 
-@Suite(.serialized)
-struct HarmonyTokenizerIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct HarmonyTokenizerIntegrationTests {}
+}
+
+extension ModelLoadingSuite.HarmonyTokenizerIntegrationTests {
     private static let modelID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
     private static let revision = "773a7da77e569019bb0fd17a554b263738d669a3"
 

@@ -102,3 +102,4 @@ pyproject.toml
 uv.lock
 main.py
 
+.worktrees

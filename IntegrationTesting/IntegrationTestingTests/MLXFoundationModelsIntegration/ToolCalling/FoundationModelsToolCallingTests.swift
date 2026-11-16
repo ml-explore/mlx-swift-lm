@@ -41,8 +41,11 @@ private struct DeveloperMarkerArguments {
 /// tool-aware chat template, (2) routes native `.allowed` output to either
 /// a response or a real tool call, and (3) constrains `.required` output to
 /// a developer-tool JSON envelope via xgrammar.
-@Suite(.serialized, .timeLimit(.minutes(5)))
-struct FoundationModelsToolCallingTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(5))) struct FoundationModelsToolCallingTests {}
+}
+
+extension ModelLoadingSuite.FoundationModelsToolCallingTests {
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
     private func developerTool(named name: String) -> Transcript.ToolDefinition {

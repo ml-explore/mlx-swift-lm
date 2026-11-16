@@ -79,8 +79,11 @@ let labeledPromptFamilies: [LabeledPromptFamily] = [
         generator: Qwen2VLMessageGenerator(), placeholder: "<|patch|>"),
 ]
 
-@Suite(.serialized)
-struct AttachmentLabelTemplateIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct AttachmentLabelTemplateIntegrationTests {}
+}
+
+extension ModelLoadingSuite.AttachmentLabelTemplateIntegrationTests {
 
     static let prose = "which one is blue?"
 

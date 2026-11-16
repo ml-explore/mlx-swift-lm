@@ -24,8 +24,11 @@ private struct WeatherArgs {
 /// Device-only (requires a device running iOS 27.0+): loads real models. v1 family scope is
 /// Qwen3/QwQ (template renders tools AND honors `enable_thinking`); R1-Distill is
 /// de-scoped (tool-blind template) and stays on its single-phase behavior.
-@Suite(.serialized, .timeLimit(.minutes(15)))
-struct ToolCallingReasoningTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(15))) struct ToolCallingReasoningTests {}
+}
+
+extension ModelLoadingSuite.ToolCallingReasoningTests {
 
     @Test("Setup: release GPU state from prior suites")
     func clearGPUBeforeToolCallingReasoning() async {
