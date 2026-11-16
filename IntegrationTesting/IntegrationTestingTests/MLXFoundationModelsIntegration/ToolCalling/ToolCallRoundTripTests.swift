@@ -49,8 +49,11 @@ private struct WeatherArgs {
     var location: String
 }
 
-@Suite(.serialized)
-struct ToolCallRoundTripTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct ToolCallRoundTripTests {}
+}
+
+extension ModelLoadingSuite.ToolCallRoundTripTests {
 
     @Test(
         "Qwen tool-call structural-tag compiles, exposes <tool_call>, and accepts a <tool_call> commit"

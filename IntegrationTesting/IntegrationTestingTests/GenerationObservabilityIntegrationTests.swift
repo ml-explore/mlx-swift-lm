@@ -1,22 +1,17 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
-import HuggingFace
 import IntegrationTestHelpers
 import MLX
-import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
 import Testing
-import Tokenizers
 
-private let models = IntegrationTestModels(
-    downloader: #hubDownloader(),
-    tokenizerLoader: #huggingFaceTokenizerLoader()
-)
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct GenerationObservabilityIntegrationTests {}
+}
 
-@Suite(.serialized)
-struct GenerationObservabilityIntegrationTests {
+extension ModelLoadingSuite.GenerationObservabilityIntegrationTests {
     @Test func composedHandlerPreservesModelGeneration() async throws {
         let container = try await models.llmContainer(for: LLMRegistry.llama3_2_1B_4bit)
         let prompt = "Explain why the sky is blue in one sentence."

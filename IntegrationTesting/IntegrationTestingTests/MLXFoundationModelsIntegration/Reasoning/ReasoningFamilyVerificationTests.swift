@@ -18,8 +18,11 @@ import MLXLMCommon
 ///
 /// Requires a device running iOS 27.0+. The Kimi K2 mechanism (delimiter- vs
 /// field-based) is a separate manual investigation, not automated here.
-@Suite(.serialized, .timeLimit(.minutes(15)))
-struct ReasoningFamilyVerificationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(15))) struct ReasoningFamilyVerificationTests {}
+}
+
+extension ModelLoadingSuite.ReasoningFamilyVerificationTests {
 
     static let qwen3 = "mlx-community/Qwen3-1.7B-4bit"
     static let r1Distill = "mlx-community/DeepSeek-R1-Distill-Qwen-1.5B-4bit"

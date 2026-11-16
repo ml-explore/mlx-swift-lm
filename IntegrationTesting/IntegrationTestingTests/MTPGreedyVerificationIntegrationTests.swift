@@ -23,18 +23,27 @@ private struct SequentialMTPProcessor: LogitProcessor {
     mutating func didSample(token: MLXArray) {}
 }
 
-@Suite(.serialized)
-struct MTPGreedyVerificationIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct MTPGreedyVerificationIntegrationTests {}
+}
+
+extension ModelLoadingSuite.MTPGreedyVerificationIntegrationTests {
     @Test(.enabled(if: greedyMTPModelDirectory != nil && greedyMTPDrafterDirectory != nil))
     func tokenAndCacheParity() async throws {
         let targetDirectory = try #require(greedyMTPModelDirectory)
         let drafterDirectory = try #require(greedyMTPDrafterDirectory)
         let tokenizerLoader = #huggingFaceTokenizerLoader()
-        let target = try await LLMModelFactory.shared.load(
-            from: targetDirectory, using: tokenizerLoader)
-        await Qwen35TextMTPRegistration.register()
-        let drafter = try await MTPDrafterModelFactory.shared.load(
-            from: drafterDirectory, using: tokenizerLoader)
+        // Load the pair as one entry so the manager doesn't unload the target.
+        let (target, drafter) = try await TestModelManager.shared.load(
+            "mtp-pair:\(targetDirectory.path)+\(drafterDirectory.path)"
+        ) {
+            let target = try await LLMModelFactory.shared.load(
+                from: targetDirectory, using: tokenizerLoader)
+            await Qwen35TextMTPRegistration.register()
+            let drafter = try await MTPDrafterModelFactory.shared.load(
+                from: drafterDirectory, using: tokenizerLoader)
+            return (target, drafter)
+        }
         let input = try await target.processor.prepare(
             input: UserInput(chat: [
                 .user("Why is the sky blue? Explain the physics, then give a simple analogy.")

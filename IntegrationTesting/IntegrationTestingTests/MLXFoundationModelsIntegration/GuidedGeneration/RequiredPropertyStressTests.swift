@@ -37,12 +37,16 @@ private struct Picture: Equatable {
 /// gated behind `MLX_RUN_REQUIRED_PROPERTY_STRESS=1` — it must not run on every
 /// integration pass. Mirrors the `MLX_RUN_VLM_INTEGRATION` / `MLX_RUN_COLD_FETCH`
 /// gates elsewhere in this target.
-@Suite(
-    .serialized,
-    .timeLimit(.minutes(30)),
-    .enabled(if: ProcessInfo.processInfo.environment["MLX_RUN_REQUIRED_PROPERTY_STRESS"] == "1")
-)
-struct RequiredPropertyStressTests {
+extension ModelLoadingSuite {
+    @Suite(
+        .serialized,
+        .timeLimit(.minutes(30)),
+        .enabled(if: ProcessInfo.processInfo.environment["MLX_RUN_REQUIRED_PROPERTY_STRESS"] == "1")
+    )
+    struct RequiredPropertyStressTests {}
+}
+
+extension ModelLoadingSuite.RequiredPropertyStressTests {
 
     private static let instructions = """
         A conversation between a user and a helpful assistant. This is a fantasy RPG game that \

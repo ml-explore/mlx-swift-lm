@@ -46,8 +46,11 @@ import MLXLMCommon
 @testable import MLXFoundationModels
 @testable import MLXGuidedGeneration
 
-@Suite(.serialized)
-struct LoopInvariantsOnXGrammarTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct LoopInvariantsOnXGrammarTests {}
+}
+
+extension ModelLoadingSuite.LoopInvariantsOnXGrammarTests {
 
     @Test("GrammarConstraint satisfies GuidedGenerationLoop's constraint contract end-to-end")
     func testLoopConstraintContractComposesWithXGConstraint() async throws {

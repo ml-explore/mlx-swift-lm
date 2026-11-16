@@ -11,8 +11,11 @@ import Tokenizers
 private let museGlimmerDownloader: any Downloader = #hubDownloader()
 private let museGlimmerTokenizerLoader: any TokenizerLoader = #huggingFaceTokenizerLoader()
 
-@Suite(.serialized)
-struct MuseGlimmerTokenizerIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct MuseGlimmerTokenizerIntegrationTests {}
+}
+
+extension ModelLoadingSuite.MuseGlimmerTokenizerIntegrationTests {
     private static let modelID = "mlx-community/Muse-Glimmer-30B-4bit"
     private static let revision = "3e7677d7a40d348a3daba263a2b1c0aa41910710"
 

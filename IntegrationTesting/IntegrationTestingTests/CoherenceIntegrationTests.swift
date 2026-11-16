@@ -10,11 +10,6 @@ import MLXLMCommon
 import Testing
 import Tokenizers
 
-private let models = IntegrationTestModels(
-    downloader: #hubDownloader(),
-    tokenizerLoader: #huggingFaceTokenizerLoader()
-)
-
 private final class WeightProgressRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [Double] = []
@@ -26,33 +21,21 @@ private final class WeightProgressRecorder: @unchecked Sendable {
     var fractions: [Double] { lock.withLock { values } }
 }
 
-/// Load `configuration`, run the planets coherence check, then release the
-/// model. Each coherence test uses a distinct model exactly once, so we evict
-/// it from the shared cache and clear the GPU buffer pool afterwards: loading
-/// ~20 multi-GB models in one serialized run otherwise accumulates resident
-/// weights until the process is jetsammed (Metal compiler XPC crashes).
+/// Run the planets coherence check. `TestModelManager` unloads the previous
+/// model when the next test loads a different one.
 private func runCoherence(_ configuration: ModelConfiguration) async throws {
     let container = try await models.llmContainer(for: configuration)
-    do {
-        try await ChatSessionTests.planetsCoherence(container: container)
-    } catch {
-        await releaseModel(configuration)
-        throw error
-    }
-    await releaseModel(configuration)
-}
-
-private func releaseModel(_ configuration: ModelConfiguration) async {
-    await models.evictLLM(configuration)
-    Stream.gpu.synchronize()
-    Memory.clearCache()
+    try await ChatSessionTests.planetsCoherence(container: container)
 }
 
 /// Fast, reliable, architecturally-diverse subset that runs by default so the
 /// nightly/manual job stays well under the job time limit. The full model
 /// matrix lives in `CoherenceFullIntegrationTests` (opt-in).
-@Suite(.serialized)
-struct CoherenceIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct CoherenceIntegrationTests {}
+}
+
+extension ModelLoadingSuite.CoherenceIntegrationTests {
 
     @Test func llama3_2_1B() async throws {
         try await runCoherence(LLMRegistry.llama3_2_1B_4bit)
@@ -60,6 +43,8 @@ struct CoherenceIntegrationTests {
 
     @Test func weightProgressLoadsAndGenerates() async throws {
         let recorder = WeightProgressRecorder()
+        // Loads outside the manager to observe progress, so free the resident model first.
+        await TestModelManager.shared.unload()
         let container = try await LLMModelFactory.shared.loadContainer(
             from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
             configuration: LLMRegistry.llama3_2_1B_4bit,
@@ -89,10 +74,14 @@ struct CoherenceIntegrationTests {
 
 /// The remaining coherence models — larger, slower, or otherwise not needed for
 /// the default signal. Opt in with `MLX_RUN_FULL_COHERENCE=1`.
-@Suite(
-    .serialized,
-    .enabled(if: ProcessInfo.processInfo.environment["MLX_RUN_FULL_COHERENCE"] == "1"))
-struct CoherenceFullIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(
+        .serialized,
+        .enabled(if: ProcessInfo.processInfo.environment["MLX_RUN_FULL_COHERENCE"] == "1"))
+    struct CoherenceFullIntegrationTests {}
+}
+
+extension ModelLoadingSuite.CoherenceFullIntegrationTests {
 
     @Test func bitnet_b1_58_2B() async throws {
         try await runCoherence(LLMRegistry.bitnet_b1_58_2b_4t_4bit)

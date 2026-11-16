@@ -13,8 +13,11 @@ import FoundationModels
 ///
 /// Measures constrained vs unconstrained throughput, fast-forward token
 /// effectiveness, and grammar compilation time.
-@Suite(.serialized, .timeLimit(.minutes(10)))
-struct GuidedGenerationBenchmarkTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(10))) struct GuidedGenerationBenchmarkTests {}
+}
+
+extension ModelLoadingSuite.GuidedGenerationBenchmarkTests {
 
     /// Shared prompt used across runs.
     private static let benchmarkPrompt = "Generate a JSON object with a name and age."
