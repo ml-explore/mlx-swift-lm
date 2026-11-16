@@ -270,26 +270,33 @@ class MoEGate: Module {
         let (bsz, seqLen, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         let hiddenStates = x.matmul(weight.T)
-        var scores = sigmoid(hiddenStates)
-        let scoresForChoice = scores + e_score_correction_bias
+        // Score in float32, as mlx-lm does: next to a correction bias near 4,
+        // bfloat16 scores collapse to a few distinct values and change the
+        // selection.
+        let originalScores = sigmoid(hiddenStates.asType(.float32))
+        let scoresForChoice = originalScores + e_score_correction_bias.asType(.float32)
         let groupScores = scoresForChoice.reshaped(bsz, seqLen, self.nGroup, -1)
         let topKGroup = top(groupScores, k: 2, axis: -1).sum(axis: -1, keepDims: true)
         var k = nGroup - (topkGroup ?? 1)
         var groupIdx = argPartition(topKGroup, kth: k - 1, axis: -2)[.ellipsis, ..<k, 0...]
         groupIdx = broadcast(groupIdx, to: [bsz, seqLen, k, (nRoutedExperts ?? 1) / nGroup])
-        scores = putAlong(groupScores, stopGradient(groupIdx), values: MLXArray(0.0), axis: -2)
+        var scores = putAlong(
+            groupScores, stopGradient(groupIdx), values: MLXArray(0.0), axis: -2)
         scores = flattened(scores, start: -2, end: -1)
 
+        // The correction bias only selects the experts; the routing weights
+        // come from the uncorrected scores, as in mlx-lm.
         k = topK ?? 1
         let inds = argPartition(-scores, kth: k - 1, axis: -1)[.ellipsis, ..<k]
-        scores = takeAlong(scores, inds, axis: -1)
+        scores = takeAlong(originalScores, inds, axis: -1)
         if topK ?? 1 > 1, normTopkProb {
             let denominator = scores.sum(axis: -1, keepDims: true) + 1e-20
             scores = scores / denominator
-            scores = scores * routedScalingFactor
         }
+        scores = scores * routedScalingFactor
 
-        return (inds, scores)
+        // Return the weights in the activation dtype so the expert sum keeps it.
+        return (inds, scores.asType(x.dtype))
     }
 }
 
