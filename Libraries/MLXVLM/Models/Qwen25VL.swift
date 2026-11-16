@@ -105,7 +105,7 @@ private enum Language {
 
         /// Compute cos/sin for MROPE from 3D position IDs
         /// Matches Python apply_mrope: start with temporal, overwrite H/W ranges
-        private func mropeCosSin(positionIds: MLXArray) -> (MLXArray, MLXArray) {
+        private func mropeCosSin(positionIds: MLXArray, dtype: DType) -> (MLXArray, MLXArray) {
             // positionIds: [3, batch, seq]
             let invFreqExpanded = _invFreq.reshaped(1, 1, -1, 1)  // [1, 1, dim/2, 1]
             let posExpanded = positionIds[0..., 0..., .newAxis, 0...].asType(.float32)  // [3, batch, 1, seq]
@@ -122,7 +122,7 @@ private enum Language {
             }
 
             let emb = concatenated([freqsT, freqsT], axis: -1)
-            return (MLX.cos(emb), MLX.sin(emb))
+            return (MLX.cos(emb).asType(dtype), MLX.sin(emb).asType(dtype))
         }
 
         public func callAsFunction(
@@ -142,7 +142,7 @@ private enum Language {
 
             if let positionIds {
                 // MROPE path: compute 3D-aware cos/sin from position IDs
-                let (cosValues, sinValues) = mropeCosSin(positionIds: positionIds)
+                let (cosValues, sinValues) = mropeCosSin(positionIds: positionIds, dtype: x.dtype)
                 // Apply rotary embedding: expand dims for head broadcasting
                 let cos = cosValues[.newAxis, 0..., 0..., 0...]  // [1, batch, seq, dim]
                 let sin = sinValues[.newAxis, 0..., 0..., 0...]

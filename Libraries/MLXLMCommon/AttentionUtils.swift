@@ -55,7 +55,7 @@ package enum AttentionKVState {
             return MLXFast.scaledDotProductAttention(
                 queries: queries, keys: keys, values: values, scale: scale, mask: mask)
         case .quantized(let keys, let values, let groupSize, let bits, let mode):
-            return quantizedScaledDotProductAttention(
+            return quantizedCacheAttention(
                 queries: queries, quantizedKeys: keys, quantizedValues: values,
                 scale: scale, mask: mask, groupSize: groupSize, bits: bits, mode: mode)
         case .native(let cache, let sequenceLength):
@@ -153,7 +153,7 @@ public func attentionWithCacheUpdate(
     } else if let quantizedKVCache = cache as? QuantizedKVCacheProtocol {
         let (quantizedKeys, quantizedValues) = quantizedKVCache.updateQuantized(
             keys: keys, values: values)
-        return quantizedScaledDotProductAttention(
+        return quantizedCacheAttention(
             queries: queries,
             quantizedKeys: quantizedKeys,
             quantizedValues: quantizedValues,
@@ -173,4 +173,59 @@ public func attentionWithCacheUpdate(
             mask: mask
         )
     }
+}
+
+/// Attention over a quantized cache's keys and values. Every quantized-cache route
+/// goes through here so the fused-versus-quantized decision lives in one place.
+package func quantizedCacheAttention(
+    queries: MLXArray,
+    quantizedKeys: (MLXArray, MLXArray, MLXArray?),
+    quantizedValues: (MLXArray, MLXArray, MLXArray?),
+    scale: Float,
+    mask: MLXFast.ScaledDotProductAttentionMaskMode,
+    groupSize: Int,
+    bits: Int,
+    mode: QuantizationMode
+) -> MLXArray {
+    // Scales carry one entry per group, so they recover the value head dim for any mode.
+    let valueHeadDim = quantizedValues.1.dim(-1) * groupSize
+    if usesDequantizedPrefillAttention(queries: queries, valueHeadDim: valueHeadDim) {
+        // Prefill over a quantized cache: dequantize once and run the fused kernel
+        // instead of materializing [B, H, L, N] scores through quantized matmuls.
+        let keys = dequantized(
+            quantizedKeys.0, scales: quantizedKeys.1, biases: quantizedKeys.2,
+            groupSize: groupSize, bits: bits, mode: mode, dtype: queries.dtype)
+        let values = dequantized(
+            quantizedValues.0, scales: quantizedValues.1, biases: quantizedValues.2,
+            groupSize: groupSize, bits: bits, mode: mode, dtype: queries.dtype)
+        return MLXFast.scaledDotProductAttention(
+            queries: queries, keys: keys, values: values, scale: scale, mask: mask)
+    }
+    return quantizedScaledDotProductAttention(
+        queries: queries, quantizedKeys: quantizedKeys, quantizedValues: quantizedValues,
+        scale: scale, mask: mask, groupSize: groupSize, bits: bits, mode: mode)
+}
+
+/// Query length from which a quantized cache attends through the fused SDPA kernel over
+/// dequantized keys and values rather than through quantized matmuls.
+///
+/// This is a measured policy, not a kernel boundary. On M4 Pro (Qwen3-14B shapes, 4-bit
+/// KV, 8k context) the quantized path is 1.45-1.7x slower from 64 queries up and
+/// allocates [B, H, L, N] scores; below 32 the two are even, and at one query the
+/// quantized path reads a quarter of the bytes. The crossover shifts with the GQA ratio,
+/// head dim, cache length, bits, and GPU generation; retune it against new measurements.
+package let dequantizedPrefillAttentionMinimumLength = 64
+
+/// Head dims whose fused SDPA kernel MLX compiles for every GPU generation
+/// (`mlx/backend/metal/scaled_dot_product_attention.cpp`). MLX routes 192 and 256 to
+/// its unfused path, where the quantized matmuls are competitive, so they stay out.
+package let dequantizedPrefillAttentionHeadDims: Set<Int> = [64, 72, 80, 96, 128]
+
+/// Whether prefill attention over a quantized cache should dequantize and use the fused
+/// kernel. MLA-style caches with narrower values than queries stay on the quantized route.
+package func usesDequantizedPrefillAttention(queries: MLXArray, valueHeadDim: Int) -> Bool {
+    let headDim = queries.dim(-1)
+    return queries.dim(2) >= dequantizedPrefillAttentionMinimumLength
+        && headDim == valueHeadDim
+        && dequantizedPrefillAttentionHeadDims.contains(headDim)
 }

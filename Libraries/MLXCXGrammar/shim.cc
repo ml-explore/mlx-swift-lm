@@ -495,7 +495,7 @@ XGStatus xg_matcher_find_jump_forward_string(
 XGStatus xg_matcher_fork(XGMatcher *matcher, XGMatcher **out_matcher) {
     if (matcher == nullptr) return XG_ERR_INTERNAL;
     if (out_matcher == nullptr) return XG_ERR_INTERNAL;
-    // GrammarMatcher::Fork() was introduced in xgrammar v0.1.34.
+    // GrammarMatcher::Fork() was introduced in xgrammar v0.1.33.
     // This build is pinned to v0.1.30 which does not have it.
     SetLastErrorMessage("xg_matcher_fork: Fork() not available in xgrammar v0.1.30");
     return XG_ERR_INTERNAL;

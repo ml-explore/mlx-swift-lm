@@ -227,6 +227,10 @@ struct TextToolCallRecoveryScanner: Sendable {
         self.potentialPrefixEndCharacters = Set(prefixes.compactMap(\.last))
     }
 
+    var canEndForSteering: Bool {
+        buffer.isEmpty && context == .response
+    }
+
     /// Removes and returns the provenance recorded since the last drain.
     mutating func drainEvents() -> [ToolCallRecoveryEvent] {
         let drained = events

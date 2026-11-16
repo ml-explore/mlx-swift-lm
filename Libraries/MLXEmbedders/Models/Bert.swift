@@ -783,10 +783,17 @@ public struct BertConfiguration: Decodable, Sendable {
         architectures = try container.decodeIfPresent([String].self, forKey: .architectures) ?? []
         let stringIDToLabel =
             try container.decodeIfPresent([String: String].self, forKey: .idToLabel) ?? [:]
-        idToLabel = Dictionary(
-            uniqueKeysWithValues: stringIDToLabel.compactMap { key, value in
-                Int(key).map { ($0, value) }
-            })
+        var parsedIDToLabel: [Int: String] = [:]
+        for (key, label) in stringIDToLabel {
+            guard let id = Int(key) else { continue }
+            guard parsedIDToLabel[id] == nil else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .idToLabel, in: container,
+                    debugDescription: "id2label key \(key) repeats integer id \(id).")
+            }
+            parsedIDToLabel[id] = label
+        }
+        idToLabel = parsedIDToLabel
         let labelToID =
             try container.decodeIfPresent([String: Int].self, forKey: .labelToID) ?? [:]
         for (label, id) in labelToID where idToLabel[id] == nil {

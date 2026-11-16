@@ -27,8 +27,11 @@ import Tokenizers
 private let e4bTarget = "mlx-community/gemma-4-e4b-it-4bit"
 private let e2bTarget = "mlx-community/gemma-4-e2b-it-4bit"
 
-@Suite(.serialized)
-struct Gemma4EseriesLoadIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct Gemma4EseriesLoadIntegrationTests {}
+}
+
+extension ModelLoadingSuite.Gemma4EseriesLoadIntegrationTests {
 
     @Test(.enabled(if: hfSnapshotDir(modelId: e4bTarget) != nil))
     func testE4BTargetLoadsAndGenerates() async throws {
@@ -45,8 +48,10 @@ struct Gemma4EseriesLoadIntegrationTests {
 
         // The load itself is the regression surface — pre-fix this threw
         // keyNotFound on the KV-shared tail layers.
-        let context = try await VLMModelFactory.shared.load(
-            from: dir, using: #huggingFaceTokenizerLoader())
+        let context = try await TestModelManager.shared.load("vlm-context:\(dir.path)") {
+            try await VLMModelFactory.shared.load(
+                from: dir, using: #huggingFaceTokenizerLoader())
+        }
 
         let input = try await context.processor.prepare(
             input: UserInput(chat: [.user("Why is the sky blue? One sentence.")]))
@@ -55,9 +60,16 @@ struct Gemma4EseriesLoadIntegrationTests {
             parameters: GenerateParameters(maxTokens: 16, temperature: 0),
             context: context)
 
+        // Reasoning counts as output here: this checks the model loaded and generated,
+        // and Gemma 4 opens a thought channel unprompted (the E-series template prefills
+        // nothing), so all 16 tokens can land inside it and never reach `.chunk`.
         var text = ""
         for await event in stream {
-            if case .chunk(let c) = event { text += c }
+            switch event {
+            case .chunk(let c): text += c
+            case .reasoning(let c): text += c
+            default: break
+            }
         }
         #expect(!text.isEmpty, "\(modelId) loaded but produced no output")
     }

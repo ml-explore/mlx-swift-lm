@@ -213,6 +213,7 @@ func loadModelCheckpoint(urls: [URL], isRead: @escaping @Sendable (String) -> Bo
     }()
 
     let state = ConcurrentLoadState(fileCount: urls.count)
+    let progress = ModelLoadProgressScope.reporter
     DispatchQueue.concurrentPerform(iterations: items.count) { index in
         let item = items[index]
         do {
@@ -221,7 +222,16 @@ func loadModelCheckpoint(urls: [URL], isRead: @escaping @Sendable (String) -> Bo
                 // Explicitly the CPU stream: `Load` has no GPU implementation and the arrays
                 // land in unified memory either way. The concurrency comes from evaluating
                 // disjoint groups from many threads, not from the stream itself.
-                let (all, metadata) = try loadArraysAndMetadata(url: item.url, stream: .cpu)
+                let all: [String: MLXArray]
+                let metadata: [String: String]
+                if let progress {
+                    let worker = UUID()
+                    (all, metadata) = try loadArraysAndMetadata(url: item.url, stream: .cpu) {
+                        progress.update($0, worker: worker)
+                    }
+                } else {
+                    (all, metadata) = try loadArraysAndMetadata(url: item.url, stream: .cpu)
+                }
 
                 var selected = [String: MLXArray]()
                 if let names = item.names {
@@ -379,7 +389,7 @@ private func topLevelSafetensorURLs(in modelDirectory: URL) -> [URL] {
 
 /// Load model weights.
 ///
-/// This is typically called via ``GenericModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
+/// This is typically called via ``GenericModelFactory/load(from:using:configuration:useLatest:progress:)``.
 /// This function loads model weight `safetensor` files in the given `modelDirectory`,
 /// calls ``BaseLanguageModel/prepareCheckpoint(_:)`` to allow per-model preprocessing,
 /// applies optional quantization, and
@@ -417,11 +427,15 @@ public func loadWeights(
             of: model, urls: weightURLs, excluded: excludedComponents,
             loading: componentLoading, perLayerQuantization: perLayerQuantization)
         + model.excludedCheckpointNamespaces
-    var checkpoint = try loadModelCheckpoint(
-        urls: weightURLs, excludedNamespaces: excludedNamespaces)
-    checkpoint.perLayerQuantization = perLayerQuantization
-    checkpoint = try model.prepareCheckpoint(checkpoint)
-    try applyCheckpoint(checkpoint, to: model)
+    // The checkpoint goes out of scope before materialization, so tensors that preparation
+    // replaces are freed by then.
+    do {
+        var checkpoint = try loadModelCheckpoint(
+            urls: weightURLs, excludedNamespaces: excludedNamespaces)
+        checkpoint.perLayerQuantization = perLayerQuantization
+        checkpoint = try model.prepareCheckpoint(checkpoint)
+        try applyCheckpoint(checkpoint, to: model)
+    }
 
     // Build derived inference-only state and realize the model while the loader
     // still has exclusive access. Forward passes must remain read-only.
@@ -456,20 +470,23 @@ public func loadWeights(
     componentLoading: ComponentLoading = .onFirstUse
 ) async throws {
     let model = SendableBox(model)
+    let progress = ModelLoadProgressScope.reporter
     try await withCheckedThrowingContinuation {
         (continuation: CheckedContinuation<Void, any Error>) in
         DispatchQueue.global(qos: .userInitiated).async {
             // The caller's withError does not reach this thread.
             continuation.resume(
                 with: Result {
-                    try withLoaderThreadError {
-                        try loadWeights(
-                            modelDirectory: modelDirectory, model: model.consume(),
-                            quantization: quantization,
-                            perLayerQuantization: perLayerQuantization,
-                            weightFileSelection: weightFileSelection,
-                            excludedComponents: excludedComponents,
-                            componentLoading: componentLoading)
+                    try ModelLoadProgressScope.$reporter.withValue(progress) {
+                        try withLoaderThreadError {
+                            try loadWeights(
+                                modelDirectory: modelDirectory, model: model.consume(),
+                                quantization: quantization,
+                                perLayerQuantization: perLayerQuantization,
+                                weightFileSelection: weightFileSelection,
+                                excludedComponents: excludedComponents,
+                                componentLoading: componentLoading)
+                        }
                     }
                 })
         }

@@ -3,6 +3,7 @@
 import Foundation
 import FoundationModels
 import HuggingFace
+import IntegrationTestHelpers
 import MLX
 import MLXHuggingFace
 import MLXLMCommon
@@ -89,19 +90,28 @@ func makeReasoningTestModel(
         resolver: resolver)
 }
 
-/// A `ContainerLoader` backed by the production Hugging Face wiring: the same
+/// A `ProgressContainerLoader` backed by the production Hugging Face wiring: the same
 /// `#hubDownloader()` (a `HuggingFace.HubClient` bridge) and
 /// `#huggingFaceTokenizerLoader()` the `#huggingFaceLanguageModel` macro
 /// synthesizes. Paired with `testWeightsLocation(modelID:)`, so downloading
 /// and on-disk availability resolve against the same HubClient cache — exactly
 /// as they do in shipping code.
+///
+/// Loads go through `TestModelManager`, so a container is shared with other
+/// tests until another model is needed. Unloading also evicts the model from
+/// the `MLXLanguageModel` cache, which holds its own reference.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
-func testLoad() -> MLXLanguageModel.ContainerLoader {
+func testLoad() -> MLXLanguageModel.ProgressContainerLoader {
     { configuration, progress in
-        try await loadModelContainer(
-            from: #hubDownloader(),
-            using: #huggingFaceTokenizerLoader(),
-            configuration: configuration, progressHandler: progress)
+        try await TestModelManager.shared.load(
+            "fm", configuration,
+            onUnload: { await makeTestModel(configuration.name).evict() }
+        ) {
+            try await loadModelContainer(
+                from: #hubDownloader(),
+                using: #huggingFaceTokenizerLoader(),
+                configuration: configuration, progress: progress)
+        }
     }
 }
 
@@ -317,11 +327,12 @@ func executeResponse(
 
 // MARK: - GPU Memory Management
 
-/// Releases all GPU memory: synchronizes pending GPU work, evicts cached models,
-/// then clears the Metal buffer pool.
+/// Releases all GPU memory: synchronizes pending GPU work, unloads the
+/// `TestModelManager` model, evicts cached models, then clears the Metal buffer pool.
 @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
 func releaseAllGPUMemory() async {
     Stream.gpu.synchronize()
+    await TestModelManager.shared.unload()
     await MLXLanguageModel.evictAll()
     Stream.gpu.synchronize()
     Memory.clearCache()

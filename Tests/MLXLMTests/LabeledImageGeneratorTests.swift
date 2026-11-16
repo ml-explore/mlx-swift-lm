@@ -60,17 +60,10 @@ struct LabeledImageGeneratorTests {
         #expect(content == imagesThenText)
     }
 
-    @Test("GlmOcr keeps its text first and still names each image")
+    @Test("GlmOcr names each image before itself")
     func glmOcr() throws {
         let content = try parts(GlmOcrMessageGenerator().generate(message: message(["A", "B"])))
-        #expect(
-            content == [
-                ["type": "text", "text": "which one is blue?"],
-                ["type": "text", "text": "[A]"],
-                ["type": "image"],
-                ["type": "text", "text": "[B]"],
-                ["type": "image"],
-            ])
+        #expect(content == imagesThenText)
     }
 
     @Test("Gemma4 keeps a system message as a plain string")
@@ -92,9 +85,9 @@ struct LabeledImageGeneratorTests {
         let glm = try parts(GlmOcrMessageGenerator().generate(message: unlabeled))
         #expect(
             glm == [
+                ["type": "image"],
+                ["type": "image"],
                 ["type": "text", "text": "which one is blue?"],
-                ["type": "image"],
-                ["type": "image"],
             ])
     }
 }

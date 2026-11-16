@@ -1086,7 +1086,9 @@ public class FastVLM: Module, VLMModel, KVCacheDimensionProvider {
             return languageModel.model.embedTokens(inputIds)
         }
 
-        let (_, imageFeatures, _) = visionModel(pixelValues.transposed(0, 2, 3, 1))
+        let dtype = visionModel.visionModel.patchEmbed.blocks[0].reparamConv.weight.dtype
+        let (_, imageFeatures, _) = visionModel(
+            pixelValues.asType(dtype).transposed(0, 2, 3, 1))
         let (B, H, W, C) = (
             imageFeatures.dim(0), imageFeatures.dim(1), imageFeatures.dim(2),
             imageFeatures.dim(3)

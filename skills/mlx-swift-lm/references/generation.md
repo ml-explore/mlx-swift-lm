@@ -4,7 +4,7 @@
 
 Generation APIs in `MLXLMCommon` support two output modes:
 
-- Decoded output (`Generation`): text chunks, tool calls, and final completion info.
+- Decoded output (`Generation`): text chunks, reasoning, tool calls, and final completion info.
 - Raw token output (`TokenGeneration`): token IDs plus final completion info.
 
 Primary implementation lives in `Libraries/MLXLMCommon/Evaluate.swift`.
@@ -44,15 +44,39 @@ for await event in stream {
     switch event {
     case .chunk(let text):
         print(text, terminator: "")
+    case .reasoning(let text):
+        // Thinking, with the protocol's delimiters removed. Keep it out of the
+        // content you replay; ChatSession records it beside the message instead.
+        print(text, terminator: "")
     case .toolCall(let call):
         print("\nTool requested: \(call.function.name)")
     case .rejectedToolCall(let rejected):
         print("\nRejected tool call: \(rejected.reason)")
     case .info(let info):
         print("\nstop=\(info.stopReason) tok/s=\(info.tokensPerSecond)")
+    case .steering:
+        break  // Only ChatSession emits steering outcomes.
     }
 }
 ```
+
+`.reasoning` arrives only for models whose response protocol frames thinking: a
+resolved `ModelConfiguration.reasoningConfig` (`<think>` families, Gemma 4's labeled
+channels) or a framed token protocol that carries its own reasoning channel (GPT-OSS
+Harmony, Onyx). Everything else streams as `.chunk` exactly as before.
+
+`ChatSession.streamResponse` yields the answer only; use `streamDetails` to observe
+`.reasoning` alongside tool calls. The session records the answer as the assistant
+message. It keeps a finished thought beside that message, and the message generators
+pass it to the chat template as `reasoning_content`, which Qwen and Gemma 4 templates
+replay. GPT-OSS and Onyx deliberately do not replay their reasoning channels.
+
+When both reasoning delimiters are single tokens in the model's tokenizer, they are
+matched by token id. The same characters written out as ordinary text, for example
+when a model explains its own format, stay in the stream they appear in. A tag that
+ends a thought without closing it, such as `<tool_call>` for Qwen or `<|tool_call>`
+for Gemma 4, is matched the same way when it is a single token. The tool-call parser
+itself still reads text.
 
 ## Task-Handle Pattern for Early Stop
 
@@ -127,6 +151,8 @@ let (tokenStream, tokenTask) = try generateTokensTask(
 - `.stop`: EOS or stop token encountered.
 - `.length`: `maxTokens` reached.
 - `.cancelled`: task cancellation or early termination path.
+- `.steered`: a `ChatSession` step ended early to apply `steer(...)` input; the
+  response continues with another step.
 
 ## Throwing vs Non-Throwing Behavior
 

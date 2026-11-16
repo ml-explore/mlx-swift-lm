@@ -17,7 +17,7 @@ public enum LogProbabilityGeneration<Output: Sendable>: Sendable {
 /// Adds per-token log probabilities to another handler's output.
 ///
 /// Enable reporting with ``GenerateParameters/logProbabilities`` when constructing
-/// a ``TokenIterator``. Text chunks can span several tokens; probability events
+/// a token iterator, speculative or not. Text chunks can span several tokens; probability events
 /// follow the token sequence, including tokens consumed by tool or reasoning parsers.
 /// This handler materializes the values, so only streams that use it copy them from the GPU.
 public struct LogProbabilityTokenLoopHandler<Base: TokenLoopHandler>: TokenLoopHandler {
@@ -31,6 +31,7 @@ public struct LogProbabilityTokenLoopHandler<Base: TokenLoopHandler>: TokenLoopH
 
     public var additionalStopTokenIDs: Set<Int> { base.additionalStopTokenIDs }
     public var receivesStopTokens: Bool { base.receivesStopTokens }
+    public var canEndForSteering: Bool { base.canEndForSteering }
 
     public mutating func onToken(
         _ token: Int,

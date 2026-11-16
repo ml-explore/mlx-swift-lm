@@ -278,4 +278,28 @@ final class VLMProcessorTests: XCTestCase {
             XCTAssertTrue(message.contains("at least one frame"))
         }
     }
+
+    func testGlmOcrPixelBudgetCountsTheTemporalPatch() throws {
+        let config = try JSONDecoder().decode(
+            GlmOcrProcessorConfiguration.self,
+            from: Data(
+                """
+                {
+                  "image_mean": [0.48145466, 0.4578275, 0.40821073],
+                  "image_std": [0.26862954, 0.26130258, 0.27577711],
+                  "merge_size": 2,
+                  "patch_size": 14,
+                  "temporal_patch_size": 2,
+                  "size": {"shortest_edge": 12544, "longest_edge": 9633792}
+                }
+                """.utf8))
+        let processor = GlmOcrProcessor(config, tokenizer: FixedTokenizer())
+        let page = CIImage(color: CIColor(red: 0.5, green: 0.25, blue: 0.75))
+            .cropped(to: CGRect(x: 0, y: 0, width: 2480, height: 3508))
+
+        let (_, grid) = try processor.preprocess(images: [page], processing: nil)
+
+        XCTAssertEqual(grid.h * config.patchSize, 2604)
+        XCTAssertEqual(grid.w * config.patchSize, 1820)
+    }
 }

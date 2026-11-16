@@ -167,4 +167,33 @@ struct ToolArgumentNormalizationTests {
         #expect(tryParsePythonLiteral("['SF',") == nil)
         #expect(tryParsePythonLiteral("[f()]") == nil)
     }
+
+    @Test("Python string escapes decode as Python does")
+    func pythonStringEscapes() {
+        for (literal, value) in [
+            (#"'\x41\101\0'"#, "AA\0"),
+            (#"'\a\v'"#, "\u{7}\u{b}"),
+            ("'line\\\nnext'", "linenext"),
+            (#"'\ud83d\ude00'"#, "\u{1F600}"),
+            (#"'\d'"#, #"\d"#),
+        ] {
+            #expect(tryParsePythonLiteral(literal) as? String == value)
+        }
+        #expect(tryParsePythonLiteral(#"'\ud83d'"#) == nil)
+        #expect(tryParsePythonLiteral(#"'\x4'"#) == nil)
+    }
+
+    @Test("Python triple-quoted strings span lines and end at three quotes")
+    func pythonTripleQuotedStrings() {
+        for (literal, value) in [
+            ("'''line 1\nline 2'''", "line 1\nline 2"),
+            ("\"\"\"It's \"quoted\" text\"\"\"", "It's \"quoted\" text"),
+            ("''''a'''", "'a"),
+            ("''''''", ""),
+        ] {
+            #expect(tryParsePythonLiteral(literal) as? String == value)
+        }
+        #expect(tryParsePythonLiteral("'''a''''") == nil)
+        #expect(tryParsePythonLiteral("'''a''") == nil)
+    }
 }

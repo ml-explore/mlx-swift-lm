@@ -82,7 +82,7 @@ private func create<C: Decodable, P>(
 
 /// Registry of model type, e.g 'llama', to functions that can instantiate the model from configuration.
 ///
-/// Typically called via ``VLMModelFactory/load(from:using:configuration:useLatest:progressHandler:)``.
+/// Typically called via ``VLMModelFactory/load(from:using:configuration:useLatest:progress:)``.
 public enum VLMTypeRegistry {
 
     /// Shared instance with default model types.
@@ -444,6 +444,9 @@ public final class VLMModelFactory: GenericModelFactory {
         var mutableConfiguration = configuration
         mutableConfiguration.eosTokenIds = eosTokenIds
         mutableConfiguration.stopStrings.formUnion(generationConfig?.stopStrings ?? [])
+        if mutableConfiguration.generationConfig == nil {
+            mutableConfiguration.generationConfig = generationConfig
+        }
 
         // Chat conventions. An explicit value on the configuration wins, followed
         // by a registered resolver that sees the repo id. Checkpoint metadata then
@@ -527,7 +530,8 @@ public final class VLMModelFactory: GenericModelFactory {
             eosTokenIds: mutableConfiguration.eosTokenIds,
             toolCallFormat: mutableConfiguration.toolCallFormat,
             reasoningConfig: mutableConfiguration.reasoningConfig,
-            messageGenerator: mutableConfiguration.messageGenerator)
+            messageGenerator: mutableConfiguration.messageGenerator,
+            generationConfig: mutableConfiguration.generationConfig)
 
         return .init(
             configuration: modelConfig, model: model, processor: processor,

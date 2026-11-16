@@ -30,8 +30,11 @@ import MLXLMCommon
 @testable import MLXFoundationModels
 @testable import MLXGuidedGeneration
 
-@Suite(.serialized, .timeLimit(.minutes(2)))
-struct EmitStopSignalTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(2))) struct EmitStopSignalTests {}
+}
+
+extension ModelLoadingSuite.EmitStopSignalTests {
 
     @Test("GuidedGenerationLoop honors emit=false during fast-forward yielding")
     func emitStopSignalHonoredDuringFastForward() async throws {

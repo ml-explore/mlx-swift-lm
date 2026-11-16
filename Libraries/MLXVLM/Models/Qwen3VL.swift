@@ -2049,7 +2049,11 @@ public struct Qwen3VLMessageGenerator: MessageGenerator {
             let startDelimiter = reasoningProtocol.startDelimiter
             let endDelimiter = reasoningProtocol.endDelimiter
             let reasoningAndContent: Substring?
-            if message.prefilledReasoningStartDelimiter == startDelimiter {
+            if let recorded = message.reasoning {
+                // The session already streamed reasoning apart from the content.
+                reasoning = recorded
+                reasoningAndContent = nil
+            } else if message.prefilledReasoningStartDelimiter == startDelimiter {
                 reasoningAndContent = message.content[...]
             } else if message.content.hasPrefix(startDelimiter) {
                 reasoningAndContent = message.content.dropFirst(startDelimiter.count)

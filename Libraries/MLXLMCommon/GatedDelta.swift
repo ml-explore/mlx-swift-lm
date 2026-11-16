@@ -335,6 +335,34 @@ func gatedDeltaOps(
     return (y, state)
 }
 
+// MARK: - MLXFast
+
+/// Whether mlx core runs a fused kernel for these inputs, as `use_fallback`
+/// in mlx core. Otherwise it runs a per-step fallback, which is slower than
+/// `gatedDeltaKernel`.
+private func hasFastGatedDelta(q: MLXArray, v: MLXArray, mask: MLXArray?) -> Bool {
+    guard mask == nil, q.dim(3) == 128, v.dim(3) == 128 else { return false }
+    switch (q.dim(2), v.dim(2)) {
+    case (16, 16), (16, 32), (16, 48), (16, 64), (24, 24), (32, 32): return true
+    default: return false
+    }
+}
+
+/// `MLXFast.gatedDeltaUpdate` with `g` and `beta` kept in float32.
+///
+/// mlx core casts `g` and `beta` to the dtype of `q` and `k`. In bf16 a decay
+/// just below 1 rounds to 1, so the state stops decaying (ml-explore/mlx#4725).
+/// Float32 `q` and `k` prevent the cast. Remove the casts when mlx-swift includes
+/// ml-explore/mlx#4760.
+private func fastGatedDelta(
+    q: MLXArray, k: MLXArray, v: MLXArray, g: MLXArray, beta: MLXArray, state: MLXArray
+) -> (MLXArray, MLXArray) {
+    let (y, state) = MLXFast.gatedDeltaUpdate(
+        queries: q.asType(.float32), keys: k.asType(.float32), values: v,
+        gamma: g, beta: beta, initialState: state)
+    return (y.asType(q.dtype), state)
+}
+
 // MARK: - Public API
 
 public func gatedDeltaUpdate(
@@ -368,13 +396,19 @@ public func gatedDeltaUpdate(
     // (`n_per_t = Dk / 32`, integer-truncating). A key head dim that is not a
     // multiple of 32 would silently drop its trailing `Dk % 32` state
     // dimensions and produce wrong output with no error. Stock Qwen3.5 uses
-    // Dk = 192 (a multiple of 32), but the value is config-driven, so route any
+    // Dk = 128 (a multiple of 32), but the value is config-driven, so route any
     // non-multiple-of-32 Dk to the ops fallback, which handles an arbitrary key
     // dimension correctly (slower, but never truncating).
     //
     // `useKernel: false` is for training: the kernel is a custom Metal
     // kernel and has no gradient, so a model in training mode passes
     // `!training` here, as the Python model does with `use_kernel`.
+    //
+    // The MLXFast kernel has a gradient and is faster than both, so the
+    // layouts it supports take it in training and in inference.
+    if hasFastGatedDelta(q: q, v: v, mask: mask) {
+        return fastGatedDelta(q: q, k: k, v: v, g: g, beta: beta, state: state)
+    }
     if useKernel, GatedDeltaKernelManager.shared.kernel != nil, Dk % 32 == 0 {
         return gatedDeltaKernel(q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask)
     }

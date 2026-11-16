@@ -35,8 +35,10 @@ Observation-only events return `nil` from ``GenerationProviding/generation``.
 ``TextGenerationTransformer`` passes through the standard handler and parameters.
 
 Wrap the supplied ``TextToolTokenLoopHandler`` and forward each base event exactly
-once, in order. Preserve its stop-token properties, dispositions, final output,
-and completion metadata. The session uses those events to update its transcript
+once, in order. Preserve its stop-token properties,
+``TokenLoopHandler/canEndForSteering``, dispositions, final output, and completion
+metadata. ``GenerationProviding/init(generation:)`` wraps events the session emits
+itself, such as steering outcomes. The session uses those events to update its transcript
 and cache and dispatch tools. Automatically dispatched tool-call events are
 consumed by the session; other transformed events reach the caller unchanged.
 Cached-prompt counts are attached before the transformer sees completion events.
@@ -50,9 +52,10 @@ The ordinary `streamDetails` overload, `respond`, and `streamResponse` retain th
 output and handler through the text transformer. Leave `GenerateParameters.logProbabilities` as `nil` when
 unused to avoid probability computation and readback.
 
-Requesting log probabilities with active speculative decoding throws
-``ChatSession/ObservationError/unsupportedSpeculativeDecoding``. A configuration that falls back to standard decoding can still report
-probabilities. Observation does not silently change the decoding strategy.
+Speculative decoding reports the same values. The verifier scores every proposal in
+one forward pass, and each emitted token is sampled from its own row of those logits,
+so a token's values come from the main model, never from the drafter. Rejected
+proposals report nothing.
 
 ## Overview
 
@@ -61,7 +64,8 @@ observations, wrap a ``TextToolTokenLoopHandler`` or ``RawTokenLoopHandler`` in
 ``LogProbabilityTokenLoopHandler`` and pass it to ``generateLoopTask(promptTokenCount:modelConfiguration:tokenizer:iterator:wiredMemoryTicket:includeStopToken:handler:)``.
 
 Enable computation with ``GenerateParameters/logProbabilities`` when constructing
-the ``TokenIterator``. `nil` disables reporting, `0` reports the selected token,
+a token iterator: ``TokenIterator``, ``SpeculativeTokenIterator``, or
+``MTPSpeculativeTokenIterator``. `nil` disables reporting, `0` reports the selected token,
 and a positive value also reports that many top candidates. The ordinary
 `generate` and `generateTokens` streams do not emit probability events.
 
@@ -111,8 +115,8 @@ can include the selected token.
 
 Reporting adds normalization where the sampler does not already need it and
 candidate extraction to each decode step. Keep it disabled when unused.
-Speculative iterators do not provide log probabilities; use ``TokenIterator``
-for observation.
+Speculative iterators normalize the rows a round emits in one batch, after
+acceptance, and skip rejected proposals.
 
 ``GenerateCompletionInfo`` also reports ``GenerateCompletionInfo/evictedTokenCount``.
 Its ``GenerateCompletionInfo/reasoningTokenCount`` and

@@ -11,8 +11,11 @@ import Tokenizers
 private let qwenReasoningDownloader: any Downloader = #hubDownloader()
 private let qwenReasoningTokenizerLoader: any TokenizerLoader = #huggingFaceTokenizerLoader()
 
-@Suite(.serialized)
-struct QwenReasoningTemplateIntegrationTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized) struct QwenReasoningTemplateIntegrationTests {}
+}
+
+extension ModelLoadingSuite.QwenReasoningTemplateIntegrationTests {
     enum Template: Sendable, CaseIterable {
         case qwen36, qwen38
 

@@ -150,6 +150,11 @@ struct ReasoningEventEmitterTests {
         #expect(segments == [.reasoning("a<think>b"), .response("c")])
     }
 
+    @Test func nestedInnerThinkNeverClosedFlushesAsReasoning() {
+        let segments = run(["<think>a<think>b"])
+        #expect(segments == [.reasoning("a<think>b")])
+    }
+
     @Test func strayCloseWhenNeverOpenedIsLiteralResponse() {
         let segments = run(["answer </think> more"])
         #expect(segments == [.response("answer </think> more")])
@@ -174,6 +179,40 @@ struct ReasoningEventEmitterTests {
         let segments = run(["<think>t</think>", "\n\nAnswer"])
         #expect(reasoningText(segments) == "t")
         #expect(responseText(segments) == "Answer")
+    }
+
+    @Test func trimsThoughtTrailingWhitespaceAcrossChunks() {
+        let closed = run(primedInside: true, ["a", "  ", "b", " \n", "\n</think>answer"])
+        #expect(closed == [.reasoning("a"), .reasoning("  b"), .response("answer")])
+        let unclosed = run(primedInside: true, ["thought", " \n"])
+        #expect(unclosed == [.reasoning("thought")])
+    }
+
+    @Test func heldThoughtWhitespaceIsTrimmedAtAnImplicitEnd() {
+        let segments = run(
+            config: Self.thinkThenToolConfig, primedInside: true,
+            ["thought", " \n", "<tool_call>{}"])
+        #expect(segments == [.reasoning("thought"), .response("<tool_call>{}")])
+    }
+
+    /// Whitespace held before a partial delimiter is still the thought's text when
+    /// the stream ends: only the trailing run is dropped.
+    @Test func heldThoughtWhitespaceFlushesBeforeAPartialDelimiter() {
+        let segments = run(primedInside: true, ["thought", " <"])
+        #expect(segments == [.reasoning("thought"), .reasoning(" <")])
+    }
+
+    /// Held whitespace must not be rescanned on every chunk, or a model stuck emitting
+    /// newlines makes each chunk cost more than the last.
+    @Test func longWhitespaceRunInThoughtStaysLinear() {
+        var emitter = ReasoningEventEmitter(
+            config: Self.thinkThenToolConfig, primedInside: true)
+        let start = ContinuousClock.now
+        var segments = emitter.process("thought")
+        for _ in 0 ..< 20_000 { segments += emitter.process("\n") }
+        segments += emitter.process("</think>answer")
+        #expect(ContinuousClock.now - start < .seconds(10))
+        #expect(segments == [.reasoning("thought"), .response("answer")])
     }
 
     // MARK: - Custom delimiters (registry-extensible families)
@@ -249,6 +288,36 @@ struct ReasoningEventEmitterTests {
         #expect(
             ReasoningEventEmitter.promptEndsInsideReasoning(
                 renderedPromptTail: "<think>\n\n  ", config: Self.thinkConfig))
+    }
+
+    /// Qwen3-8B's real thinking-on prompt for a user who typed `<think>`. The typed
+    /// text tokenizes to the template's own `<think>` id, so token ids cannot tell them apart.
+    @Test func openerInUserTurnIsNotDetected() {
+        let tail =
+            "<|im_start|>user\nWhat does <think> mean in a chat template?<|im_end|>\n"
+            + "<|im_start|>assistant\n"
+        #expect(
+            !ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail: tail, config: Self.thinkConfig))
+    }
+
+    @Test func prefillAfterOpenerInUserTurnIsDetected() {
+        let tail =
+            "<|im_start|>user\nWhat does <think> mean in a chat template?<|im_end|>\n"
+            + "<|im_start|>assistant\n<think>\n"
+        #expect(
+            ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail: tail, config: Self.thinkConfig))
+    }
+
+    /// Qwen3-8B's real thinking-off prompt for the same user turn.
+    @Test func closedPrefillAfterOpenerInUserTurnIsNotDetected() {
+        let tail =
+            "<|im_start|>user\nWhat does <think> mean in a chat template?<|im_end|>\n"
+            + "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        #expect(
+            !ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail: tail, config: Self.thinkConfig))
     }
 
     @Test func customDelimiterPrefillDetected() {

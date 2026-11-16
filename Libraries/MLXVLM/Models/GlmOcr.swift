@@ -789,7 +789,8 @@ public struct GlmOcrProcessor: UserInputProcessor {
         let (resizedHeight, resizedWidth) = try QwenVL.targetSize(
             height: Int(size.height), width: Int(size.width),
             factor: config.patchSize * config.mergeSize,
-            minPixels: config.minPixels, maxPixels: config.maxPixels)
+            minPixels: config.minPixels / config.temporalPatchSize,
+            maxPixels: config.maxPixels / config.temporalPatchSize)
         let resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
 
         let processedImages = images.map { image in
@@ -1369,7 +1370,7 @@ public struct GlmOcrMessageGenerator: MessageGenerator {
     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
         var dictionary: MLXLMCommon.Message = [
             "role": message.role.rawValue,
-            "content": contentParts(for: message, layout: .textThenImages),
+            "content": contentParts(for: message, layout: .imagesThenText),
         ]
         addToolMetadata(to: &dictionary, for: message)
         return dictionary

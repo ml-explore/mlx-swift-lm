@@ -265,13 +265,7 @@ package struct HarmonyFrameParser: Sendable {
     // MARK: - Token classification
 
     private static func resolveTokenID(_ token: String, tokenizer: any Tokenizer) -> Int? {
-        if let id = tokenizer.convertTokenToId(token) {
-            guard id != tokenizer.unknownTokenId else { return nil }
-            return id
-        }
-        let encoded = tokenizer.encode(text: token, addSpecialTokens: false)
-        guard encoded.count == 1, encoded[0] != tokenizer.unknownTokenId else { return nil }
-        return encoded[0]
+        tokenizer.singleTokenID(for: token)
     }
 
     private func decode<S: Sequence>(_ tokens: S) -> String where S.Element == Int {

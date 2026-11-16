@@ -344,20 +344,12 @@ public final class EmbeddingGemma2: Module, BaseLanguageModel, ModelComponentsPr
     }
 
     public var modelComponents: [ModelComponent: [CheckpointComponent]] {
-        var components: [ModelComponent: [CheckpointComponent]] = [:]
-        if config.vision != nil { components[.vision] = Self.visionComponents }
-        if config.audio != nil { components[.audio] = Self.audioComponents }
-        return components
+        Gemma4Checkpoint.components
     }
 
     public var onDemandComponents: [AnyOnDemandComponent] {
         let components: [AnyOnDemandComponent?] = [onDemandVision, onDemandAudio]
         return components.compactMap { $0 }
-    }
-
-    public var excludedCheckpointNamespaces: [String] {
-        (config.vision == nil ? Self.visionComponents.flatMap(\.namespaces) : [])
-            + (config.audio == nil ? Self.audioComponents.flatMap(\.namespaces) : [])
     }
 
     package var supportedComponents: Set<ModelComponent> {
@@ -378,15 +370,6 @@ public final class EmbeddingGemma2: Module, BaseLanguageModel, ModelComponentsPr
         async throws
     {
         try await loadOnDemandComponents(pendingOnDemandComponents(of: self, among: needed))
-    }
-
-    private static let visionComponents = components(["vision_tower", "embed_vision"])
-    private static let audioComponents = components(["audio_tower", "embed_audio"])
-
-    private static func components(_ modules: [String]) -> [CheckpointComponent] {
-        modules.map {
-            CheckpointComponent(name: $0, namespaces: [$0, "model.\($0)"], destination: $0)
-        }
     }
 
     /// - Parameter pixels: `[B, 3, H, W]` images or video frames of one size.
@@ -413,7 +396,8 @@ public final class EmbeddingGemma2: Module, BaseLanguageModel, ModelComponentsPr
     ///   - inputIds: `[B, L]` tokens.
     ///   - attentionMask: `[B, L]`, `1` for real tokens. Attention and pooling ignore padding.
     ///   - softTokens: `[soft tokens, hidden]` features of every image, video and audio
-    ///     placeholder in `inputIds`, in sequence order; single row only.
+    ///     placeholder in `inputIds`, row by row in sequence order (`[B, n, hidden]` for a
+    ///     batch).
     /// - Returns: `[B, embeddingDim]` unit-length float32 embeddings.
     public func embed(
         inputIds: MLXArray, attentionMask: MLXArray?, softTokens: MLXArray? = nil
@@ -428,13 +412,13 @@ public final class EmbeddingGemma2: Module, BaseLanguageModel, ModelComponentsPr
         // Matches the reference: sqrt(hidden) is rounded to the weight dtype (22.625 in bf16).
         hidden = hidden * MLXArray(Float(config.hiddenSize).squareRoot()).asType(hidden.dtype)
         if let softTokens, let first = softTokenIDs.first {
-            precondition(inputIds.dim(0) == 1)
             let isSoftToken = softTokenIDs.dropFirst().reduce(inputIds .== first) {
                 $0 .|| (inputIds .== $1)
             }
-            let index = maximum(cumsum(isSoftToken.asType(.int32), axis: 1) - 1, 0)
+            // Number placeholders across rows, in the order of `softTokens`.
+            let index = maximum(cumsum(isSoftToken.flattened().asType(.int32)) - 1, 0)
             let rows = softTokens.asType(hidden.dtype).reshaped(-1, hidden.dim(-1))
-                .take(index.squeezed(axis: 0), axis: 0).expandedDimensions(axis: 0)
+                .take(index, axis: 0).reshaped(hidden.shape)
             hidden = MLX.where(isSoftToken.expandedDimensions(axis: -1), rows, hidden)
         }
         hidden = languageModel(hidden, attentionMask: attentionMask)

@@ -18,6 +18,10 @@ enum TokenCountingEvent: GenerationProviding {
     var generation: Generation? {
         if case .output(let generation, _) = self { generation } else { nil }
     }
+
+    init(generation: Generation) {
+        self = .output(generation, tokenCount: 0)
+    }
 }
 
 struct TokenCountingTransformer: GenerationTransformer {
@@ -40,6 +44,7 @@ struct TokenCountingHandler: TokenLoopHandler {
 
     var additionalStopTokenIDs: Set<Int> { base.additionalStopTokenIDs }
     var receivesStopTokens: Bool { base.receivesStopTokens }
+    var canEndForSteering: Bool { base.canEndForSteering }
 
     mutating func onToken(
         _ token: Int, logProbabilities: DeferredTokenLogProbabilities?,

@@ -4,11 +4,6 @@ import Testing
 
 @testable import MLXEmbedders
 
-// `swift test` from the CLI can't bundle mlx-swift's Metal library, so every MLX
-// op below is scoped to the CPU backend via `Device.withDefaultDevice(.cpu)`
-// (identical math). The default device is a task-local, so each test scopes its
-// own work and they remain safe to run in parallel.
-
 private let embeddingConfigJSON = """
     {
       "model_type": "lfm2",
@@ -71,9 +66,7 @@ struct LFM2BidirectionalTests {
         #expect(c.numKeyValueHeads == 2)
         // full_attention at indices 1 and 3.
         #expect(c.attnLayerIdxs == [1, 3])
-        Device.withDefaultDevice(.cpu) {
-            #expect(LFM2BidirectionalModel(c).poolingStrategy == .cls)
-        }
+        #expect(LFM2BidirectionalModel(c).poolingStrategy == .cls)
     }
 
     @Test("ColBERT config decodes to a none-pooled projection head")
@@ -82,9 +75,7 @@ struct LFM2BidirectionalTests {
         #expect(c.mlx.head == .colbert)
         #expect(c.mlx.projDim == 16)
         #expect(c.mlx.queryLength == 32)
-        Device.withDefaultDevice(.cpu) {
-            #expect(LFM2BidirectionalModel(c).poolingStrategy == Pooling.Strategy.none)
-        }
+        #expect(LFM2BidirectionalModel(c).poolingStrategy == Pooling.Strategy.none)
     }
 
     @Test("Real configs decode with the expected attention layout")
@@ -115,39 +106,35 @@ struct LFM2BidirectionalTests {
     @Test("Embedding head pools the CLS token to a normalized vector")
     func testEmbeddingForwardShape() throws {
         let c = try decode(embeddingConfigJSON)
-        Device.withDefaultDevice(.cpu) {
-            let model = LFM2BidirectionalModel(c)
-            let ids = MLXArray((0 ..< 10).map { Int32($0 % 64) }).reshaped(2, 5)
+        let model = LFM2BidirectionalModel(c)
+        let ids = MLXArray((0 ..< 10).map { Int32($0 % 64) }).reshaped(2, 5)
 
-            let out = model(ids)
-            out.hiddenStates!.eval()
-            #expect(out.hiddenStates!.shape == [2, 5, 32])
+        let out = model(ids)
+        out.hiddenStates!.eval()
+        #expect(out.hiddenStates!.shape == [2, 5, 32])
 
-            let pooled = Pooling(strategy: .cls)(out, normalize: true)
-            pooled.eval()
-            #expect(pooled.shape == [2, 32])
-            // L2-normalized rows -> unit norm.
-            let norms = sqrt((pooled * pooled).sum(axis: -1))
-            #expect(abs(norms[0].item(Float.self) - 1.0) < 1e-3)
-        }
+        let pooled = Pooling(strategy: .cls)(out, normalize: true)
+        pooled.eval()
+        #expect(pooled.shape == [2, 32])
+        // L2-normalized rows -> unit norm.
+        let norms = sqrt((pooled * pooled).sum(axis: -1))
+        #expect(abs(norms[0].item(Float.self) - 1.0) < 1e-3)
     }
 
     @Test("ColBERT head projects every token to projDim multi-vectors")
     func testColbertForwardShape() throws {
         let c = try decode(colbertConfigJSON)
-        Device.withDefaultDevice(.cpu) {
-            let model = LFM2BidirectionalModel(c)
-            let ids = MLXArray((0 ..< 10).map { Int32($0 % 64) }).reshaped(2, 5)
+        let model = LFM2BidirectionalModel(c)
+        let ids = MLXArray((0 ..< 10).map { Int32($0 % 64) }).reshaped(2, 5)
 
-            let out = model(ids)
-            out.hiddenStates!.eval()
-            #expect(out.hiddenStates!.shape == [2, 5, 16])
+        let out = model(ids)
+        out.hiddenStates!.eval()
+        #expect(out.hiddenStates!.shape == [2, 5, 16])
 
-            // .none pooling returns the per-token multi-vectors unchanged.
-            let pooled = Pooling(strategy: .none)(out)
-            pooled.eval()
-            #expect(pooled.shape == [2, 5, 16])
-        }
+        // .none pooling returns the per-token multi-vectors unchanged.
+        let pooled = Pooling(strategy: .none)(out)
+        pooled.eval()
+        #expect(pooled.shape == [2, 5, 16])
     }
 
     @Test("A config without an mlx block fails to decode (the head can't be inferred)")
@@ -174,21 +161,19 @@ struct LFM2BidirectionalTests {
     @Test("ColBERT returns raw per-token vectors and does not erase masked positions")
     func testColbertKeepsMaskedPositions() throws {
         let c = try decode(colbertConfigJSON)
-        Device.withDefaultDevice(.cpu) {
-            let model = LFM2BidirectionalModel(c)
-            let ids = MLXArray((0 ..< 6).map { Int32($0 % 64) }).reshaped(1, 6)
-            let mask = MLXArray([1, 1, 1, 1, 0, 0].map { Int32($0) }).reshaped(1, 6)
+        let model = LFM2BidirectionalModel(c)
+        let ids = MLXArray((0 ..< 6).map { Int32($0 % 64) }).reshaped(1, 6)
+        let mask = MLXArray([1, 1, 1, 1, 0, 0].map { Int32($0) }).reshaped(1, 6)
 
-            let out = model(ids, positionIds: nil, tokenTypeIds: nil, attentionMask: mask)
-            let tok = out.hiddenStates!  // (1, 6, projDim)
-            tok.eval()
-            // Masked positions (4, 5) are NOT zeroed: the encoder returns raw vectors,
-            // so ColBERT query-expansion tokens survive for the retrieval layer to keep
-            // (documents drop padding + apply the skiplist outside the model).
-            let maskedNorm = sqrt((tok[0, 4] * tok[0, 4]).sum()).item(Float.self)
-            let realNorm = sqrt((tok[0, 0] * tok[0, 0]).sum()).item(Float.self)
-            #expect(maskedNorm > 0)
-            #expect(realNorm > 0)
-        }
+        let out = model(ids, positionIds: nil, tokenTypeIds: nil, attentionMask: mask)
+        let tok = out.hiddenStates!  // (1, 6, projDim)
+        tok.eval()
+        // Masked positions (4, 5) are NOT zeroed: the encoder returns raw vectors,
+        // so ColBERT query-expansion tokens survive for the retrieval layer to keep
+        // (documents drop padding + apply the skiplist outside the model).
+        let maskedNorm = sqrt((tok[0, 4] * tok[0, 4]).sum()).item(Float.self)
+        let realNorm = sqrt((tok[0, 0] * tok[0, 0]).sum()).item(Float.self)
+        #expect(maskedNorm > 0)
+        #expect(realNorm > 0)
     }
 }

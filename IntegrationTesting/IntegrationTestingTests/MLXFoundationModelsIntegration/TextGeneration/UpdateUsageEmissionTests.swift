@@ -39,8 +39,11 @@ private struct ToolCallTemperatureArgs {
     var location: String
 }
 
-@Suite(.serialized, .timeLimit(.minutes(5)))
-struct UpdateUsageEmissionTests {
+extension ModelLoadingSuite {
+    @Suite(.serialized, .timeLimit(.minutes(5))) struct UpdateUsageEmissionTests {}
+}
+
+extension ModelLoadingSuite.UpdateUsageEmissionTests {
 
     @Test
     func usage_emittedOnUnconstrainedPath() async throws {
@@ -113,7 +116,8 @@ struct UpdateUsageEmissionTests {
         ])
         let request = makeExecutorRequest(
             transcript: transcript,
-            enabledTools: [weatherTool]
+            enabledTools: [weatherTool],
+            generationOptions: GenerationOptions(toolCallingMode: .required)
         )
 
         let stream = try await executeResponse(executor, request: request, model: model)

@@ -7,7 +7,7 @@ import Foundation
 import MLXLMCommon
 
 /// The configuration seam for ``MLXLanguageModel``: adjust the loaded,
-/// already-inferred ``ModelConfiguration`` for a model on a per-call basis.
+/// already-inferred `ModelConfiguration` for a model on a per-call basis.
 ///
 /// `LLMModelFactory._load` fully resolves reasoning, tool-call format, and eos
 /// tokens (consulting `ChatConventionsRegistry` with the load-bearing `modelId`,
@@ -28,7 +28,7 @@ import MLXLMCommon
 ///   model configuration itself, not via a resolver.
 ///
 /// Composition follows the same `any Protocol`-injected-at-init convention as
-/// ``Downloader`` / ``TokenizerLoader`` in `MLXLMCommon`, with a trivial default
+/// `Downloader` / `TokenizerLoader` in `MLXLMCommon`, with a trivial default
 /// (``DefaultConfigurationResolver``) wired up by ``MLXLanguageModel``'s
 /// convenience init so the common case stays zero-config. The ``default`` static
 /// sugar is provided here for ergonomic call sites.

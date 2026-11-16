@@ -277,11 +277,16 @@ private class Qwen3ModelInner: Module {
         // Step 2: Create the Attention Mask
         // Uses MLXFast utility to determine if a causal or additive mask is needed
         var mask = createAttentionMask(h: h, cache: cache?.first)
-        if let attentionMask, inputs.dim(1) > 1 {
-            // Causal ∧ key-not-padding, broadcast to [Batch, 1, L, L].
-            let causal = createCausalMask(n: inputs.dim(1), offset: cache?.first?.offset ?? 0)
-            let keep = attentionMask.asType(.bool)[0..., .newAxis, .newAxis, 0...]
-            mask = .array(causal & keep)
+        if let attentionMask, inputs.dim(1) > 1,
+            case .array(let causal) = createAttentionMask(
+                h: h, cache: cache?.first, returnArray: true)
+        {
+            // Causal ∧ key-not-padding, broadcast to [Batch, 1, L, L]. The
+            // causal array spans the retained keys; cached keys are real
+            // tokens, so padding applies to the current inputs only.
+            var keep = MLXArray.ones([inputs.dim(0), causal.dim(-1)], dtype: .bool)
+            keep[0..., (causal.dim(-1) - inputs.dim(1))...] = attentionMask.asType(.bool)
+            mask = .array(causal & keep[0..., .newAxis, .newAxis, 0...])
         }
 
         // Step 3: Sequential processing through Transformer Layers

@@ -117,6 +117,10 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
     /// Example: `<invoke name="f"><parameter name="k">v</parameter></invoke>`
     case minimaxM2 = "minimax_m2"
 
+    /// MiniCPM5 format with function/param tags, no outer wrapper.
+    /// Example: `<function name="f"><param name="k">v</param></function>`
+    case miniCPM5 = "minicpm5"
+
     /// Muse Glimmer's Onyx ATEM invoke/parameter format.
     /// Example: `<atem:function_calls><atem:invoke name="f">...</atem:invoke></atem:function_calls>`
     case atem
@@ -166,6 +170,8 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
             return KimiK2ToolCallParser()
         case .minimaxM2:
             return MiniMaxM2ToolCallParser()
+        case .miniCPM5:
+            return MiniCPM5ToolCallParser()
         case .atem:
             return ATEMToolCallParser()
         case .mistral:
@@ -182,11 +188,18 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
     /// Ordinary formats share the detokenized tool-call decoder. Protocols
     /// with token-level framing provide their own implementation here, keeping
     /// concrete model behavior out of the generic evaluation loop.
+    ///
+    /// - Parameter reasoning: the model's reasoning protocol and whether the
+    ///   rendered prompt already opened a thinking span. Only the detokenized
+    ///   decoder consumes it: a framed protocol decodes its own reasoning from
+    ///   the token stream, so passing this alongside one would scan the same
+    ///   text twice with two different rulebooks.
     package func makeTokenStreamDecoder(
         tokenizer: any Tokenizer,
         tools: [[String: any Sendable]]?,
         stopStrings: Set<String>,
-        toolCallPolicy: ToolCallPolicy = .init()
+        toolCallPolicy: ToolCallPolicy = .init(),
+        reasoning: (config: ReasoningConfig, primedInside: Bool)? = nil
     ) -> any TokenStreamDecoder {
         if let decoder = makeProtocolTokenStreamDecoder(
             tokenizer: tokenizer, tools: tools, stopStrings: stopStrings,
@@ -196,7 +209,7 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
         }
         return StandardTokenStreamDecoder(
             tokenizer: tokenizer, format: self, tools: tools, stopStrings: stopStrings,
-            toolCallPolicy: toolCallPolicy)
+            toolCallPolicy: toolCallPolicy, reasoning: reasoning)
     }
 
     /// Builds a decoder only for formats which own a framed token protocol.
@@ -221,7 +234,7 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
                 toolCallPolicy: toolCallPolicy)
 
         case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
-            .mistral, .llama3:
+            .miniCPM5, .mistral, .llama3:
             return nil
         }
     }
@@ -243,7 +256,7 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
         case .atem:
             return OnyxToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
         case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
-            .mistral,
+            .miniCPM5, .mistral,
             .llama3:
             return []
         }
@@ -265,7 +278,7 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
                 }
             }
         case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
-            .mistral, .llama3:
+            .miniCPM5, .mistral, .llama3:
             0
         }
     }

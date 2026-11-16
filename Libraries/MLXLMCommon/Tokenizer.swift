@@ -61,6 +61,19 @@ extension Tokenizer {
     }
 }
 
+extension Tokenizer {
+    /// The id of `text` when it is exactly one known token, or `nil`.
+    package func singleTokenID(for text: String) -> Int? {
+        if let id = convertTokenToId(text) {
+            guard id != unknownTokenId else { return nil }
+            return id
+        }
+        let encoded = encode(text: text, addSpecialTokens: false)
+        guard encoded.count == 1, encoded[0] != unknownTokenId else { return nil }
+        return encoded[0]
+    }
+}
+
 public enum TokenizerError: LocalizedError {
     case missingChatTemplate
 

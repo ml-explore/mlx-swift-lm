@@ -108,11 +108,27 @@ struct PythonLiteralParser {
         guard let quote = current, quote == "'" || quote == "\"" else { return nil }
         advance()
 
+        // A triple-quoted string may span lines and ends at the next three quotes.
+        let isTripleQuoted = startsWith(quote, count: 2)
+        if isTripleQuoted {
+            advance()
+            advance()
+        }
+
         var result = ""
         while let character = current {
             advance()
 
-            if character == quote { return result }
+            if character == quote {
+                guard isTripleQuoted else { return result }
+                if startsWith(quote, count: 2) {
+                    advance()
+                    advance()
+                    return result
+                }
+                result.append(character)
+                continue
+            }
             guard character == "\\" else {
                 result.append(character)
                 continue
@@ -128,10 +144,21 @@ struct PythonLiteralParser {
             case "n": result.append("\n")
             case "r": result.append("\r")
             case "t": result.append("\t")
+            case "a": result.append("\u{7}")
             case "b": result.append("\u{8}")
             case "f": result.append("\u{c}")
+            case "v": result.append("\u{b}")
+            case "\n", "\r\n", "\r":
+                // A backslash at the end of a line continues the string.
+                break
+            case "0", "1", "2", "3", "4", "5", "6", "7":
+                guard let scalar = parseOctalEscape(startingWith: escaped) else { return nil }
+                result.unicodeScalars.append(scalar)
+            case "x":
+                guard let scalar = parseUnicodeScalar(digitCount: 2) else { return nil }
+                result.unicodeScalars.append(scalar)
             case "u":
-                guard let scalar = parseUnicodeScalar(digitCount: 4) else { return nil }
+                guard let scalar = parseUTF16Escape() else { return nil }
                 result.unicodeScalars.append(scalar)
             case "U":
                 guard let scalar = parseUnicodeScalar(digitCount: 8) else { return nil }
@@ -145,7 +172,35 @@ struct PythonLiteralParser {
         return nil
     }
 
+    /// Joins a surrogate pair written as two `\u` escapes, as JSON does.
+    private mutating func parseUTF16Escape() -> Unicode.Scalar? {
+        guard let high = parseHexValue(digitCount: 4) else { return nil }
+        guard (0xD800 ... 0xDBFF).contains(high) else { return Unicode.Scalar(high) }
+
+        guard consume("\\"), consume("u"),
+            let low = parseHexValue(digitCount: 4),
+            (0xDC00 ... 0xDFFF).contains(low)
+        else { return nil }
+        return Unicode.Scalar(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00))
+    }
+
+    /// Reads up to three octal digits, as Python does.
+    private mutating func parseOctalEscape(startingWith first: Character) -> Unicode.Scalar? {
+        var digits = String(first)
+        while digits.count < 3, let character = current,
+            UInt32(String(character), radix: 8) != nil
+        {
+            digits.append(character)
+            advance()
+        }
+        return UInt32(digits, radix: 8).flatMap { Unicode.Scalar($0) }
+    }
+
     private mutating func parseUnicodeScalar(digitCount: Int) -> Unicode.Scalar? {
+        parseHexValue(digitCount: digitCount).flatMap { Unicode.Scalar($0) }
+    }
+
+    private mutating func parseHexValue(digitCount: Int) -> UInt32? {
         var digits = ""
         digits.reserveCapacity(digitCount)
 
@@ -157,8 +212,7 @@ struct PythonLiteralParser {
             advance()
         }
 
-        guard let value = UInt32(digits, radix: 16) else { return nil }
-        return Unicode.Scalar(value)
+        return UInt32(digits, radix: 16)
     }
 
     private mutating func parseAtom() -> (any Sendable)? {
@@ -184,6 +238,11 @@ struct PythonLiteralParser {
         if let integer = Int(normalizedNumber) { return integer }
         if let number = Double(normalizedNumber), number.isFinite { return number }
         return nil
+    }
+
+    /// Whether the next `count` characters are all `character`.
+    private func startsWith(_ character: Character, count: Int) -> Bool {
+        source[index...].prefix(count).elementsEqual(repeatElement(character, count: count))
     }
 
     private mutating func skipWhitespace() {

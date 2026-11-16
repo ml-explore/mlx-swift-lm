@@ -214,6 +214,28 @@ struct RerankerTests {
         #expect(configuration.encoderRerankerConfiguration.scoreKind == .normalizedRelevance)
     }
 
+    @Test func bertConfigurationRejectsDuplicateIDToLabelKeys() throws {
+        #expect(throws: DecodingError.self) {
+            try decodeBertConfiguration(
+                modelType: "bert",
+                architecture: "BertModel",
+                labels: 2,
+                padTokenID: 0,
+                maxPositionEmbeddings: 32,
+                stringIDToLabel: ["1": "pos", "01": "also-pos"])
+        }
+
+        let configuration = try decodeBertConfiguration(
+            modelType: "bert",
+            architecture: "BertModel",
+            labels: 2,
+            padTokenID: 0,
+            maxPositionEmbeddings: 32,
+            idToLabel: [0: "irrelevant", 1: "relevant"])
+
+        #expect(configuration.idToLabel == [0: "irrelevant", 1: "relevant"])
+    }
+
     @Test func encoderConfigurationUsesDeclaredPositiveLabel() throws {
         let configuration = try decodeBertConfiguration(
             modelType: "xlm-roberta",
@@ -806,6 +828,7 @@ private func bertConfigurationData(
     padTokenID: Int,
     maxPositionEmbeddings: Int,
     idToLabel: [Int: String] = [:],
+    stringIDToLabel: [String: String] = [:],
     labelToID: [String: Int] = [:],
     includeNumLabels: Bool = true,
     numLayers: Int = 1
@@ -825,7 +848,9 @@ private func bertConfigurationData(
     if includeNumLabels {
         configuration["num_labels"] = labels
     }
-    if !idToLabel.isEmpty {
+    if !stringIDToLabel.isEmpty {
+        configuration["id2label"] = stringIDToLabel
+    } else if !idToLabel.isEmpty {
         configuration["id2label"] = Dictionary(
             uniqueKeysWithValues: idToLabel.map { (String($0.key), $0.value) })
     }
@@ -841,7 +866,8 @@ private func decodeBertConfiguration(
     labels: Int,
     padTokenID: Int,
     maxPositionEmbeddings: Int,
-    idToLabel: [Int: String] = [:]
+    idToLabel: [Int: String] = [:],
+    stringIDToLabel: [String: String] = [:]
 ) throws -> BertConfiguration {
     try JSONDecoder().decode(
         BertConfiguration.self,
@@ -851,7 +877,8 @@ private func decodeBertConfiguration(
             labels: labels,
             padTokenID: padTokenID,
             maxPositionEmbeddings: maxPositionEmbeddings,
-            idToLabel: idToLabel))
+            idToLabel: idToLabel,
+            stringIDToLabel: stringIDToLabel))
 }
 
 private func decodeQwenConfiguration() throws -> MLXLLM.Qwen3Configuration {
