@@ -73,6 +73,7 @@ public final class VLMProcessorLoadingRegistry: @unchecked Sendable {
         ModelTypeProcessorResolver(processorTypes: [
             "mistral3": "Mistral3Processor",
             "gemma4_unified": "Gemma4UnifiedProcessor",
+            "diffusion_gemma": "DiffusionGemma4Processor",
         ]),
     ])
 
