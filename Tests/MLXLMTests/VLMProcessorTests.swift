@@ -327,7 +327,8 @@ final class VLMProcessorTests: XCTestCase {
 
         let (_, grid) = try processor.preprocess(images: [image], processing: nil)
 
-        // Glm46VImageProcessor.smart_resize gives 28 × 420 for a 400 × 27 image.
+        // For this 400 wide × 27 high image, Glm46VImageProcessor.smart_resize
+        // returns (height, width) = (28, 420).
         XCTAssertEqual(grid.h * config.patchSize, 28)
         XCTAssertEqual(grid.w * config.patchSize, 420)
     }
