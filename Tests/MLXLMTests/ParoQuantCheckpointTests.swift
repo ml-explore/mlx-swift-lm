@@ -41,6 +41,20 @@ struct ParoQuantCheckpointTests {
         }
     }
 
+    @Test
+    func tokenizerValidationErrorPreventsLoading() async throws {
+        let directory = try makeCheckpoint(prepared: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await #expect(throws: TestError.incompatibleTokenizer) {
+            try await loadParoQuantModel(
+                from: directory,
+                typeRegistry: ModelTypeRegistry(creators: [
+                    "qwen3_5": { _ in CheckpointModel(rejectTokenizer: true) }
+                ]),
+                tokenizerLoader: TestTokenizerLoader())
+        }
+    }
+
     private func makeCheckpoint(prepared: Bool, collision: Bool = false) throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             UUID().uuidString)
@@ -81,6 +95,7 @@ struct ParoQuantCheckpointTests {
 
     private enum TestError: Error {
         case legacySanitizerCalled
+        case incompatibleTokenizer
     }
 
     private struct TestTokenizerLoader: TokenizerLoader {
@@ -93,9 +108,16 @@ struct ParoQuantCheckpointTests {
         @ModuleInfo var layer: Linear
         let kvHeads: [Int] = []
 
-        override init() {
+        private let rejectTokenizer: Bool
+
+        init(rejectTokenizer: Bool = false) {
+            self.rejectTokenizer = rejectTokenizer
             _layer.wrappedValue = Linear(32, 32, bias: false)
             super.init()
+        }
+
+        func validate(tokenizer: any Tokenizer) throws {
+            if rejectTokenizer { throw TestError.incompatibleTokenizer }
         }
 
         func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {

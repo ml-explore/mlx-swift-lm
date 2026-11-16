@@ -245,6 +245,7 @@ public final class EmbedderModelFactory: GenericModelFactory {
             excludedComponents: configuration.excludedComponents)
 
         let tokenizer = try await tokenizerTask
+        try model.validate(tokenizer: tokenizer)
 
         // Build a ModelConfiguration for the ModelContext
         let tokenizerSource: TokenizerSource? =
