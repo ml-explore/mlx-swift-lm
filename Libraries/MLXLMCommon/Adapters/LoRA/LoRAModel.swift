@@ -137,10 +137,34 @@ extension LoRALayer where Self: Linear {
             return QuantizedLinear(
                 weight: quantized.weight, bias: quantized.bias,
                 scales: quantized.scales, biases: quantized.biases,
-                groupSize: quantized.groupSize, bits: quantized.bits, mode: quantized.mode
+                groupSize: quantized.groupSize, bits: quantized.bits, mode: quantized.mode,
+                globalScale: quantized.globalScale
             )
         } else {
             return Linear(weight: weight, bias: bias)
+        }
+    }
+}
+
+/// A layer the built-in adapters can wrap: exactly `Linear` or `QuantizedLinear`.
+///
+/// The adapters copy the stock arrays of their base layer, so a subclass that adds state or
+/// changes the forward pass, such as `HadamardQuantizedLinear`, is excluded (#800).
+enum LoRABase {
+    case linear(Linear)
+    case quantized(QuantizedLinear)
+
+    /// Classifies `layer`, or the base layer of `layer` if it is already an adapter.
+    ///
+    /// Returns `nil` for any other `Linear` subclass.
+    init?(_ layer: Linear) {
+        switch (layer as? LoRALayer)?.reverted() as? Linear ?? layer {
+        case let base as QuantizedLinear where type(of: base) == QuantizedLinear.self:
+            self = .quantized(base)
+        case let base where type(of: base) == Linear.self:
+            self = .linear(base)
+        default:
+            return nil
         }
     }
 }
@@ -149,14 +173,18 @@ extension LoRALayer where Self: Linear {
 extension QuantizedLinear {
 
     /// Computes the dequantized weight matrix using the stored quantization parameters.
-    var dequantizedWeight: MLXArray {
+    ///
+    /// Without a `dtype`, MLX infers it from the scales, or uses bfloat16 for integer scales.
+    func dequantizedWeight(dtype: DType? = nil) -> MLXArray {
         dequantized(
             weight,
             scales: scales,
             biases: biases,
             groupSize: groupSize,
             bits: bits,
-            mode: mode
+            mode: mode,
+            globalScale: globalScale,
+            dtype: dtype
         )
     }
 }

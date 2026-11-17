@@ -64,7 +64,11 @@ final class HadamardQuantizedTests: XCTestCase {
         let h = TurboQuantRotation.hadamardMatrix(dim: block) / sqrt(Float(block))
         let expected = matmul((x * signs).reshaped(-1, block), h).reshaped(3, 16)
 
-        assertClose(rotation.forward(x, signs: signs), expected)
+        // TF32 matmuls (neural accelerators) need atol ~6e-4 here (max abs error 7.2e-4); see
+        // MatmulPrecision.
+        assertClose(
+            rotation.forward(x, signs: signs), expected,
+            atol: MatmulPrecision.tolerance(float32: 1e-4, reduced: 2e-3))
     }
 
     func testInverseUndoesForwardAndKeepsDType() {
@@ -98,7 +102,11 @@ final class HadamardQuantizedTests: XCTestCase {
 
         let dequantizedWeight = dequantized(
             weight, scales: scales, biases: biases, groupSize: groupSize, bits: bits)
-        assertClose(layer(x), matmul(rotated, dequantizedWeight.T), rtol: 1e-3, atol: 1e-3)
+        // TF32 matmuls (neural accelerators) need atol ~1.4e-3 here (max abs error 2.7e-3); see
+        // MatmulPrecision.
+        assertClose(
+            layer(x), matmul(rotated, dequantizedWeight.T), rtol: 1e-3,
+            atol: MatmulPrecision.tolerance(float32: 1e-3, reduced: 5e-3))
 
         let unrotated = quantizedMM(
             x, weight, scales: scales, biases: biases, transpose: true,
@@ -507,6 +515,41 @@ final class HadamardQuantizedTests: XCTestCase {
         XCTAssertTrue(model is Qwen35Model)
         XCTAssertTrue(model is PrismHadamardQwen35Model)
         try assertRotatedQwen35(model, visionTower: false)
+    }
+
+    /// #800: an adapter copied the packed arrays and dropped the rotation, so it decoded nonsense.
+    func testAdaptersRejectRotatedModulesAndLeaveTheModelUnchanged() async throws {
+        let model = try await LLMTypeRegistry.shared.createModel(
+            configuration: Data(Self.packConfig.utf8), modelType: "prism_hadamard_qwen35")
+
+        for fineTuneType in [LoRAConfiguration.FineTuneType.lora, .dora] {
+            XCTAssertThrowsError(
+                try LoRAContainer.from(
+                    model: model, configuration: .init(fineTuneType: fineTuneType))
+            ) { error in
+                guard case ModelAdapterError.unsupportedLayer(_, let type) = error else {
+                    return XCTFail("unexpected error \(error)")
+                }
+                XCTAssertEqual(type, "HadamardQuantizedLinear")
+            }
+        }
+        XCTAssertFalse(model.namedModules().contains { $0.1 is LoRALayer })
+        XCTAssertEqual(rotatedModulePaths(in: model), Self.expectedRotatedPaths)
+        XCTAssertFalse(
+            model.trainableParameters().flattened().isEmpty, "a rejected adapter froze the model")
+
+        // The unrotated layers still take an adapter.
+        _ = try LoRAContainer.from(
+            model: model,
+            configuration: LoRAConfiguration(
+                loraParameters: .init(rank: 4, keys: ["linear_attn.in_proj_a"])))
+        let adapted = model.namedModules().filter { $0.1 is LoRALayer }.map(\.0)
+        XCTAssertEqual(
+            Set(adapted),
+            [
+                "language_model.model.layers.0.linear_attn.in_proj_a",
+                "language_model.model.layers.2.linear_attn.in_proj_a",
+            ])
     }
 
     func testVLMRegistryBuildsTheQwen35VisionClassWithRotatedModules() async throws {
