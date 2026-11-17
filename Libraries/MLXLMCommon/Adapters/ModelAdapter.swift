@@ -13,6 +13,8 @@ import MLXNN
 public enum ModelAdapterError: Error {
     case unsupportedAdapterType(String)
     case incompatibleModelType
+    /// The adapter targets a layer it cannot reproduce, such as a rotated quantized linear.
+    case unsupportedLayer(key: String, type: String)
 }
 
 /// Protocol defining an adapter that can modify a `LanguageModel`.
