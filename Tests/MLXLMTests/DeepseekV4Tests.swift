@@ -34,7 +34,7 @@ final class DeepseekV4Tests: XCTestCase {
 
     private func skipUnlessLong() throws {
         guard ProcessInfo.processInfo.environment["MLX_DEEPSEEK_V4_LONG"] == "1" else {
-            throw XCTSkip("Set MLX_DEEPSEEK_V4_LONG=1 for the 250- and 300-token checks")
+            throw XCTSkip("Set MLX_DEEPSEEK_V4_LONG=1 for the 300-token checks")
         }
     }
 
@@ -223,7 +223,6 @@ final class DeepseekV4Tests: XCTestCase {
     }
 
     func testLongPromptMatchesReference() throws {
-        try skipUnlessLong()
         try assertMatchesReference(Reference.long)
     }
 

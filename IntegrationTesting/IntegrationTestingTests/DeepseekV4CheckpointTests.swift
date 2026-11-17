@@ -81,6 +81,7 @@ final class DeepseekV4CheckpointTests: XCTestCase {
         try loadWeights(
             modelDirectory: directory, model: model,
             perLayerQuantization: base.perLayerQuantization)
+        model.train(false)  // as `ModelContext` does: the inference path (fused kernel on the GPU)
         let count = 512
         let tokens = MLXArray((0 ..< count).map { Int32(($0 * 7 + 3) % model.vocabularySize) })
             .reshaped(1, count)
