@@ -509,6 +509,41 @@ final class HadamardQuantizedTests: XCTestCase {
         try assertRotatedQwen35(model, visionTower: false)
     }
 
+    /// #800: an adapter copied the packed arrays and dropped the rotation, so it decoded nonsense.
+    func testAdaptersRejectRotatedModulesAndLeaveTheModelUnchanged() async throws {
+        let model = try await LLMTypeRegistry.shared.createModel(
+            configuration: Data(Self.packConfig.utf8), modelType: "prism_hadamard_qwen35")
+
+        for fineTuneType in [LoRAConfiguration.FineTuneType.lora, .dora] {
+            XCTAssertThrowsError(
+                try LoRAContainer.from(
+                    model: model, configuration: .init(fineTuneType: fineTuneType))
+            ) { error in
+                guard case ModelAdapterError.unsupportedLayer(_, let type) = error else {
+                    return XCTFail("unexpected error \(error)")
+                }
+                XCTAssertEqual(type, "HadamardQuantizedLinear")
+            }
+        }
+        XCTAssertFalse(model.namedModules().contains { $0.1 is LoRALayer })
+        XCTAssertEqual(rotatedModulePaths(in: model), Self.expectedRotatedPaths)
+        XCTAssertFalse(
+            model.trainableParameters().flattened().isEmpty, "a rejected adapter froze the model")
+
+        // The unrotated layers still take an adapter.
+        _ = try LoRAContainer.from(
+            model: model,
+            configuration: LoRAConfiguration(
+                loraParameters: .init(rank: 4, keys: ["linear_attn.in_proj_a"])))
+        let adapted = model.namedModules().filter { $0.1 is LoRALayer }.map(\.0)
+        XCTAssertEqual(
+            Set(adapted),
+            [
+                "language_model.model.layers.0.linear_attn.in_proj_a",
+                "language_model.model.layers.2.linear_attn.in_proj_a",
+            ])
+    }
+
     func testVLMRegistryBuildsTheQwen35VisionClassWithRotatedModules() async throws {
         let model = try await VLMTypeRegistry.shared.createModel(
             configuration: Data(Self.packConfig.utf8), modelType: "prism_hadamard_qwen35")

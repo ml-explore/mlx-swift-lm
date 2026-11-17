@@ -76,6 +76,8 @@ public class DoRALinear: Linear, LoRALayer {
     }
 
     public init(linear: Linear, rank: Int = 8, scale: Float = 20.0, dropout: Float) {
+        precondition(type(of: linear) == Linear.self, "DoRALinear cannot adapt \(type(of: linear))")
+
         let (outputDimensions, inputDimensions) = linear.shape
         let loraScale = 1 / sqrt(Float(inputDimensions))
 
@@ -91,14 +93,33 @@ public class DoRALinear: Linear, LoRALayer {
         freeze()
     }
 
+    /// Convert a `Linear` or `QuantizedLinear` layer into a DoRA adapter layer.
+    ///
+    /// An existing adapter layer is replaced: the new adapter wraps its base layer.
+    ///
+    /// - Precondition: the base layer is exactly `Linear` or `QuantizedLinear`. Subclasses such
+    ///   as `HadamardQuantizedLinear` can carry state the adapter would drop.
     public static func from(
         linear: Linear, rank: Int = 8, scale: Float = 20.0, dropout: Float = 0.0
     ) -> LoRALayer {
+        guard let result = adapter(for: linear, rank: rank, scale: scale, dropout: dropout) else {
+            preconditionFailure("DoRA cannot adapt \(type(of: linear))")
+        }
+        return result
+    }
+
+    /// A DoRA adapter for `linear` in its training mode, or `nil` if ``LoRABase`` rejects it.
+    static func adapter(
+        for linear: Linear, rank: Int, scale: Float, dropout: Float
+    ) -> LoRALayer? {
         let result: LoRALayer
-        if let linear = linear as? QuantizedLinear {
-            result = QDoRALinear(linear: linear, rank: rank, scale: scale, dropout: dropout)
-        } else {
-            result = DoRALinear(linear: linear, rank: rank, scale: scale, dropout: dropout)
+        switch LoRABase(linear) {
+        case .linear(let base):
+            result = DoRALinear(linear: base, rank: rank, scale: scale, dropout: dropout)
+        case .quantized(let base):
+            result = QDoRALinear(linear: base, rank: rank, scale: scale, dropout: dropout)
+        case nil:
+            return nil
         }
         result.train(linear.training)
         return result
@@ -158,6 +179,10 @@ public class QDoRALinear: QuantizedLinear, LoRALayer {
     public init(
         linear: QuantizedLinear, rank: Int = 8, scale: Float = 20.0, dropout: Float
     ) {
+        precondition(
+            type(of: linear) == QuantizedLinear.self,
+            "QDoRALinear cannot adapt \(type(of: linear))")
+
         let (outputDimensions, inputDimensions) = linear.shape
         let loraScale = 1 / sqrt(Float(inputDimensions))
 
@@ -166,13 +191,13 @@ public class QDoRALinear: QuantizedLinear, LoRALayer {
         self._loraA.wrappedValue = MLXRandom.uniform(
             low: -loraScale, high: loraScale, [inputDimensions, rank])
         self._loraB.wrappedValue = MLXArray.zeros([rank, outputDimensions])
-        self._magnitude.wrappedValue = MLXLinalg.norm(linear.dequantizedWeight, axis: 1)
+        self._magnitude.wrappedValue = MLXLinalg.norm(linear.dequantizedWeight(), axis: 1)
 
         super.init(
             weight: linear.weight, bias: linear.bias,
             scales: linear.scales, biases: linear.biases,
             groupSize: linear.groupSize, bits: linear.bits,
-            mode: linear.mode
+            mode: linear.mode, globalScale: linear.globalScale
         )
 
         freeze()
@@ -188,9 +213,9 @@ public class QDoRALinear: QuantizedLinear, LoRALayer {
     public func fused() -> Module {
         QuantizedLinear(
             weight: fuse(
-                weight: dequantizedWeight, loraA: loraA, loraB: loraB, scale: scale,
+                weight: dequantizedWeight(), loraA: loraA, loraB: loraB, scale: scale,
                 magnitude: magnitude),
-            bias: bias, groupSize: groupSize, bits: bits, mode: mode
+            bias: bias, groupSize: groupSize, bits: bits, mode: mode, globalScale: globalScale
         )
     }
 
@@ -198,12 +223,11 @@ public class QDoRALinear: QuantizedLinear, LoRALayer {
         if !loraEnabled {
             return super.callAsFunction(x)
         }
-        let y = quantizedMM(
-            x, weight, scales: scales, biases: biases, groupSize: groupSize, bits: bits,
-            mode: mode)
+        // `quantizedMM` cannot apply a global scale, so use the dequantized weight.
+        let y = matmul(x, dequantizedWeight(dtype: x.dtype).T)
         return forward(
             x: x, loraInput: dropout(x), y: y,
-            weight: dequantizedWeight, bias: bias,
+            weight: dequantizedWeight(), bias: bias,
             loraA: loraA, loraB: loraB,
             scale: scale, magnitude: magnitude
         )

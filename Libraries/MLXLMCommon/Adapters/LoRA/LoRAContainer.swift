@@ -130,6 +130,9 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
     /// Creates a `LoRAContainer` by applying the configuration to a compatible `LanguageModel`.
     ///
     /// Note:  This function freezes the model base weights and applies LoRA layers to it.
+    ///
+    /// - Throws: ``ModelAdapterError/unsupportedLayer(key:type:)`` if a targeted layer is a
+    ///   `Linear` subclass the adapters cannot reproduce. The model is unchanged in that case.
     public static func from(
         model: LanguageModel,
         configuration: LoRAConfiguration = .init()
@@ -138,12 +141,12 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
             throw ModelAdapterError.incompatibleModelType
         }
 
-        model.freeze()
         let layers = lora.loraLayers.suffix(configuration.numLayers)
         let keys = configuration.loraParameters.keys ?? lora.loraDefaultKeys
-        replaceLayers(in: model, layers: layers, keys: keys) { (layer: Module) in
-            createReplacementLayer(target: layer, configuration: configuration)
-        }
+        let adapters = try adapterReplacements(
+            in: layers, keys: keys, configuration: configuration)
+        model.freeze()
+        apply(adapters, to: model)
 
         return LoRAContainer(
             configuration: configuration,
@@ -175,6 +178,9 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
     /// weights into the model. Replacement layers preserve the model's current
     /// training or evaluation mode. Models placed in a ``ModelContext`` are in
     /// evaluation mode by default.
+    ///
+    /// - Throws: ``ModelAdapterError/unsupportedLayer(key:type:)`` if a targeted layer is a
+    ///   `Linear` subclass the adapters cannot reproduce. The model is unchanged in that case.
     public func load(into model: LanguageModel) throws {
         guard let lora = model as? LoRAModel else {
             throw ModelAdapterError.incompatibleModelType
@@ -182,9 +188,9 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
 
         let layers = lora.loraLayers.suffix(configuration.numLayers)
         let keys = configuration.loraParameters.keys ?? lora.loraDefaultKeys
-        replaceLayers(in: model, layers: layers, keys: keys) { (layer: Module) in
-            createReplacementLayer(target: layer, configuration: configuration)
-        }
+        let adapters = try adapterReplacements(
+            in: layers, keys: keys, configuration: configuration)
+        apply(adapters, to: model)
 
         try model.update(
             parameters: parameters,
@@ -196,6 +202,8 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
     ///
     /// After fusion, adapter weights become part of the model’s original parameters,
     /// and adapter layers are no longer needed.
+    ///
+    /// - Throws: the errors of ``load(into:)``.
     public func fuse(with model: LanguageModel) throws {
         guard let lora = model as? LoRAModel else {
             throw ModelAdapterError.incompatibleModelType
@@ -204,9 +212,9 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
         try load(into: model)
         let layers = lora.loraLayers.suffix(configuration.numLayers)
         let keys = configuration.loraParameters.keys ?? lora.loraDefaultKeys
-        replaceLayers(in: model, layers: layers, keys: keys) { (lora: LoRALayer) in
-            lora.fused()
-        }
+        apply(
+            replacements(in: layers, keys: keys) { (_, lora: LoRALayer) in lora.fused() },
+            to: model)
     }
 
     /// Removes adapter layers (LoRA or DoRA) and restores the model to its original form.
@@ -219,64 +227,67 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
 
         let layers = lora.loraLayers.suffix(configuration.numLayers)
         let keys = configuration.loraParameters.keys ?? lora.loraDefaultKeys
-        replaceLayers(in: model, layers: layers, keys: keys) { (lora: LoRALayer) in
-            lora.reverted()
-        }
+        apply(
+            replacements(in: layers, keys: keys) { (_, lora: LoRALayer) in lora.reverted() },
+            to: model)
     }
 }
 
-/// Creates an adapter replacement layer for a given linear layer based on the configuration.
-private func createReplacementLayer(
-    target: Module,
+/// Children to replace in each of `layers`, keyed by their path in the layer.
+private typealias LayerReplacements = [(layer: Module, children: [(String, Module)])]
+
+/// Adapter layers for the targeted `Linear` children of `layers`.
+///
+/// Throws before anything is replaced if a target is a layer the adapters cannot reproduce.
+private func adapterReplacements(
+    in layers: ArraySlice<Module>,
+    keys: [String],
     configuration: LoRAConfiguration
-) -> LoRALayer? {
-    switch (target, configuration.fineTuneType) {
-    case (let linear as Linear, .lora):
-        return LoRALinear.from(
-            linear: linear,
-            rank: configuration.loraParameters.rank,
-            scale: configuration.loraParameters.scale,
-            dropout: configuration.loraParameters.dropout
-        )
-    case (let linear as Linear, .dora):
-        return DoRALinear.from(
-            linear: linear,
-            rank: configuration.loraParameters.rank,
-            scale: configuration.loraParameters.scale,
-            dropout: configuration.loraParameters.dropout
-        )
-    default:
-        return nil
+) throws -> LayerReplacements {
+    let parameters = configuration.loraParameters
+    let makeAdapter =
+        switch configuration.fineTuneType {
+        case .lora: LoRALinear.adapter(for:rank:scale:dropout:)
+        case .dora: DoRALinear.adapter(for:rank:scale:dropout:)
+        }
+    return try replacements(in: layers, keys: keys) { (key, linear: Linear) in
+        guard
+            let adapter = makeAdapter(
+                linear, parameters.rank, parameters.scale, parameters.dropout)
+        else {
+            throw ModelAdapterError.unsupportedLayer(
+                key: key, type: String(describing: type(of: linear)))
+        }
+        return adapter
     }
 }
 
-/// Traverses the model and replaces its layers using a transformation closure.
+/// Transforms the children of `layers` whose path is in `keys` and whose type is `T`.
+private func replacements<T>(
+    in layers: ArraySlice<Module>,
+    keys: [String],
+    transforming transform: (String, T) throws -> Module?
+) rethrows -> LayerReplacements {
+    try layers.compactMap { layer in
+        let children = try layer.namedModules().compactMap { key, child -> (String, Module)? in
+            guard keys.contains(key), let child = child as? T,
+                let transformed = try transform(key, child)
+            else { return nil }
+            return (key, transformed)
+        }
+        return children.isEmpty ? nil : (layer, children)
+    }
+}
+
+/// Applies `replacements` to the model's layers.
 ///
 /// Invalidates the model's compiled traces on any replacement: a trace holds the
 /// module tree it was built from, so an adapter added, fused, or reverted here
 /// would otherwise be invisible to it.
-private func replaceLayers<T>(
-    in model: Module,
-    layers: ArraySlice<Module>,
-    keys: [String],
-    transforming transform: (T) -> Module?
-) {
-    var replaced = false
-    for layer in layers {
-        var update: [(String, Module)] = []
-        for (key, child) in layer.namedModules() where keys.contains(key) {
-            if let child = child as? T, let transformed = transform(child) {
-                update.append((key, transformed))
-            }
-        }
-
-        if !update.isEmpty {
-            layer.update(modules: .unflattened(update))
-            replaced = true
-        }
+private func apply(_ replacements: LayerReplacements, to model: Module) {
+    guard !replacements.isEmpty else { return }
+    for (layer, children) in replacements {
+        layer.update(modules: .unflattened(children))
     }
-
-    if replaced {
-        model.invalidateCompiledTraces()
-    }
+    model.invalidateCompiledTraces()
 }
