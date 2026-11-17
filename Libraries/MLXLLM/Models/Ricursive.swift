@@ -1,9 +1,5 @@
-// Ricursive (Ripple-65B) text model.
-//
-// Port of the reference `modeling_ricursive.py` in ricursiveAI/Ripple-65B-Preview (Apache-2.0).
-// Structurally a Gemma 3 block (four norms per layer, per-head Q/K norm, a sliding/full
-// attention mix) with gated attention, a value residual, clamped SwiGLU, and RoPE on the
-// sliding layers only.
+// Ricursive (Ripple-65B), ported from `modeling_ricursive.py` in ricursiveAI/Ripple-65B-Preview.
+// A Gemma 3 block with gated attention, a value residual, clamped SwiGLU and sliding-only RoPE.
 
 import Foundation
 import MLX
@@ -106,11 +102,8 @@ extension RicursiveConfiguration: ModelConfigurationValidating {
     }
 }
 
-/// `1 / theta^(i / dimensions)` for even `i`, in float32: the power is taken in double,
-/// rounded to float32 once, then inverted in float32. For Ripple's theta (10000) and head
-/// size (128) this equals the reference's `1.0 / (theta ** (torch.arange(0, dim, 2).float() /
-/// dim))` bit for bit on PyTorch 2.15 CPU; that is not shown for other values. MLX's float32
-/// `pow` was an ulp off on 16 of those 64 values.
+/// `1 / theta^(i / dimensions)`: power in double, rounded to float32, inverted in float32. Equals
+/// torch's values bit for bit at Ripple's theta and head size; MLX's float32 `pow` was an ulp off.
 func ricursiveInverseFrequencies(theta: Float, dimensions: Int) -> MLXArray {
     MLXArray(
         stride(from: 0, to: dimensions, by: 2).map { i -> Float in
@@ -118,30 +111,18 @@ func ricursiveInverseFrequencies(theta: Float, dimensions: Int) -> MLXArray {
         })
 }
 
-/// The value-projection input `lerp(residual, x, sigmoid(lambda))`. The sigmoid is taken in
-/// float32 and rounded to the parameter's precision, and the blend is computed in float32 and
-/// rounded once, as PyTorch does on reduced-precision tensors. `torch.lerp` switches to
-/// `end - (end - start) * (1 - weight)` for weights of 0.5 and above; this uses its
-/// `start + weight * (end - start)` form for every weight, so that the weight never has to be
-/// read back. With PyTorch 2.15 on CPU, on bfloat16, the two forms gave no differing element
-/// at weights up to 0.92 and about 1e-5 of elements as the weight approaches 1.
+/// `lerp(residual, x, sigmoid(lambda))`, using `torch.lerp`'s low-weight formula for every weight;
+/// near weight 1 it differs from `torch.lerp` on a few elements per million.
 func ricursiveValueInput(_ x: MLXArray, residual: MLXArray, lambda: MLXArray) -> MLXArray {
+    // Round the sigmoid to lambda's dtype, then blend in float32, as torch does.
     let blend = sigmoid(lambda[0].asType(.float32)).asType(lambda.dtype).asType(x.dtype)
         .asType(.float32)
     let start = residual.asType(x.dtype).asType(.float32)
     return (start + blend * (x.asType(.float32) - start)).asType(x.dtype)
 }
 
-/// SiLU in the activation dtype. PyTorch's `F.silu` on bfloat16 computes in float32 and rounds
-/// once; MLXNN's `silu` rounds the sigmoid first, so about a quarter of bfloat16 outputs differ.
-/// SiLU in float32 matched PyTorch but cost about 2.5% decode and 0.19 GB peak at full size.
-func ricursiveSiLU(_ x: MLXArray) -> MLXArray {
-    silu(x)
-}
-
-/// RoPE in float32 on `[B, heads, T, headDim]`. Positions cannot go through bfloat16,
-/// which loses integer precision after 256. The reference casts cos and sin to the model
-/// precision before widening them again, so the same rounding is applied here.
+/// RoPE in float32 on `[B, heads, T, headDim]`; bfloat16 positions are inexact past 256.
+/// cos and sin are rounded to the model precision and widened again, as in the reference.
 func ricursiveRoPE(_ x: MLXArray, offset: Int, inverseFrequencies: MLXArray) -> MLXArray {
     let length = x.dim(2)
     let positions = MLXArray(Int32(offset) ..< Int32(offset + length)).asType(.float32)
@@ -281,7 +262,8 @@ private final class RicursiveMLP: Module, UnaryLayer {
             gate = minimum(gate, limit)
             up = clip(up, min: -limit, max: limit)
         }
-        return downProj(ricursiveSiLU(gate) * up)
+        // Activation dtype; float32 matches PyTorch's rounding but costs ~2.5% decode.
+        return downProj(silu(gate) * up)
     }
 }
 

@@ -51,13 +51,6 @@ LLMRegistry.gemma3_1B_qat_4bit    // mlx-community/gemma-3-1b-it-qat-4bit
 LLMRegistry.gemma3n_E4B_it_lm_4bit // mlx-community/gemma-3n-E4B-it-lm-4bit
 ```
 
-### Ricursive
-
-```swift
-// model_type: "ricursive"
-// Ripple-65B; load an MLX conversion by id or path
-```
-
 ### Phi
 
 ```swift
@@ -119,6 +112,7 @@ LLMRegistry.mellum2_1_12b_a2_5b_thinking_6bit  // mlx-community/Mellum2.1-12B-A2
 | `bailing_moe` | Bailing MoE |
 | `gpt_oss` | GPT OSS |
 | `minicpm` | MiniCPM |
+| `ricursive` | Ricursive (Ripple-65B Preview) |
 
 ### LFM3 tokenizer requirements
 

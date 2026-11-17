@@ -6,11 +6,8 @@ import XCTest
 
 @testable import MLXLLM
 
-/// Ricursive against the model author's `modeling_ricursive.py` (ricursiveAI/Ripple-65B-Preview,
-/// revision and sha256 in `RicursiveReferenceValues`). The tiny model has four sliding layers
-/// and one full layer, and an 8-token window shorter than its 24-token prompt. Its weights
-/// come from the closed-form formula in `tools/ricursive-reference.py`, which also writes the
-/// expected values in `RicursiveReferenceValues`.
+/// Ricursive against the author's `modeling_ricursive.py`, through `RicursiveReferenceValues`
+/// from `tools/ricursive-reference.py`: 4 sliding + 1 full layer, 8-token window, 24-token prompt.
 final class RicursiveTests: XCTestCase {
 
     private func tinyConfiguration() throws -> RicursiveConfiguration {
@@ -329,9 +326,8 @@ final class RicursiveTests: XCTestCase {
         XCTAssertEqual(frequencies.asArray(Float.self).map(\.bitPattern), torch)
     }
 
-    /// `torch.lerp` on bfloat16 computes in float32 and rounds once, and the blend is the
-    /// sigmoid of the bfloat16 lambda rounded to bfloat16. The expected values are computed in
-    /// double on the host.
+    /// `torch.lerp` on bfloat16 computes in float32 and rounds once, with the blend weight
+    /// rounded to bfloat16. Expected values are computed in double on the host.
     func testValueResidualBlendRoundsOnce() throws {
         try Device.withDefaultDevice(.cpu) {
             let x = MLXRandom.normal([1, 4, 64], key: MLXRandom.key(4)).asType(.bfloat16)
@@ -354,9 +350,8 @@ final class RicursiveTests: XCTestCase {
         array.asType(.float32).asArray(Float.self).map(Double.init)
     }
 
-    /// `value` rounded to the nearest bfloat16 (ties to even), or nil when it is not a tie but
-    /// within 1/4096 of a bfloat16 step (16 float32 steps) of one, where a float32 computation
-    /// may round either way.
+    /// `value` rounded to the nearest bfloat16 (ties to even), or nil within 1/4096 of a step
+    /// from a tie (not on it), where a float32 computation may round either way.
     private func bfloat16(_ value: Double) -> Float? {
         let truncated = Float(bitPattern: Float(value).bitPattern & 0xFFFF_0000)
         let next = Float(bitPattern: truncated.bitPattern &+ 0x1_0000)
