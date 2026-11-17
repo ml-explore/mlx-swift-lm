@@ -5,8 +5,9 @@ import MLX
 
 /// Register a cache type so ``loadPromptCacheSnapshot(url:)`` can restore it.
 ///
-/// ``savePromptCache(url:cache:metadata:state:)`` registers the types it writes, so a file saved
-/// and loaded in one process works without this call. Call it before loading in a new process.
+/// ``savePromptCache(url:cache:metadata:state:tokens:)`` registers the types it writes, so a file
+/// saved and loaded in one process works without this call. Call it before loading in a new
+/// process.
 /// Registering the same type again has no effect.
 ///
 /// - Throws: if the type has no ``KVCache/serializedClassName``, or another type already uses it.

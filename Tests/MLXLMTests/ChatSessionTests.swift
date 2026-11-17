@@ -3578,6 +3578,185 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertEqual(loadCount, 1)
     }
 
+    // MARK: - Detaching and attaching the prompt cache
+
+    /// A model whose rendered prompts extend one another, and the length of each render.
+    private func prefixPreservingModel() -> (ModelContext, AsyncStream<Int>) {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = TestInputProcessor(
+            tokenizer: tokenizer,
+            configuration: ModelConfiguration(id: "test"),
+            messageGenerator: DefaultMessageGenerator())
+        return (model(processor: processor), renderedLengths)
+    }
+
+    func testDetachWithoutARealizedCacheReturnsNil() async throws {
+        let session = ChatSession(
+            model(), history: [.user("first")], generateParameters: generationParameters)
+
+        let promptCache = await session.detachCache()
+
+        XCTAssertNil(promptCache)
+    }
+
+    func testDetachedCacheResumesItsConversationWhenAttachedAgain() async throws {
+        let (context, renderedLengths) = prefixPreservingModel()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let session = ChatSession(context, generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(to: "first")
+        let firstRenderedLength = await lengthIterator.next()
+        let firstPromptLength = try XCTUnwrap(firstRenderedLength)
+
+        let promptCache = await session.detachCache()
+        let detached = try XCTUnwrap(promptCache)
+        let status = try await session.cacheStatus()
+        XCTAssertEqual(detached.tokens?.count, firstPromptLength + 3)
+        XCTAssertEqual(status.phase, .planned)
+
+        try await session.attachCache(detached)
+        let reply = try await collectGeneration(session.streamDetails(to: "second"))
+
+        XCTAssertEqual(reply.info.cachedPromptTokenCount, firstPromptLength + 3)
+    }
+
+    func testDetachedSessionKeepsItsConversation() async throws {
+        let (context, renderedLengths) = prefixPreservingModel()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let session = ChatSession(context, generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(to: "first")
+        let firstRenderedLength = await lengthIterator.next()
+        let firstPromptLength = try XCTUnwrap(firstRenderedLength)
+
+        _ = await session.detachCache()
+        let reply = try await collectGeneration(session.streamDetails(to: "second"))
+        let secondRenderedLength = await lengthIterator.next()
+        let secondPromptLength = try XCTUnwrap(secondRenderedLength)
+
+        // Without a cache the whole conversation is prefilled, first exchange included.
+        XCTAssertEqual(reply.info.cachedPromptTokenCount, 0)
+        XCTAssertEqual(reply.info.promptTokenCount, secondPromptLength)
+        XCTAssertGreaterThan(secondPromptLength, firstPromptLength + 3)
+    }
+
+    func testSavedCacheResumesItsConversationInANewSession() async throws {
+        let (context, renderedLengths) = prefixPreservingModel()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let session = ChatSession(context, generateParameters: GenerateParameters(maxTokens: 3))
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("safetensors")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let answer = try await session.respond(to: "first")
+        let firstRenderedLength = await lengthIterator.next()
+        let firstPromptLength = try XCTUnwrap(firstRenderedLength)
+
+        // An application writes an idle conversation's cache away from the session's owner.
+        let promptCache = await session.detachCache()
+        try await Task.detached {
+            try savePromptCache(url: url, snapshot: try XCTUnwrap(promptCache))
+        }.value
+
+        let resumed = ChatSession(
+            context, history: [.user("first"), .assistant(answer)],
+            generateParameters: GenerateParameters(maxTokens: 3))
+        try await resumed.attachCache(try loadPromptCacheSnapshot(url: url))
+        let reply = try await collectGeneration(resumed.streamDetails(to: "second"))
+        let secondRenderedLength = await lengthIterator.next()
+        let secondPromptLength = try XCTUnwrap(secondRenderedLength)
+
+        XCTAssertEqual(reply.info.cachedPromptTokenCount, firstPromptLength + 3)
+        XCTAssertEqual(reply.info.promptTokenCount, secondPromptLength - firstPromptLength - 3)
+    }
+
+    func testSaveCacheKeepsTheTokensItsCacheRepresents() async throws {
+        let (context, renderedLengths) = prefixPreservingModel()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let session = ChatSession(context, generateParameters: GenerateParameters(maxTokens: 3))
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("safetensors")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        _ = try await session.respond(to: "first")
+        let firstRenderedLength = await lengthIterator.next()
+        let firstPromptLength = try XCTUnwrap(firstRenderedLength)
+        try await session.saveCache(to: url)
+
+        let restored = try loadPromptCacheSnapshot(url: url)
+        let detached = await session.detachCache()
+        XCTAssertEqual(restored.tokens?.count, firstPromptLength + 3)
+        XCTAssertEqual(restored.tokens, detached?.tokens)
+    }
+
+    func testAttachedCacheWithoutTokensContinuesOnlyAsAFragment() async throws {
+        let (context, _) = prefixPreservingModel()
+        let session = ChatSession(context, generateParameters: GenerateParameters(maxTokens: 3))
+        _ = try await session.respond(to: "first")
+        let promptCache = await session.detachCache()
+        let detached = try XCTUnwrap(promptCache)
+        let fragment = PromptCacheSnapshot(cache: detached.cache, state: detached.state)
+
+        // The session kept its transcript, which a cache without tokens cannot be matched to.
+        do {
+            try await session.attachCache(fragment)
+            XCTFail("expected a prompt cache without tokens to be rejected")
+        } catch is KVCacheError {
+            // expected
+        }
+
+        let fresh = ChatSession(context, generateParameters: GenerateParameters(maxTokens: 3))
+        try await fresh.attachCache(fragment)
+        let reply = try await collectGeneration(fresh.streamDetails(to: "second"))
+        let status = try await fresh.cacheStatus()
+
+        // A fragment appends the new prompt after the cache instead of matching it.
+        let tokens = try XCTUnwrap(detached.tokens)
+        XCTAssertEqual(reply.info.cachedPromptTokenCount, 0)
+        XCTAssertEqual(status.processedTokenCount, tokens.count + reply.info.promptTokenCount + 3)
+    }
+
+    func testAttachRejectsTokensThatDisagreeWithTheCachedPositions() async throws {
+        let (context, _) = prefixPreservingModel()
+        let session = ChatSession(context, generateParameters: GenerateParameters(maxTokens: 3))
+        _ = try await session.respond(to: "first")
+        let promptCache = await session.detachCache()
+        let detached = try XCTUnwrap(promptCache)
+        let tokens = try XCTUnwrap(detached.tokens)
+
+        do {
+            try await session.attachCache(
+                PromptCacheSnapshot(
+                    cache: detached.cache, state: detached.state,
+                    tokens: Array(tokens.dropLast())))
+            XCTFail("expected tokens shorter than the cache to be rejected")
+        } catch is KVCacheError {
+            // expected
+        }
+    }
+
+    func testAttachedCacheStartsColdWhenTheTranscriptCarriesMedia() async throws {
+        let (_, continuation) = AsyncStream<Int>.makeStream()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = MediaAwareInputProcessor(tokenizer: tokenizer)
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(
+            to: "inspect this",
+            image: .array(MLXArray([Float(0)])))
+        let promptCache = await session.detachCache()
+        try await session.attachCache(try XCTUnwrap(promptCache))
+        let reply = try await collectGeneration(session.streamDetails(to: "describe it"))
+
+        // Equal tokens cannot prove the cache holds this image rather than another.
+        XCTAssertEqual(reply.info.cachedPromptTokenCount, 0)
+    }
+
     func testCurrentCacheNilForHistorySessionBeforeGeneration() async throws {
         // .history state should behave like .empty: no cache until first generation
         let history: [Chat.Message] = [.user("hello"), .assistant("hi")]

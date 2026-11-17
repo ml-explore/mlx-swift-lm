@@ -311,6 +311,20 @@ let next = await session.fork(history: [])
 let reply = try await next.respond(to: "What is the weather like?")
 ```
 
+To free the memory of an idle conversation, detach its cache. The session keeps its
+transcript, and attaching the cache again, even in a new session over the same history,
+resumes the conversation without prefilling it. The snapshot carries the tokens its cache
+represents, so it can be saved to disk and restored in a later launch.
+
+```swift
+if let promptCache = await session.detachCache() {
+    try savePromptCache(url: fileURL, snapshot: promptCache)
+}
+
+let resumed = ChatSession(modelContainer, history: history)
+try await resumed.attachCache(try loadPromptCacheSnapshot(url: fileURL))
+```
+
 ## 5. Secondary Workflow: VLM Inference
 
 ### Image Input Types

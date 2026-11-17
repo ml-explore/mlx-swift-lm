@@ -2251,12 +2251,22 @@ struct KVCacheError: Error, LocalizedError {
 /// features differ too, since it is encoded alone rather than beside the cached one; Qwen2-VL,
 /// Qwen2.5-VL, Qwen3-VL, and GLM-OCR isolate each image and are unaffected.
 ///
+/// A snapshot can also carry the tokens its cache represents. Attached with
+/// ``ChatSession/attachCache(_:)`` to a session that holds the transcript, they let the
+/// session re-render the conversation and reuse the cache up to the first token that differs.
+///
 /// The cache instances are mutable reference types. Transfer a snapshot to one session or copy the
 /// caches before constructing multiple sessions from it.
 public struct PromptCacheSnapshot {
     public let cache: [KVCache]
     public let metadata: [String: String]
     public let state: LMOutput.State?
+
+    /// The tokens the cache represents, in order, or `nil` when they are unknown.
+    ///
+    /// A prompt reuses the cache only as far as it reproduces these tokens, so without them a
+    /// cache can continue only as a fragment.
+    public let tokens: [Int]?
 
     /// Pair a cache with the model state that belongs with it.
     ///
@@ -2267,10 +2277,17 @@ public struct PromptCacheSnapshot {
     ///   - cache: the KV cache
     ///   - metadata: optional caller metadata to carry alongside it
     ///   - state: the model state captured with the cache, if the model produced any
-    public init(cache: [KVCache], metadata: [String: String] = [:], state: LMOutput.State? = nil) {
+    ///   - tokens: the tokens the cache represents, if known
+    public init(
+        cache: [KVCache],
+        metadata: [String: String] = [:],
+        state: LMOutput.State? = nil,
+        tokens: [Int]? = nil
+    ) {
         self.cache = cache
         self.metadata = metadata
         self.state = state
+        self.tokens = tokens
     }
 }
 
@@ -2281,12 +2298,17 @@ public struct PromptCacheSnapshot {
 ///   - cache: The model cache state
 ///   - metadata: Optional metadata to save along with cache state
 ///   - state: Optional model state associated with the cache
+///   - tokens: Optional tokens the cache represents, restored as ``PromptCacheSnapshot/tokens``
 public func savePromptCache(
     url: URL,
     cache: [KVCache],
     metadata: [String: String] = [:],
-    state: LMOutput.State? = nil
+    state: LMOutput.State? = nil,
+    tokens: [Int]? = nil
 ) throws {
+    guard metadata[promptCacheTokensKey] == nil else {
+        throw KVCacheError(message: "User metadata uses the reserved prompt cache tokens key")
+    }
     let stateArrays = try promptCacheStateArrays(state, userMetadata: metadata)
     guard stateArrays.isEmpty || !cache.isEmpty else {
         throw KVCacheError(message: "Model state requires at least one prompt cache")
@@ -2322,6 +2344,9 @@ public func savePromptCache(
     for (key, value) in metadata {
         flattenedMetadata["1.\(key)"] = value
     }
+    if let tokens {
+        flattenedMetadata["1.\(promptCacheTokensKey)"] = try promptCacheTokensValue(tokens)
+    }
 
     // Flatten cache_classes as "2.i" (third element of cache_metadata)
     for (i, className) in cacheClasses.enumerated() {
@@ -2332,6 +2357,17 @@ public func savePromptCache(
         stateArrays, flattenedData: &flattenedData, flattenedMetadata: &flattenedMetadata)
 
     try save(arrays: flattenedData, metadata: flattenedMetadata, url: url)
+}
+
+/// Save a prompt cache snapshot to a file, the inverse of ``loadPromptCacheSnapshot(url:)``.
+///
+/// - Parameters:
+///   - url: The URL to the `.safetensors` file
+///   - snapshot: The cache, metadata, model state and tokens to save
+public func savePromptCache(url: URL, snapshot: PromptCacheSnapshot) throws {
+    try savePromptCache(
+        url: url, cache: snapshot.cache, metadata: snapshot.metadata, state: snapshot.state,
+        tokens: snapshot.tokens)
 }
 
 /// Load a prompt cache from a file, without model state.
@@ -2379,6 +2415,7 @@ public func loadPromptCacheSnapshot(url: URL) throws -> PromptCacheSnapshot {
     let storedUserMetadata = unflattenedMetadata[1] as? [String: String] ?? [:]
     let (state, userMetadata) = try loadPromptCacheState(
         arrays: &arrays, metadata: storedUserMetadata)
+    let (tokens, callerMetadata) = try loadPromptCacheTokens(metadata: userMetadata)
     let storedCacheClasses = unflattenedMetadata[2] as? [String] ?? []
     let cacheClasses = try loadPromptCacheClasses(storedCacheClasses, hasState: state != nil)
 
@@ -2401,7 +2438,8 @@ public func loadPromptCacheSnapshot(url: URL) throws -> PromptCacheSnapshot {
         caches.append(cache)
     }
 
-    return PromptCacheSnapshot(cache: caches, metadata: userMetadata, state: state)
+    return PromptCacheSnapshot(
+        cache: caches, metadata: callerMetadata, state: state, tokens: tokens)
 }
 
 private func promptCacheStateArrays(
@@ -2516,6 +2554,42 @@ private let promptCacheStateTensorPrefix = "__mlx_lm_state_tensor_"
 // Derived so the format version lives in exactly one place.
 private let promptCacheStateClassPrefix =
     "__mlx_lm_state_v\(promptCacheStateFormatVersion)__:"
+
+/// Encodes prompt cache tokens as base64 of little-endian `Int32`s, which decode far faster
+/// than JSON.
+///
+/// Metadata rather than a tensor keeps the file readable by Python `mlx_lm`, which builds its
+/// cache list from every tensor in the file but passes unknown metadata through to the caller.
+private func promptCacheTokensValue(_ tokens: [Int]) throws -> String {
+    let values = try tokens.map { token in
+        guard let value = Int32(exactly: token) else {
+            throw KVCacheError(message: "Prompt cache token \(token) does not fit in 32 bits")
+        }
+        return value.littleEndian
+    }
+    return values.withUnsafeBytes { Data($0) }.base64EncodedString()
+}
+
+private func loadPromptCacheTokens(
+    metadata: [String: String]
+) throws -> ([Int]?, [String: String]) {
+    var metadata = metadata
+    guard let value = metadata.removeValue(forKey: promptCacheTokensKey) else {
+        return (nil, metadata)
+    }
+    let width = MemoryLayout<Int32>.size
+    guard let data = Data(base64Encoded: value), data.count.isMultiple(of: width) else {
+        throw KVCacheError(message: "Invalid prompt cache tokens")
+    }
+    let tokens = data.withUnsafeBytes { bytes in
+        stride(from: 0, to: bytes.count, by: width).map {
+            Int(Int32(littleEndian: bytes.loadUnaligned(fromByteOffset: $0, as: Int32.self)))
+        }
+    }
+    return (tokens, metadata)
+}
+
+private let promptCacheTokensKey = "__mlx_lm_prompt_tokens"
 
 /// Reconstruct a single cache from its class name, state arrays, and metaState.
 ///

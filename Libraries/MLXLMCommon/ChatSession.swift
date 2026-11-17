@@ -210,7 +210,8 @@ public final class ChatSession {
         /// leave its final verifier sample here.
         var uncommittedTokens: [Int] = []
 
-        /// `false` after ``ChatSession/fork(history:)`` pairs the cache with a
+        /// `false` after ``ChatSession/fork(history:)`` or
+        /// ``ChatSession/attachCache(_:)`` pairs the cache with a
         /// transcript it was not built from. Until the next prompt is reconciled,
         /// only an exact token match can reuse it.
         var transcriptBuiltCache = true
@@ -384,6 +385,17 @@ public final class ChatSession {
                 main: main.copy(), draft: draft?.copy(), state: state,
                 mtpDrafterContinuation: mtpContinuation, conversation: conversation)
         }
+
+        /// The tokens the main cache holds, or `nil` when the ledger cannot vouch for them.
+        ///
+        /// A cache restored without its transcript has no ledger, and an invalidated ledger is
+        /// empty while the cache still holds tokens.
+        var representedTokens: [Int]? {
+            guard let conversation,
+                conversation.cachedTokens.count == main.processedTokenCount
+            else { return nil }
+            return conversation.cachedTokens
+        }
     }
 
     private enum Cache {
@@ -408,14 +420,9 @@ public final class ChatSession {
         /// transcript with media on either side therefore starts cold, and
         /// nothing is copied.
         func replacingTranscript(with history: [Chat.Message]) -> Cache {
-            let carriesMedia = { (messages: [Chat.Message]) in
-                messages.contains {
-                    !$0.images.isEmpty || !$0.videos.isEmpty || !$0.audios.isEmpty
-                }
-            }
             guard case .kvcache(let stored) = self,
                 var conversation = stored.conversation,
-                !carriesMedia(conversation.messages), !carriesMedia(history)
+                !conversation.messages.carriesMedia, !history.carriesMedia
             else {
                 return .history(history)
             }
@@ -424,6 +431,59 @@ public final class ChatSession {
             var copied = stored.copy()
             copied.conversation = conversation
             return .kvcache(copied)
+        }
+
+        /// The conversation this cache holds, or `nil` when it holds none or continues a fragment.
+        var transcript: [Chat.Message]? {
+            switch self {
+            case .empty: nil
+            case .history(let history): history
+            case .kvcache(let stored): stored.conversation?.messages
+            }
+        }
+
+        /// Moves the realized cache out and keeps its conversation.
+        mutating func detach() -> PromptCacheSnapshot? {
+            guard case .kvcache(let stored) = self else { return nil }
+            self = stored.conversation.map { .history($0.messages) } ?? .empty
+            return PromptCacheSnapshot(
+                cache: stored.main.cache, state: stored.state, tokens: stored.representedTokens)
+        }
+
+        /// `promptCache` paired with `transcript`, a conversation it was not built from.
+        ///
+        /// The pairing follows ``replacingTranscript(with:)``: the cache is reused only as far as
+        /// the rendered prompt reproduces its tokens, and a transcript with media starts cold.
+        /// Without tokens there is nothing to match, so the cache continues as a fragment, which
+        /// only a session holding no transcript can do.
+        static func adopting(
+            _ promptCache: consuming PromptCacheSnapshot,
+            transcript: [Chat.Message]?,
+            plan: KVCachePlan
+        ) throws -> Cache {
+            let cache = try plan.validated(promptCache.cache)
+            // Each response uses the cache on another thread.
+            eval(cache)
+            guard let tokens = promptCache.tokens else {
+                guard transcript?.isEmpty ?? true else {
+                    throw KVCacheError(
+                        message: "A prompt cache without tokens cannot resume a transcript")
+                }
+                return .kvcache(.init(cache: cache, state: promptCache.state, plan: plan))
+            }
+
+            // Equal placeholder tokens cannot prove equal media; a text transcript renders none.
+            let transcript = transcript ?? []
+            guard !transcript.carriesMedia else { return .history(transcript) }
+
+            let main = KVCacheStorage(cache, plan: plan, processedTokenCount: tokens.count)
+            guard main.nativeAttentionOffsetsAreAligned else {
+                throw KVCacheError(
+                    message: "Prompt cache tokens do not match the positions its cache holds")
+            }
+            var conversation = Conversation(messages: transcript, cachedTokens: tokens)
+            conversation.transcriptBuiltCache = false
+            return .kvcache(.init(main: main, state: promptCache.state, conversation: conversation))
         }
     }
 
@@ -769,7 +829,7 @@ public final class ChatSession {
     /// This is the preferred way to start a session from a saved cache: the snapshot keeps the KV
     /// arrays and the model state together, so neither can be dropped. Read one from disk with
     /// ``loadPromptCacheSnapshot(url:)``, or build one in process with
-    /// ``PromptCacheSnapshot/init(cache:metadata:state:)``.
+    /// ``PromptCacheSnapshot/init(cache:metadata:state:tokens:)``.
     ///
     /// Models that do not carry model state simply ignore it, so this works for any model.
     ///
@@ -2147,6 +2207,65 @@ public final class ChatSession {
         return ChatSession(forking: self, cache: forked)
     }
 
+    /// Move this session's cache out, keeping the conversation it holds.
+    ///
+    /// The session can still respond: without a cache, its next response prefills the whole
+    /// conversation. Attaching the snapshot again with ``attachCache(_:)`` avoids that,
+    /// so an application can keep the caches of idle conversations outside their sessions —
+    /// on disk with ``savePromptCache(url:snapshot:)``, for example — and bring one back when
+    /// its conversation resumes. Moving copies nothing, and the snapshot can be handed to
+    /// another task to write.
+    ///
+    /// The snapshot carries the tokens its cache represents, or none when the session cannot
+    /// vouch for them, as for a session restored from a raw cache. It does not carry a
+    /// speculative draft cache, so a session that decodes speculatively prefills its
+    /// conversation again. A response in progress finishes before the cache is moved.
+    ///
+    /// - Returns: the session's cache, or `nil` when it holds none
+    public nonisolated(nonsending) func detachCache() async -> sending PromptCacheSnapshot? {
+        await cache.update { cache in
+            SendableBox(cache.detach())
+        }.consume()
+    }
+
+    /// Continue from a cache built elsewhere, such as one taken with ``detachCache()``.
+    ///
+    /// The cache replaces the one the session holds, and its tokens are matched to the prompt
+    /// the session renders, as for ``fork(history:)``: the next response reuses the cache up to
+    /// the first token that differs and prefills the rest. A cache saved to disk therefore
+    /// resumes its conversation in a new session:
+    ///
+    /// ```swift
+    /// let promptCache = try loadPromptCacheSnapshot(url: url)
+    /// let session = ChatSession(model, instructions: instructions, history: history)
+    /// try await session.attachCache(promptCache)
+    /// ```
+    ///
+    /// A transcript with images, videos or audios starts from an empty cache instead: their
+    /// placeholder tokens are the same for different media, so they cannot prove the cache
+    /// matches. A snapshot without tokens has nothing to match, so it continues as a fragment,
+    /// like a session created with a `promptCache`, and only a session without a transcript
+    /// accepts it.
+    ///
+    /// The cache must come from this model. The next response rebuilds a cache whose plan or
+    /// layer kinds differ from the ones the session's ``generateParameters`` create, as it does
+    /// when a cached conversation's configuration changes. A response in progress finishes
+    /// before the cache is replaced.
+    ///
+    /// - Parameter promptCache: the cache to continue from
+    /// - Throws: if the cache does not fit the session's cache configuration, its tokens
+    ///   disagree with the positions it holds, or it has no tokens and the session holds a
+    ///   transcript
+    public nonisolated(nonsending) func attachCache(
+        _ promptCache: consuming PromptCacheSnapshot
+    ) async throws {
+        let plan = try generateParameters.kvCachePlan()
+        let promptCache = SendableBox(promptCache)
+        try await cache.update { cache in
+            cache = try .adopting(promptCache.consume(), transcript: cache.transcript, plan: plan)
+        }
+    }
+
     /// Wait for registered response runners and exclusive access to the KVCache.
     ///
     /// Use this after cancelling a stream consumer to await inference and GPU cleanup.
@@ -2202,11 +2321,12 @@ public final class ChatSession {
     /// Use ``loadPromptCacheSnapshot(url:)`` and an initializer that accepts a
     /// `promptCache` to restore the saved cache and model state in a future session.
     ///
-    /// > Important: This saves raw KV state only. It does not save the structured
-    /// > transcript retained by `ChatSession`. A restored raw cache therefore uses
-    /// > fragment-based continuation and is not suitable for conversation-aware
-    /// > structured tool continuations. Persist the messages separately and restore
-    /// > them with a history initializer when the transcript is required.
+    /// > Important: This saves the KV state and the tokens it represents, not the structured
+    /// > transcript retained by `ChatSession`. A session created with the loaded snapshot
+    /// > therefore uses fragment-based continuation and is not suitable for
+    /// > conversation-aware structured tool continuations. Persist the messages separately,
+    /// > restore them with a history initializer, and hand that session the snapshot with
+    /// > ``attachCache(_:)`` when the transcript is required.
     ///
     /// - Parameter url: the file URL to write the cache to
     /// - Throws: ``ChatSessionError/noCacheAvailable`` if no generation has occurred yet,
@@ -2215,7 +2335,9 @@ public final class ChatSession {
         try await cache.read { cache in
             switch cache {
             case .kvcache(let stored):
-                try savePromptCache(url: url, cache: stored.main.cache, state: stored.state)
+                try savePromptCache(
+                    url: url, cache: stored.main.cache, state: stored.state,
+                    tokens: stored.representedTokens)
             default:
                 throw ChatSessionError.noCacheAvailable
             }
@@ -2244,5 +2366,15 @@ public enum ChatSessionError: LocalizedError {
         case .kvCacheConfigurationChanged:
             "KV-cache configuration changed after the session cache was realized. Clear the session or respond() to rebuild the cache from its retained transcript."
         }
+    }
+}
+
+extension [Chat.Message] {
+    /// Whether any message carries images, videos or audios.
+    ///
+    /// Their placeholder tokens are the same for different media, so a transcript that
+    /// carries any cannot be matched to a cache token by token.
+    fileprivate var carriesMedia: Bool {
+        contains { !$0.images.isEmpty || !$0.videos.isEmpty || !$0.audios.isEmpty }
     }
 }

@@ -385,6 +385,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
 
         #expect(snapshot.cache.count == 1)
         #expect(snapshot.state == nil)
+        #expect(snapshot.tokens == nil)
         #expect(legacyCache.count == 1)
         #expect(legacyMetadata.isEmpty)
         #expect(arrays.keys.allSatisfy { Int($0.split(separator: ".")[0]) != nil })
@@ -432,6 +433,76 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         #expect(legacyCache.count == 1)
         #expect(Set(emptyStateArrays.keys) == Set(legacyArrays.keys))
         #expect(emptyStateMetadata == legacyMetadata)
+    }
+
+    @Test func testPromptCacheTokensRoundTrip() throws {
+        let cache = KVCacheSimple()
+        _ = cache.update(
+            keys: MLXArray.ones([1, 1, 4, 4]),
+            values: MLXArray.zeros([1, 1, 4, 4]))
+        let tokens = [5, 0, 7, 151_643, Int(Int32.max)]
+        let url = tempURL()
+        let emptyURL = tempURL()
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: emptyURL)
+        }
+
+        try savePromptCache(
+            url: url,
+            snapshot: PromptCacheSnapshot(
+                cache: [cache], metadata: ["source": "test"], tokens: tokens))
+        try savePromptCache(url: emptyURL, cache: [cache], tokens: [])
+        let snapshot = try loadPromptCacheSnapshot(url: url)
+        let (_, legacyMetadata) = try loadPromptCache(url: url)
+        let (arrays, _) = try loadArraysAndMetadata(url: url)
+
+        #expect(snapshot.tokens == tokens)
+        #expect(snapshot.metadata == ["source": "test"])
+        #expect(legacyMetadata == ["source": "test"])
+        #expect(try loadPromptCacheSnapshot(url: emptyURL).tokens == [])
+        // Tokens travel as metadata, so the tensors stay those of a cache without them.
+        #expect(arrays.keys.allSatisfy { Int($0.split(separator: ".")[0]) != nil })
+    }
+
+    @Test func testPromptCacheTokensRejectReservedUserMetadataAndWideTokens() throws {
+        let cache = KVCacheSimple()
+        _ = cache.update(
+            keys: MLXArray.ones([1, 1, 1, 4]),
+            values: MLXArray.zeros([1, 1, 1, 4]))
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(throws: KVCacheError.self) {
+            try savePromptCache(
+                url: url, cache: [cache], metadata: ["__mlx_lm_prompt_tokens": "AQAAAA=="])
+        }
+        #expect(throws: KVCacheError.self) {
+            try savePromptCache(url: url, cache: [cache], tokens: [Int(Int32.max) + 1])
+        }
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
+
+    @Test func testPromptCacheRejectsMalformedTokens() throws {
+        let cache = KVCacheSimple()
+        _ = cache.update(
+            keys: MLXArray.ones([1, 1, 1, 4]),
+            values: MLXArray.zeros([1, 1, 1, 4]))
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try savePromptCache(url: url, cache: [cache], tokens: [1])
+        let (arrays, storedMetadata) = try loadArraysAndMetadata(url: url)
+        eval(arrays)
+        for malformed in ["not base64!", "AQAA"] {
+            var malformedMetadata = storedMetadata
+            malformedMetadata["1.__mlx_lm_prompt_tokens"] = malformed
+            try save(arrays: arrays, metadata: malformedMetadata, url: url)
+
+            #expect(throws: KVCacheError.self) {
+                try loadPromptCacheSnapshot(url: url)
+            }
+        }
     }
 
     @Test func testPromptCacheStateRejectsReservedUserMetadata() throws {
