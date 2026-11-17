@@ -307,15 +307,45 @@ final class GLM5NextTests: XCTestCase {
         XCTAssertEqual(generated, expected)
     }
 
-    /// Per-channel gate `[B, T, H, Dk]` through `gatedDeltaUpdate`: the Metal kernel
-    /// against the ops recurrence, in float32 and in bfloat16 at GLM-5.3-Flash's
-    /// linear-attention sizes (64 heads of 128).
+    /// The gated delta recurrence written out one step at a time, for a decay of one value
+    /// per head (`[B, T, H]` or `[B, T, H, 1]`) or per key channel (`[B, T, H, Dk]`). A step
+    /// whose mask is false leaves the state unchanged.
+    private func gatedDeltaRecurrence(
+        q: MLXArray, k: MLXArray, v: MLXArray, g: MLXArray, beta: MLXArray, state: MLXArray,
+        mask: MLXArray? = nil
+    ) -> (MLXArray, MLXArray) {
+        var state = state
+        var ys = [MLXArray]()
+        for t in 0 ..< q.dim(1) {
+            let (qt, kt, vt, gt) = (q[0..., t], k[0..., t], v[0..., t], g[0..., t])
+            let decay =
+                gt.ndim == 2
+                ? expandedDimensions(gt, axes: [2, 3]) : expandedDimensions(gt, axis: -2)
+            var next = state * decay
+            let memory = (next * expandedDimensions(kt, axis: -2)).sum(axis: -1)
+            let delta = (vt - memory) * expandedDimensions(beta[0..., t], axis: -1)
+            next = next + expandedDimensions(kt, axis: -2) * expandedDimensions(delta, axis: -1)
+            ys.append((next * expandedDimensions(qt, axis: -2)).sum(axis: -1))
+            state =
+                mask.map {
+                    MLX.where(expandedDimensions($0[0..., t], axes: [1, 2, 3]), next, state)
+                }
+                ?? next
+        }
+        return (stacked(ys, axis: 1), state)
+    }
+
+    /// Per-channel gate `[B, T, H, Dk]`: the Metal kernel against the ops path, in float32 and
+    /// in bfloat16 at GLM-5.3-Flash's KDA sizes (64 heads of 128), for decode (T = 1) and
+    /// prefill. The only test of the per-channel kernel's arithmetic: the transformers parity
+    /// model (head dim 16) takes the ops path, and the other model tests use head dim 32.
     func testPerChannelGatedDeltaKernelMatchesOps() throws {
-        for (dtype, H, D, yTolerance, stateTolerance) in [
-            (DType.float32, 2, 32, Float(1e-4), Float(1e-4)),
-            (DType.bfloat16, 64, 128, Float(2e-2), Float(1e-4)),
+        for (dtype, T, H, D, yTolerance, stateTolerance) in [
+            (DType.float32, 12, 2, 32, Float(1e-4), Float(1e-4)),
+            (DType.bfloat16, 1, 64, 128, Float(2e-2), Float(1e-4)),
+            (DType.bfloat16, 12, 64, 128, Float(2e-2), Float(1e-4)),
         ] {
-            let (B, T) = (1, 12)
+            let B = 1
             let (q, k, v, g, beta, state) = withRandomState(MLXRandom.RandomState(seed: 5)) {
                 (
                     (MLXRandom.normal([B, T, H, D]) * 0.2 / sqrt(Float(D) / 32)).asType(dtype),
@@ -334,11 +364,10 @@ final class GLM5NextTests: XCTestCase {
             XCTAssertEqual(yKernel.dtype, dtype)
             let yDifference = maxAbsDifference(yKernel, yOps)
             let stateDifference = maxAbsDifference(sKernel, sOps)
-            print(
-                "glm5_next gated delta \(dtype) H=\(H) D=\(D): y \(yDifference), state \(stateDifference)"
-            )
-            XCTAssertLessThan(yDifference, yTolerance, "\(dtype)")
-            XCTAssertLessThan(stateDifference, stateTolerance, "\(dtype)")
+            let label = "\(dtype) T=\(T) H=\(H) D=\(D)"
+            print("glm5_next gated delta \(label): y \(yDifference), state \(stateDifference)")
+            XCTAssertLessThan(yDifference, yTolerance, label)
+            XCTAssertLessThan(stateDifference, stateTolerance, label)
         }
     }
 
@@ -358,29 +387,76 @@ final class GLM5NextTests: XCTestCase {
                 MLXRandom.normal([H, D]), MLXRandom.normal([B, H, D, D]) * 0.1
             )
         }
-        // The recurrence, one step at a time, with the decay the entry point computes.
-        let g = exp(-exp(aLog) * softplus(a + dtBias))
-        let beta = sigmoid(b)
-        var expectedState = state
-        var ys = [MLXArray]()
-        for t in 0 ..< T {
-            let (qt, kt, vt) = (q[0..., t], k[0..., t], v[0..., t])
-            expectedState = expectedState * expandedDimensions(g[0..., t], axis: -2)
-            let memory = (expectedState * expandedDimensions(kt, axis: -2)).sum(axis: -1)
-            let delta = (vt - memory) * expandedDimensions(beta[0..., t], axis: -1)
-            expectedState =
-                expectedState + expandedDimensions(kt, axis: -2)
-                * expandedDimensions(delta, axis: -1)
-            ys.append((expectedState * expandedDimensions(qt, axis: -2)).sum(axis: -1))
-        }
-        let expected = stacked(ys, axis: 1)
-
+        let (expected, expectedState) = gatedDeltaRecurrence(
+            q: q, k: k, v: v, g: exp(-exp(aLog) * softplus(a + dtBias)), beta: sigmoid(b),
+            state: state)
         for useKernel in [true, false] {
             let (y, newState) = gatedDeltaUpdate(
                 q: q, k: k, v: v, a: a, b: b, aLog: aLog, dtBias: dtBias, state: state,
                 useKernel: useKernel)
             eval(y, newState)
             XCTAssertLessThan(maxAbsDifference(y, expected), 1e-4, "useKernel \(useKernel)")
+            XCTAssertLessThan(
+                maxAbsDifference(newState, expectedState), 1e-4, "useKernel \(useKernel)")
+        }
+    }
+
+    /// A keep-dims gate `[B, T, H, 1]` (one decay per head) from the public entry point
+    /// takes the per-head kernel and ops paths, as it did before per-channel gates.
+    func testKeepDimsGateThroughGatedDeltaUpdateMatchesRecurrence() throws {
+        let (B, T, H, D) = (2, 6, 4, 64)
+        let (q, k, v, a, b, aLog, dtBias, state) = withRandomState(
+            MLXRandom.RandomState(seed: 13)
+        ) {
+            (
+                MLXRandom.normal([B, T, H, D]) * 0.1, MLXRandom.normal([B, T, H, D]) * 0.1,
+                MLXRandom.normal([B, T, H, D]), MLXRandom.normal([B, T, H, 1]),
+                MLXRandom.normal([B, T, H]), MLXRandom.normal([H, 1]) * 0.1,
+                MLXRandom.normal([H, 1]), MLXRandom.normal([B, H, D, D]) * 0.1
+            )
+        }
+        let (expected, expectedState) = gatedDeltaRecurrence(
+            q: q, k: k, v: v, g: exp(-exp(aLog) * softplus(a + dtBias)), beta: sigmoid(b),
+            state: state)
+        for useKernel in [true, false] {
+            let (y, newState) = gatedDeltaUpdate(
+                q: q, k: k, v: v, a: a, b: b, aLog: aLog, dtBias: dtBias, state: state,
+                useKernel: useKernel)
+            eval(y, newState)
+            XCTAssertLessThan(maxAbsDifference(y, expected), 1e-4, "useKernel \(useKernel)")
+            XCTAssertLessThan(
+                maxAbsDifference(newState, expectedState), 1e-4, "useKernel \(useKernel)")
+        }
+    }
+
+    /// A masked per-channel gate: steps whose mask is false leave the state unchanged, in
+    /// the masked per-channel kernel and in the ops path.
+    func testMaskedPerChannelGateMatchesRecurrence() throws {
+        let (B, T, H, D) = (2, 8, 2, 64)
+        let (q, k, v, g, beta, state) = withRandomState(MLXRandom.RandomState(seed: 17)) {
+            (
+                MLXRandom.normal([B, T, H, D]) * 0.1, MLXRandom.normal([B, T, H, D]) * 0.1,
+                MLXRandom.normal([B, T, H, D]),
+                exp(-MLXRandom.uniform(low: 0, high: 1, [B, T, H, D])),
+                sigmoid(MLXRandom.normal([B, T, H])), MLXRandom.normal([B, H, D, D]) * 0.1
+            )
+        }
+        let mask = MLXArray([
+            true, true, false, true, false, false, true, true,
+            false, true, true, true, true, false, true, false,
+        ]).reshaped(B, T)
+        let (expected, expectedState) = gatedDeltaRecurrence(
+            q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask)
+        // The kernel writes 0 at masked steps and the ops path does not; compare kept steps.
+        let kept = expandedDimensions(mask, axes: [2, 3])
+        for useKernel in [true, false] {
+            let (y, newState) = gatedDeltaUpdate(
+                q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask,
+                useKernel: useKernel)
+            eval(y, newState)
+            XCTAssertLessThan(
+                maxAbsDifference(MLX.where(kept, y, 0), MLX.where(kept, expected, 0)), 1e-4,
+                "useKernel \(useKernel)")
             XCTAssertLessThan(
                 maxAbsDifference(newState, expectedState), 1e-4, "useKernel \(useKernel)")
         }

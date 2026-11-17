@@ -148,6 +148,17 @@ private final class GatedDeltaKernelManager: Sendable {
 
 // MARK: - Kernel Dispatch
 
+/// Whether `g` is a per-key-channel gate `[B, T, Hv, Dk]`. A gate `[B, T, Hv]` or
+/// `[B, T, Hv, 1]` is one decay per head and takes the per-head paths as before.
+private func isPerChannelGate(_ g: MLXArray, q: MLXArray, v: MLXArray) -> Bool {
+    guard g.ndim == 4, g.dim(3) != 1 else { return false }
+    let expected = [q.dim(0), q.dim(1), v.dim(2), q.dim(3)]
+    precondition(
+        g.shape == expected, "per-channel gate must be \(expected) ([B, T, Hv, Dk]), got \(g.shape)"
+    )
+    return true
+}
+
 func gatedDeltaKernel(
     q: MLXArray,
     k: MLXArray,
@@ -167,7 +178,7 @@ func gatedDeltaKernel(
     let stateType = state.dtype
 
     let kernels = GatedDeltaKernelManager.shared
-    let vectorized = g.ndim == 4
+    let vectorized = isPerChannelGate(g, q: q, v: v)
     let selectedKernel: MLXFast.MLXFastKernel?
     var inputs: [MLXArray] = [q, k, v, g, beta, state, MLXArray(T)]
     if let mask {
@@ -437,7 +448,7 @@ package func gatedDeltaUpdate(
     // The MLXFast kernel has a gradient and is faster than both, so the
     // layouts it supports take it in training and in inference. It takes one
     // decay per head only.
-    if g.ndim != 4, hasFastGatedDelta(q: q, v: v, mask: mask) {
+    if !isPerChannelGate(g, q: q, v: v), hasFastGatedDelta(q: q, v: v, mask: mask) {
         return fastGatedDelta(q: q, k: k, v: v, g: g, beta: beta, state: state)
     }
     if useKernel, GatedDeltaKernelManager.shared.kernel != nil, Dk % 32 == 0 {
