@@ -89,7 +89,7 @@ final class Qwen35ContinuationTests: XCTestCase {
     func testDeclaresDualDialectToolFormat() throws {
         let model = try makeTinyModel()
         XCTAssertEqual(model.toolCallFormat, .qwen35)
-        XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.tagged)
+        XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.qwen35)
     }
 
     /// A warm continuation (prefix already in the cache, remainder prefilled

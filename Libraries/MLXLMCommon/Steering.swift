@@ -13,8 +13,8 @@ public enum SteeringEvent: Sendable, Equatable {
 
 /// When a steering instruction may enter the model's context.
 public enum SteeringPolicy: Sendable {
-    /// End decoding at the first supported text boundary. Prefill, tools,
-    /// reasoning models, and framed protocols finish their step.
+    /// End decoding at the next safe point, in the answer or inside a thought.
+    /// Prefill and dispatched tools finish first.
     case nextSafeBoundary
     /// Allow the current model step and dispatched tools to finish.
     case nextStepBoundary
@@ -88,6 +88,17 @@ public struct SteeringFailure: Sendable, Equatable {
     }
 }
 
+extension GenerateStopReason {
+    /// Whether the session ended the step at a safe point, where its cache holds
+    /// exactly the output the step emitted.
+    var isSafePoint: Bool {
+        switch self {
+        case .steered, .interrupted: true
+        case .stop, .length, .cancelled: false
+        }
+    }
+}
+
 /// All mutable state is protected by `lock`; no MLX arrays cross this mailbox.
 /// Only the session runner drains it. Task cancellation and joining happen outside the lock.
 final class SteeringControl: @unchecked Sendable {
@@ -103,6 +114,7 @@ final class SteeringControl: @unchecked Sendable {
     private var pending: [Request] = []
     private var pendingBytes = 0
     private var early = false
+    private var interrupted = false
     private var closed = false
     private var cancelled = false
     private var finished = false
@@ -116,7 +128,7 @@ final class SteeringControl: @unchecked Sendable {
     func enqueue(_ text: String, policy: SteeringPolicy) throws -> UUID {
         let bytes = text.utf8.count
         return try lock.withLock {
-            guard !closed else { throw SteeringError.responseEnded }
+            guard !closed, !interrupted else { throw SteeringError.responseEnded }
             guard steerable else { throw SteeringError.notSteerable }
             guard pending.count < SteeringLimits.maxPendingInstructions,
                 bytes <= SteeringLimits.maxPendingBytes - pendingBytes
@@ -131,13 +143,20 @@ final class SteeringControl: @unchecked Sendable {
         }
     }
 
+    /// Whether the step being decoded ends at its next safe point, to apply
+    /// instructions or because the response was interrupted.
     var requestsEarlyBoundary: Bool {
-        lock.withLock { early && !closed }
+        lock.withLock { (early || interrupted) && !closed }
+    }
+
+    /// Whether this response ends at its next safe point and accepts no more input.
+    var isInterrupted: Bool {
+        lock.withLock { interrupted }
     }
 
     /// Whether this response can still accept instructions.
     var isOpen: Bool {
-        lock.withLock { !closed && steerable }
+        lock.withLock { !closed && !interrupted && steerable }
     }
 
     /// Whether this response has completed, failed, or been cancelled.
@@ -160,11 +179,23 @@ final class SteeringControl: @unchecked Sendable {
         }
     }
 
+    /// Ends the response at its next safe point. It accepts no instructions after
+    /// that, and its runner reports the ones it did not apply. A repeated call has
+    /// no further effect.
+    func interrupt() throws {
+        try lock.withLock {
+            guard !closed else { throw SteeringError.responseEnded }
+            interrupted = true
+        }
+    }
+
     /// Atomically resolve the last-input/completion race. A producer either
-    /// joins the next step or observes a closed response.
+    /// joins the next step or observes a closed response. An interrupted
+    /// response takes nothing: ``closeAndTake()`` reports what it holds.
     func take(closeIfEmpty: Bool) throws -> [Request] {
         try lock.withLock {
             if cancelled { throw CancellationError() }
+            guard !interrupted else { return [] }
             let batch = pending
             pending.removeAll(keepingCapacity: true)
             pendingBytes = 0
@@ -265,10 +296,26 @@ final class SessionSteering: @unchecked Sendable {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw SteeringError.emptyInstruction
         }
+        return try firstAccepting(response) { try $0.enqueue(text, policy: policy) }
+    }
+
+    func interrupt(_ response: ChatSession.ResponseID?) throws {
+        try firstAccepting(response) { try $0.interrupt() }
+    }
+
+    func synchronize() async {
+        let snapshot = lock.withLock { requests }
+        for control in snapshot { await control.synchronize() }
+    }
+
+    /// Applies `request` to the first candidate response that has not ended.
+    private func firstAccepting<T>(
+        _ response: ChatSession.ResponseID?, _ request: (SteeringControl) throws -> T
+    ) throws -> T {
         var sawEndedResponse = false
         for control in candidates(for: response) {
             do {
-                return try control.enqueue(text, policy: policy)
+                return try request(control)
             } catch SteeringError.responseEnded {
                 // A cancelled or completed response is removed by its runner, which
                 // can lag the event that closed it. Skip it rather than reject input
@@ -277,11 +324,6 @@ final class SessionSteering: @unchecked Sendable {
             }
         }
         throw sawEndedResponse ? SteeringError.responseEnded : SteeringError.noActiveResponse
-    }
-
-    func synchronize() async {
-        let snapshot = lock.withLock { requests }
-        for control in snapshot { await control.synchronize() }
     }
 
     /// One named response, or the cache owner followed by registered responses

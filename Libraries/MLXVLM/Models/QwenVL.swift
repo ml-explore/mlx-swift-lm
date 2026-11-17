@@ -159,11 +159,21 @@ public struct QwenVL {
     }
 
     // image_processing_qwen2_vl.smart_resize
-    static func targetSize(height: Int, width: Int, factor: Int, minPixels: Int, maxPixels: Int)
-        throws
-        -> (Int, Int)
-    {
+    // `scaleUpSmallSides` follows image_processing_glm46v.smart_resize, which
+    // scales a side under `factor` up instead of throwing.
+    static func targetSize(
+        height: Int, width: Int, factor: Int, minPixels: Int, maxPixels: Int,
+        scaleUpSmallSides: Bool = false
+    ) throws -> (Int, Int) {
         debug("Original dimensions: \(width) × \(height)")
+        var height = height
+        var width = width
+        if scaleUpSmallSides, height > 0, width > 0, height < factor || width < factor {
+            let scale = max(Double(factor) / Double(height), Double(factor) / Double(width))
+            height = Int(Double(height) * scale)
+            width = Int(Double(width) * scale)
+            debug("After scaling up small sides: \(width) × \(height)")
+        }
         debug("Factor: \(factor), minPixels: \(minPixels), maxPixels: \(maxPixels)")
 
         if height < factor {
@@ -174,25 +184,30 @@ public struct QwenVL {
             throw VLMError.imageProcessingFailure(
                 "Width: \(width) must be larger than factor: \(factor)")
         }
-        if max(height, width) / min(height, width) > 200 {
+        if Double(max(height, width)) / Double(min(height, width)) > 200 {
             throw VLMError.imageProcessingFailure(
                 "Absolute aspect ratio must be smaller than 200: \(width) × \(height)")
         }
 
-        var hBar = max(factor, Int(round(Float(height) / Float(factor))) * factor)
-        var wBar = max(factor, Int(round(Float(width) / Float(factor))) * factor)
+        // Python's `round` rounds halves to even, so a side that is an odd
+        // multiple of `factor / 2` rounds down as often as up.
+        func roundToFactor(_ x: Int) -> Int {
+            Int((Double(x) / Double(factor)).rounded(.toNearestOrEven)) * factor
+        }
+        var hBar = max(factor, roundToFactor(height))
+        var wBar = max(factor, roundToFactor(width))
         debug("After rounding to factor multiples: \(wBar) × \(hBar)")
 
         // Scale based on total pixel count
         if hBar * wBar > maxPixels {
-            let beta = sqrt(Float(height * width) / Float(maxPixels))
-            hBar = Int(floor(Float(height) / beta / Float(factor))) * factor
-            wBar = Int(floor(Float(width) / beta / Float(factor))) * factor
+            let beta = (Double(height * width) / Double(maxPixels)).squareRoot()
+            hBar = max(factor, Int(floor(Double(height) / beta / Double(factor))) * factor)
+            wBar = max(factor, Int(floor(Double(width) / beta / Double(factor))) * factor)
             debug("After scaling down for maxPixels: \(wBar) × \(hBar)")
         } else if hBar * wBar < minPixels {
-            let beta = sqrt(Float(minPixels) / Float(height * width))
-            hBar = Int(ceil(Float(height) * beta / Float(factor))) * factor
-            wBar = Int(ceil(Float(width) * beta / Float(factor))) * factor
+            let beta = (Double(minPixels) / Double(height * width)).squareRoot()
+            hBar = Int(ceil(Double(height) * beta / Double(factor))) * factor
+            wBar = Int(ceil(Double(width) * beta / Double(factor))) * factor
             debug("After scaling up for minPixels: \(wBar) × \(hBar)")
         }
 

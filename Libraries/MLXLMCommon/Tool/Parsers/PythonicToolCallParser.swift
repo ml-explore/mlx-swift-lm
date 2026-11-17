@@ -137,10 +137,14 @@ public struct PythonicToolCallParser: ToolCallParser, Sendable {
             return tryParseJSON(literal) ?? tryParsePythonLiteral(literal) ?? literal
         }
 
-        if value.first == "'" || value.first == "\"" {
-            let string = (tryParsePythonLiteral(literal) as? String) ?? literal
+        // Also covers `r'...'`, which does not start with a quote.
+        if let string = tryParsePythonLiteral(literal) as? String {
             return convertParameterValue(
                 string, paramName: key, funcName: funcName, tools: tools)
+        }
+        if value.first == "'" || value.first == "\"" {
+            return convertParameterValue(
+                literal, paramName: key, funcName: funcName, tools: tools)
         }
 
         if getParameterType(funcName: funcName, paramName: key, tools: tools) != nil {

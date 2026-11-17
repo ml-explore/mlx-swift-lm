@@ -184,7 +184,7 @@ final class Qwen38Tests: XCTestCase {
             let model = try await LLMTypeRegistry.shared.createModel(
                 configuration: data, modelType: type)
             XCTAssertEqual(model.toolCallFormat, .qwen35)
-            XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.tagged)
+            XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.qwen35)
         }
     }
 
@@ -195,7 +195,7 @@ final class Qwen38Tests: XCTestCase {
         let model = try await VLMTypeRegistry.shared.createModel(
             configuration: data, modelType: "qwen3_8")
         XCTAssertEqual(model.toolCallFormat, .qwen35)
-        XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.tagged)
+        XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.qwen35)
     }
 
     func testQwen38ExplicitLayerTypes() throws {
