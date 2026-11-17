@@ -1,45 +1,9 @@
 #!/usr/bin/env python3
-"""Generate Tests/MLXLMTests/GLM5NextReferenceValues.swift from the model author's own
-implementation, `transformers.models.glm5_next` (transformers 5.22.2, torch CPU float32).
-Nothing in transformers is copied or modified.
+"""Generate Tests/MLXLMTests/GLM5NextReferenceValues.swift from transformers' own glm5_next.
 
 Requires torch, transformers==5.22.2, safetensors and numpy.
 Run from the repository root: python -B tools/glm5-next-reference.py
-
-The tiny model is a 5-layer GLM-5-Next: layer types linear (KDA), indexed, indexed with a
-shared indexer, linear, indexed; dense feed-forward in the first two layers and MoE in the last
-three; hyper-connections everywhere. The shared-indexer layer follows an indexed layer directly:
-transformers rejects a shared layer after a linear one (its decoder loop hands the next layer
-`None` after every linear layer). With `index_kpool` 4 and `index_topk` 8 the indexer keeps 2
-pools plus the open tail, so the 32-token prompt (8 pools) makes its selection a strict subset.
-
-Weights. The checkpoint layout is the one `Glm5NextForConditionalGeneration.save_pretrained`
-writes (`hc_attn_*`, per-expert projections, `q/k/v_conv1d`, top-level forget-gate parameters, a
-tiny vision tower), and its config.json names the sparse layers `indexed_attention`. Every
-checkpoint tensor is filled by `weight_values` below from its index in sorted checkpoint-name
-order, its flat element index and the weight seed, with integer arithmetic and one float32
-division, so GLM5NextReferenceTests builds the same values exactly. The tensors are written as
-model.safetensors next to that config.json and loaded with `from_pretrained`, and the Swift test
-loads the same files through its own loading path.
-
-The reference is the library model run in float32 on the CPU (`attn_implementation="sdpa"`)
-along its own greedy tokens, in four prefill plans: one call, chunks ending at 5/13/22/32, chunks
-of 7, and one token at a time; each continues with one-token decode steps fed the greedy tokens.
-The one-call log-probabilities are stored; the other plans differ from them by at most a tenth of
-the tolerance (printed as `self_consistency_max_abs_logprob_vs_one_call`).
-
-Weight seed rule: a seed is kept only if every discrete choice (indexer top-k per query and
-layer, MoE top-k per token and layer, the argmax at every position) has a margin at least
-MARGIN_FACTOR times the largest change of that kind of score seen when the same tokens are run
-(1) through the other prefill plans, (2) with the model cast to float64, and (3) with every
-`torch.nn.functional.linear` output computed in float64, rounded to float32 and moved by random
--2..2 ulps (two noise seeds, one-call and token-by-token plans). The tolerance is
-TOLERANCE_FACTOR times the largest log-probability change seen in those runs.
-
-Monkeypatches, all observation or perturbation, none in the reference runs' arithmetic:
-  1. `torch.topk` and `torch.Tensor.topk` are wrapped to record the scores and picks of the
-     indexer and router calls (values untouched).
-  2. Perturbation runs only: `torch.nn.functional.linear` as described in (3) above.
+The generated file's header states how the weights, seed and tolerance are chosen.
 """
 
 import argparse
@@ -161,6 +125,7 @@ def build(config_text, layout, seed):
 
 
 # ------------------------------------------------------------------ observation (patch 1)
+# torch.topk is wrapped to record the indexer's and router's scores and picks; values untouched.
 REC = {"on": False, "ctx": None, "layer": None, "start": 0, "rows": None}
 _topk_fn, _topk_method, _linear = torch.topk, torch.Tensor.topk, torch.nn.functional.linear
 
@@ -217,6 +182,7 @@ def install_context_hooks(model):
 
 
 # ------------------------------------------------------------------ perturbation (patch 2)
+# Perturbation runs only: linear outputs in float64, rounded, moved by -2..2 float32 ulps.
 PERT = {"rng": None}
 
 
@@ -271,7 +237,8 @@ def greedy(model, prompt):
             tokens.append(int(out.logits[0, -1].argmax()))
             if len(tokens) == PROMPT_LEN + DECODE:
                 break
-            out = model(input_ids=torch.tensor([[tokens[-1]]]), past_key_values=cache, use_cache=True)
+            out = model(input_ids=torch.tensor([[tokens[-1]]]), past_key_values=cache,
+                        use_cache=True)
             cache = out.past_key_values
     return tokens[PROMPT_LEN:]
 
@@ -341,7 +308,8 @@ def evaluate(config_text, layout, seed):
     report = {"min_margin": smallest, "max_score_change": change, "margin_threshold": thresholds}
     for kind, m in smallest.items():
         if m < thresholds[kind]:
-            return None, dict(report, reason=f"{kind} margin {m:.3g} < threshold {thresholds[kind]:.3g}")
+            reason = f"{kind} margin {m:.3g} < threshold {thresholds[kind]:.3g}"
+            return None, dict(report, reason=reason)
 
     worst = max(float(np.abs(lp - base_lp).max()) for lp, _ in perturbed.values())
     uncached = greedy_uncached(model, prompt)
@@ -414,11 +382,26 @@ def main():
         "// Generated by tools/glm5-next-reference.py; do not edit values by hand.",
         f"// transformers {transformers.__version__} Glm5NextForConditionalGeneration (sdpa), "
         f"unmodified; PyTorch {torch.__version__} CPU FP32.",
+        "//",
+        "// A 5-layer model: KDA, indexed, indexed with a shared indexer, KDA, indexed;",
+        "// dense MLP in the first two layers, MoE in the rest. index_kpool 4 and",
+        "// index_topk 8 keep 2 of the 8 pools of the 32-token prompt plus the open tail.",
+        "// Every tensor of the checkpoint layout save_pretrained writes is filled by",
+        "// `weight_values` (integer hash, one float32 division) from its sorted-name index,",
+        "// its element index and the weight seed, then loaded with from_pretrained. The",
+        "// reference is teacher-forced on its own greedy tokens in four prefill plans; the",
+        "// one-call log-probabilities are stored, and the other plans agree with them",
+        "// within a tenth of the tolerance.",
+        "//",
+        "// A seed is kept only if every discrete choice (indexer top-k, MoE top-k, argmax)",
+        f"// has a margin of at least {MARGIN_FACTOR:g} x the largest change of that score over",
+        "// the other prefill plans, a float64 run, and float64 linear outputs moved by +-2",
+        "// float32 ulps (two noise seeds). The tolerance is "
+        f"{TOLERANCE_FACTOR:g} x the largest",
+        "// log-probability change over those runs.",
         f"// Weight seed {seed}; smallest margins: indexer {margin['indexer']:.3g}, "
         f"MoE {margin['moe']:.3g}, argmax {margin['argmax']:.3g}.",
-        f"// Tolerance {tolerance:g} = {TOLERANCE_FACTOR:g} x the largest log-probability change "
-        f"({report['max_logprob_change']:.3g})",
-        "// over the prefill plans, float64 and +-2 ulp noise on every linear output.",
+        f"// Tolerance {tolerance:g} = {TOLERANCE_FACTOR:g} x {report['max_logprob_change']:.3g}.",
         "",
         "enum GLM5NextReferenceValues {",
         "    /// config.json as `save_pretrained` writes it.",

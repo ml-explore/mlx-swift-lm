@@ -76,7 +76,7 @@ final class GLM5NextTests: XCTestCase {
     /// entries on its global default stream, not on `withDefaultDevice`'s
     /// task-local device, so a function compiled by an earlier GPU test would
     /// replay its GPU trace here.
-    private func onCPU<R>(_ body: () throws -> R) rethrows -> R {
+    static func onCPU<R>(_ body: () throws -> R) rethrows -> R {
         compile(enable: false)
         defer { compile(enable: true) }
         return try Device.withDefaultDevice(.cpu) { try body() }
@@ -185,7 +185,7 @@ final class GLM5NextTests: XCTestCase {
     /// on an M5 GPU a multi-row float32 matmul differs from the one-row path by
     /// about 1e-3 relative, enough to flip a close selection.
     func testIncrementalDecodeMatchesPrefill() throws {
-        try onCPU {
+        try Self.onCPU {
             let model = GLM5NextTextModel(try configuration(indexTopk: 8, indexHeads: 8))
             randomize(model)
             let input = tokens(40)
@@ -520,80 +520,5 @@ final class GLM5NextTests: XCTestCase {
 
         let input = tokens(12)
         XCTAssertEqual(maxAbsDifference(source(input, cache: nil), target(input, cache: nil)), 0)
-    }
-
-    // MARK: - Local checkpoint
-
-    /// Greedy parity with a reference run of the Python model (mlx-vlm
-    /// `glm5_next`) on a local checkpoint. Skipped unless
-    /// `MLX_GLM5NEXT_MODEL` names the checkpoint directory and
-    /// `MLX_GLM5NEXT_ORACLES` lists reference JSON files (comma-separated),
-    /// each `{"prompt": [token ids], "greedy": [token ids]}` from greedy
-    /// decoding at batch 1. Prints decode tokens/s and peak memory.
-    func testLocalCheckpointGreedyParity() async throws {
-        let environment = ProcessInfo.processInfo.environment
-        guard let path = environment["MLX_GLM5NEXT_MODEL"], !path.isEmpty,
-            let oracles = environment["MLX_GLM5NEXT_ORACLES"], !oracles.isEmpty
-        else {
-            throw XCTSkip("set MLX_GLM5NEXT_MODEL and MLX_GLM5NEXT_ORACLES to run")
-        }
-
-        let directory = URL(fileURLWithPath: path)
-        let data = try Data(contentsOf: directory.appendingPathComponent("config.json"))
-        let base = try JSONDecoder().decode(BaseConfiguration.self, from: data)
-        let config = try JSONDecoder().decode(GLM5NextConfiguration.self, from: data)
-        try config.validateModelConfiguration()
-        let model: any LanguageModel =
-            base.modelType == "glm5_next" ? GLM5NextModel(config) : GLM5NextTextModel(config)
-        try await loadWeights(
-            modelDirectory: directory, model: model,
-            perLayerQuantization: base.perLayerQuantization)
-
-        // Keep the weights wired, as a caller of `generate` does with a wired
-        // memory ticket. Unwired, a checkpoint this size is paged on every
-        // decode step and decodes at about 1% of the wired rate.
-        let weightBytes = model.parameters().flattened().reduce(0) { $0 + $1.1.nbytes }
-        let ticket = MLX.WiredSumPolicy().ticket(size: weightBytes, kind: .active)
-        try await ticket.withWiredLimit {
-            try runOracles(oracles, model: model)
-        }
-    }
-
-    private func runOracles(_ oracles: String, model: any LanguageModel) throws {
-        struct Oracle: Decodable {
-            let prompt: [Int]
-            let greedy: [Int]
-        }
-        for file in oracles.split(separator: ",") {
-            let oracle = try JSONDecoder().decode(
-                Oracle.self, from: Data(contentsOf: URL(fileURLWithPath: String(file))))
-            Memory.clearCache()
-            Memory.peakMemory = 0
-
-            var iterator = try TokenIterator(
-                input: LMInput(text: .init(tokens: MLXArray(oracle.prompt.map { Int32($0) }))),
-                model: model,
-                parameters: GenerateParameters(
-                    maxTokens: oracle.greedy.count, temperature: 0,
-                    prefill: .init(stepSize: 2048)))
-            var generated = [Int]()
-            var decodeStart = Date()
-            while let token = iterator.next() {
-                generated.append(token)
-                if generated.count == 1 {
-                    decodeStart = Date()
-                }
-            }
-            let decodeSeconds = Date().timeIntervalSince(decodeStart)
-
-            let matching = zip(generated, oracle.greedy).prefix { $0.0 == $0.1 }.count
-            print(
-                "glm5_next parity \(file): prompt=\(oracle.prompt.count)",
-                "matching=\(matching)/\(oracle.greedy.count)",
-                "prefill_s=\(String(format: "%.2f", iterator.promptPrefillTime))",
-                "decode_tps=\(String(format: "%.2f", Double(generated.count - 1) / decodeSeconds))",
-                "peak_gb=\(String(format: "%.1f", Double(Memory.peakMemory) / 1e9))")
-            XCTAssertEqual(generated, oracle.greedy, "first divergence at token \(matching)")
-        }
     }
 }

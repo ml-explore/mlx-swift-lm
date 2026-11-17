@@ -9,6 +9,8 @@ import XCTest
 /// checkpoint described in `tools/glm5-next-reference.py`.
 final class GLM5NextReferenceTests: XCTestCase {
 
+    // The hash gives untied, reproducible weights without a checked-in file; norm weights are
+    // offset to 1 and hyper-connection scales to 0.5 so they start near their trained values.
     /// The generator's `weight_values`: a hash of the flat element index, the tensor's index
     /// in sorted checkpoint-name order and the seed, then one float32 division.
     private func weightValues(_ name: String, index: Int, shape: [Int], seed: Int) -> MLXArray {
@@ -112,11 +114,8 @@ final class GLM5NextReferenceTests: XCTestCase {
         ]
         let tolerance = GLM5NextReferenceValues.tolerance
 
-        // CPU pins IEEE FP32. MLX's compile cache matches entries on its global default
-        // stream, not on `withDefaultDevice`'s task-local device, so compilation is off.
-        compile(enable: false)
-        defer { compile(enable: true) }
-        try Device.withDefaultDevice(.cpu) {
+        // CPU pins IEEE FP32.
+        try GLM5NextTests.onCPU {
             var worst: Float = 0
             for (name, prefillEnds) in plans {
                 let rows = try teacherForced(model, tokens: tokens, prefillEnds: prefillEnds)
