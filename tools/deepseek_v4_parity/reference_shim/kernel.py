@@ -2,13 +2,13 @@
 # `inference/model.py` imports from its `inference/kernel.py` (tilelang, CUDA), so that the
 # unmodified model.py runs on a CPU. Written from DeepSeek's kernel.py (MIT License,
 # Copyright (c) 2023 DeepSeek). Activation quantization is left out (identity): act_quant and
-# fp4_act_quant in place return their input unchanged, and the FP8/FP4 GEMMs, which the fixture
-# never reaches (its Linear weights are float), are not provided.
+# fp4_act_quant in place return their input unchanged, and the FP8/FP4 GEMMs, which the tiny
+# model never reaches (its Linear weights are float), are not provided.
 #
 # Differences from kernel.py besides the identity quantization: float32 throughout (the kernels
 # keep bfloat16 inputs and outputs, and sparse_attn rounds its probabilities to bfloat16 before
-# the value product), and PERTURB, a hook the fixture generator uses to replace the products
-# inside sparse_attn by re-rounded float64 products when it measures selection margins.
+# the value product), and PERTURB, a hook the reference-value generator uses to replace the
+# products inside sparse_attn by re-rounded float64 products when it measures selection margins.
 
 import torch
 
