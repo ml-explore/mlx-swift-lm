@@ -132,8 +132,9 @@ func ricursiveValueInput(_ x: MLXArray, residual: MLXArray, lambda: MLXArray) ->
     return (start + blend * (x.asType(.float32) - start)).asType(x.dtype)
 }
 
-/// SiLU in float32, rounded once to the input's precision, as PyTorch's `F.silu` does on a
-/// reduced-precision tensor. MLXNN's `silu` on bfloat16 rounds the sigmoid before the product.
+/// SiLU in the activation dtype. PyTorch's `F.silu` on bfloat16 computes in float32 and rounds
+/// once; MLXNN's `silu` rounds the sigmoid first, so about a quarter of bfloat16 outputs differ.
+/// SiLU in float32 matched PyTorch but cost about 2.5% decode and 0.19 GB peak at full size.
 func ricursiveSiLU(_ x: MLXArray) -> MLXArray {
     silu(x)
 }

@@ -350,18 +350,6 @@ final class RicursiveTests: XCTestCase {
         }
     }
 
-    /// `F.silu` on bfloat16 computes in float32 and rounds once. The expected values are
-    /// computed in double on the host.
-    func testSiLURoundsOnce() throws {
-        try Device.withDefaultDevice(.cpu) {
-            let gate = (8 * MLXRandom.normal([4, 256], key: MLXRandom.key(6))).asType(.bfloat16)
-            let expected = values(gate).map { bfloat16($0 / (1 + Foundation.exp(-$0))) }
-            let actual = ricursiveSiLU(gate)
-            XCTAssertEqual(actual.dtype, .bfloat16)
-            assertMatches(actual, expected)
-        }
-    }
-
     private func values(_ array: MLXArray) -> [Double] {
         array.asType(.float32).asArray(Float.self).map(Double.init)
     }
