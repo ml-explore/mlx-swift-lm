@@ -1,26 +1,32 @@
-"""Writes Tests/MLXLMTests/Resources/glm5_next_tiny (config.json, model.safetensors, oracle.json)
-from the model author's own implementation, `transformers.models.glm5_next` (transformers
-5.22.2, torch CPU). Nothing in transformers is copied or modified.
+#!/usr/bin/env python3
+"""Generate Tests/MLXLMTests/GLM5NextReferenceValues.swift from the model author's own
+implementation, `transformers.models.glm5_next` (transformers 5.22.2, torch CPU float32).
+Nothing in transformers is copied or modified.
 
-The fixture is a 5-layer GLM-5-Next with seeded random weights: layer types linear (KDA),
-indexed, indexed with a shared indexer, linear, indexed; dense feed-forward in the first two
-layers and MoE in the last three; hyper-connections everywhere. The shared-indexer layer follows
-an indexed layer directly: transformers rejects a shared layer after a linear one (its decoder
-loop hands the next layer `None` after every linear layer). With `index_kpool` 4 and
-`index_topk` 8 the indexer keeps 2 pools plus the open tail, so the 32-token prompt (8 pools)
-makes its selection a strict subset.
+Requires torch, transformers==5.22.2, safetensors and numpy.
+Run from the repository root: python -B tools/glm5-next-reference.py
 
-config.json and model.safetensors are what `Glm5NextForConditionalGeneration.save_pretrained`
-writes (checkpoint layout: `hc_attn_*`, per-expert projections, `q/k/v_conv1d`, top-level
-forget-gate parameters, `indexed_attention` layer type, a tiny vision tower).
+The tiny model is a 5-layer GLM-5-Next: layer types linear (KDA), indexed, indexed with a
+shared indexer, linear, indexed; dense feed-forward in the first two layers and MoE in the last
+three; hyper-connections everywhere. The shared-indexer layer follows an indexed layer directly:
+transformers rejects a shared layer after a linear one (its decoder loop hands the next layer
+`None` after every linear layer). With `index_kpool` 4 and `index_topk` 8 the indexer keeps 2
+pools plus the open tail, so the 32-token prompt (8 pools) makes its selection a strict subset.
 
-The oracle is the library model run in float32 on the CPU (`attn_implementation="sdpa"`) along
-its own greedy tokens, in four prefill plans: one call, chunks ending at 5/13/22/32, chunks of 7,
-and one token at a time; each continues with one-token decode steps fed the greedy tokens. Every
-plan's log-probabilities are stored as the library produced them. Token by token is an equality
-case: with exact ties removed by the margin rule below the library's decode path selects the
-same pools as its one-shot path (the earlier mismatch was ReLU-clamped indexer scores tied at
-exactly 0, where `topk` breaks ties differently for different pool counts).
+Weights. The checkpoint layout is the one `Glm5NextForConditionalGeneration.save_pretrained`
+writes (`hc_attn_*`, per-expert projections, `q/k/v_conv1d`, top-level forget-gate parameters, a
+tiny vision tower), and its config.json names the sparse layers `indexed_attention`. Every
+checkpoint tensor is filled by `weight_values` below from its index in sorted checkpoint-name
+order, its flat element index and the weight seed, with integer arithmetic and one float32
+division, so GLM5NextReferenceTests builds the same values exactly. The tensors are written as
+model.safetensors next to that config.json and loaded with `from_pretrained`, and the Swift test
+loads the same files through its own loading path.
+
+The reference is the library model run in float32 on the CPU (`attn_implementation="sdpa"`)
+along its own greedy tokens, in four prefill plans: one call, chunks ending at 5/13/22/32, chunks
+of 7, and one token at a time; each continues with one-token decode steps fed the greedy tokens.
+The one-call log-probabilities are stored; the other plans differ from them by at most a tenth of
+the tolerance (printed as `self_consistency_max_abs_logprob_vs_one_call`).
 
 Weight seed rule: a seed is kept only if every discrete choice (indexer top-k per query and
 layer, MoE top-k per token and layer, the argmax at every position) has a margin at least
@@ -30,14 +36,10 @@ MARGIN_FACTOR times the largest change of that kind of score seen when the same 
 -2..2 ulps (two noise seeds, one-call and token-by-token plans). The tolerance is
 TOLERANCE_FACTOR times the largest log-probability change seen in those runs.
 
-Monkeypatches, all observation or perturbation, none in the oracle runs' arithmetic:
+Monkeypatches, all observation or perturbation, none in the reference runs' arithmetic:
   1. `torch.topk` and `torch.Tensor.topk` are wrapped to record the scores and picks of the
      indexer and router calls (values untouched).
   2. Perturbation runs only: `torch.nn.functional.linear` as described in (3) above.
-
-Usage, from the repository root, with a python that has transformers 5.22.2 and torch:
-
-    python -B tools/glm5_next_parity/make_tiny_fixture.py
 """
 
 import argparse
@@ -45,18 +47,18 @@ import contextlib
 import json
 import math
 import os
-import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 import numpy as np
 import torch
 import transformers
+from safetensors import safe_open
+from safetensors.numpy import save_file
 from transformers import Glm5NextConfig, Glm5NextForConditionalGeneration
-from transformers.models.glm5_next import modeling_glm5_next as glm
 
-TOOLS = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(TOOLS, "..", "..", "Tests", "MLXLMTests", "Resources", "glm5_next_tiny")
+OUTPUT = Path(__file__).resolve().parents[1] / "Tests/MLXLMTests/GLM5NextReferenceValues.swift"
 TRANSFORMERS_VERSION = "5.22.2"
 
 TEXT = {
@@ -105,25 +107,57 @@ NOISE_SEEDS = (1, 2)
 
 
 # ------------------------------------------------------------------ model and weights
-def build(seed):
+def weight_values(name, index, shape, seed):
+    """Checkpoint tensor `index` (in sorted name order): a hash of the flat element index, the
+    tensor index and the seed, mod 65521, centred, then one float32 division. Norm weights are
+    1 +- 1/6, hyper-connection scales 0.5 +- 1/6, correction biases +- 1/6, the rest +- 1/4."""
+    j = np.arange(int(np.prod(shape)), dtype=np.int64)
+    h = (j * 7919 + index * 104729 + seed * 1299709 + 12345) % 65521
+    h = (h * h + 7) % 65521
+    h = (h * h + 13) % 65521
+    numerator = h - 32760
+    if name.endswith("norm.weight"):
+        denominator = 196608
+        numerator = numerator + denominator
+    elif name.endswith(("hc_attn_scale", "hc_ffn_scale")):
+        denominator = 196608
+        numerator = numerator + denominator // 2
+    elif name.endswith("e_score_correction_bias"):
+        denominator = 196608
+    else:
+        denominator = 131072
+    return (numerator.astype(np.float32) / np.float32(denominator)).reshape(shape)
+
+
+def checkpoint_layout():
+    """config.json text and sorted (name, shape) of what `save_pretrained` writes."""
     config = Glm5NextConfig(text_config=dict(TEXT), vision_config=dict(VISION))
-    config._attn_implementation = "sdpa"
-    torch.manual_seed(0)
-    model = Glm5NextForConditionalGeneration(config).float().eval()
-    g = torch.Generator().manual_seed(seed)
-    with torch.no_grad():
-        for name, value in sorted(model.state_dict().items()):
-            noise = torch.randn(value.shape, generator=g)
-            if name.endswith("norm.weight"):
-                value.copy_(1 + 0.1 * noise)
-            elif name.endswith("_hc.scale"):
-                value.copy_(0.5 + 0.1 * noise)
-            elif name.endswith("e_score_correction_bias"):
-                value.copy_(0.1 * noise)
-            else:
-                value.copy_(0.15 * noise)
-    prompt = torch.randint(0, TEXT["vocab_size"], (PROMPT_LEN,), generator=g).tolist()
-    return model, prompt
+    model = Glm5NextForConditionalGeneration(config).float()
+    with tempfile.TemporaryDirectory() as tmp:
+        model.save_pretrained(tmp, safe_serialization=True)
+        with safe_open(os.path.join(tmp, "model.safetensors"), "np") as f:
+            layout = [(name, list(f.get_slice(name).get_shape())) for name in sorted(f.keys())]
+        config_text = Path(tmp, "config.json").read_text()
+    return config_text, layout
+
+
+def checkpoint_weights(layout, seed):
+    return {name: weight_values(name, index, shape, seed)
+            for index, (name, shape) in enumerate(layout)}
+
+
+def build(config_text, layout, seed):
+    weights = checkpoint_weights(layout, seed)
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "config.json").write_text(config_text)
+        save_file(weights, os.path.join(tmp, "model.safetensors"), metadata={"format": "pt"})
+        model, info = Glm5NextForConditionalGeneration.from_pretrained(
+            tmp, dtype=torch.float32, attn_implementation="sdpa", output_loading_info=True)
+    if any(info.get(key) for key in ("missing_keys", "unexpected_keys", "mismatched_keys")):
+        sys.exit(f"checkpoint does not load cleanly: {info}")
+    model.eval()
+    prompt = np.random.default_rng(seed).integers(0, TEXT["vocab_size"], PROMPT_LEN).tolist()
+    return model, prompt, weights
 
 
 # ------------------------------------------------------------------ observation (patch 1)
@@ -137,7 +171,7 @@ def _record(scores, k, indices):
         return  # the group pre-selection (one group)
     if scores.shape[-1] == 0:
         return  # no complete pool yet
-    s =scores.detach().double().reshape(-1, scores.shape[-1]).numpy()
+    s = scores.detach().double().reshape(-1, scores.shape[-1]).numpy()
     picks = indices.detach().reshape(-1, indices.shape[-1]).numpy()
     for i, row in enumerate(s):
         valid = row > -1e30
@@ -209,7 +243,7 @@ def noise(seed):
 
 # ------------------------------------------------------------------ runs
 @torch.no_grad()
-def run(model, tokens, plan, dtype=torch.float32):
+def run(model, tokens, plan):
     """Prefill tokens[:PROMPT_LEN] in the plan's chunks, then one-token steps over the rest.
     Returns float32 log-probs per position [len(tokens), V] and the recorded selections."""
     REC.update(on=True, rows={}, ctx=None)
@@ -262,8 +296,8 @@ def margins(logprobs, rows):
     return out
 
 
-def evaluate(seed):
-    model, prompt = build(seed)
+def evaluate(config_text, layout, seed):
+    model, prompt, weights = build(config_text, layout, seed)
     install_context_hooks(model)
     tokens_greedy = greedy(model, prompt)
     tokens = prompt + tokens_greedy[:-1]
@@ -325,22 +359,43 @@ def evaluate(seed):
     report["max_logprob_change_with_every_pool_selected"] = float(np.abs(dense_lp - base_lp).max())
     report["self_consistency_max_abs_logprob_vs_one_call"] = {
         name: float(np.abs(lp - base_lp).max()) for name, (lp, _) in runs.items()}
-    return (model, prompt, tokens_greedy, runs), report
+
+    # The library holds exactly the formula's values: saving it again gives the same tensors.
+    with tempfile.TemporaryDirectory() as tmp:
+        model.save_pretrained(tmp, safe_serialization=True)
+        with safe_open(os.path.join(tmp, "model.safetensors"), "np") as f:
+            assert sorted(f.keys()) == sorted(weights)
+            for name, value in weights.items():
+                assert np.array_equal(f.get_tensor(name), value), name
+    return (prompt, tokens_greedy, base_lp), report
+
+
+def packed(items, indent="        ", width=100):
+    """Comma-terminated items packed into lines of at most `width` columns."""
+    lines, line = [], indent
+    for item in items:
+        if line != indent and len(line) + len(item) + 2 > width:
+            lines.append(line.rstrip())
+            line = indent
+        line += item + ", "
+    return lines + [line.rstrip()]
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--first-seed", type=int, default=FIRST_SEED)
     parser.add_argument("--max-seeds", type=int, default=MAX_SEEDS)
-    parser.add_argument("--out", default=OUT)
+    parser.add_argument("--output", type=Path, default=OUTPUT)
     opts = parser.parse_args()
     if transformers.__version__ != TRANSFORMERS_VERSION:
         sys.exit(f"transformers {TRANSFORMERS_VERSION} required, found {transformers.__version__}")
     torch.set_num_threads(1)
+    torch.manual_seed(0)
 
+    config_text, layout = checkpoint_layout()
     rejected = []
     for seed in range(opts.first_seed, opts.first_seed + opts.max_seeds):
-        result, report = evaluate(seed)
+        result, report = evaluate(config_text, layout, seed)
         reason = report if isinstance(report, str) else report.get("reason")
         print(f"seed {seed}: {'accepted' if result else reason}", flush=True)
         if result:
@@ -348,37 +403,53 @@ def main():
         rejected.append(f"{seed}: {reason}")
     else:
         sys.exit(f"no seed in {opts.max_seeds} met the margin requirements")
-    model, prompt, tokens_greedy, runs = result
-
-    os.makedirs(opts.out, exist_ok=True)
-    with tempfile.TemporaryDirectory() as tmp:
-        model.save_pretrained(tmp, safe_serialization=True)
-        for name in ("config.json", "model.safetensors"):
-            shutil.copyfile(os.path.join(tmp, name), os.path.join(opts.out, name))
+    prompt, tokens_greedy, logprobs = result
 
     tolerance = float(f"{max(1e-5, TOLERANCE_FACTOR * report['max_logprob_change']):.2g}")
-    provenance = {
-        "generator": "tools/glm5_next_parity/make_tiny_fixture.py",
-        "reference": f"transformers {transformers.__version__} "
-                     "Glm5NextForConditionalGeneration (sdpa), unmodified",
-        "torch": torch.__version__,
-        "device": "cpu",
-        "mode": "float32 parameters and activations",
-        "weight_seed": seed,
-        "seeds_rejected": rejected,
-        "margin_factor": MARGIN_FACTOR,
-        "margin_floor": MARGIN_FLOOR,
-        "tolerance_factor": TOLERANCE_FACTOR,
-        **report,
-    }
-    cases = [{"name": name, "prefill_ends": PLANS[name],
-              "logprobs": [[float(f"{v:.9g}") for v in row] for row in runs[name][0]]}
-             for name in PLANS]
-    with open(os.path.join(opts.out, "oracle.json"), "w") as f:
-        json.dump({"compute_dtype": "float32", "tolerance": tolerance, "prompt": prompt,
-                   "greedy": tokens_greedy, "provenance": provenance, "cases": cases},
-                  f, separators=(",", ":"))
-    print(json.dumps(dict(provenance, tolerance=tolerance), indent=1))
+    consistency = max(report["self_consistency_max_abs_logprob_vs_one_call"].values())
+    assert consistency <= tolerance / TOLERANCE_FACTOR, (consistency, tolerance)
+
+    margin = report["min_margin"]
+    lines = [
+        "// Generated by tools/glm5-next-reference.py; do not edit values by hand.",
+        f"// transformers {transformers.__version__} Glm5NextForConditionalGeneration (sdpa), "
+        f"unmodified; PyTorch {torch.__version__} CPU FP32.",
+        f"// Weight seed {seed}; smallest margins: indexer {margin['indexer']:.3g}, "
+        f"MoE {margin['moe']:.3g}, argmax {margin['argmax']:.3g}.",
+        f"// Tolerance {tolerance:g} = {TOLERANCE_FACTOR:g} x the largest log-probability change "
+        f"({report['max_logprob_change']:.3g})",
+        "// over the prefill plans, float64 and +-2 ulp noise on every linear output.",
+        "",
+        "enum GLM5NextReferenceValues {",
+        "    /// config.json as `save_pretrained` writes it.",
+        '    static let configuration = """',
+        *["        " + line for line in config_text.rstrip("\n").splitlines()],
+        '        """',
+        "",
+        "    /// Checkpoint tensor names and shapes as `save_pretrained` writes them, sorted.",
+        "    static let checkpointTensors: [(String, [Int])] = [",
+        *[f'        ("{name}", {shape}),' for name, shape in layout],
+        "    ]",
+        "",
+        f"    static let weightSeed = {seed}",
+        f"    static let tolerance: Float = {tolerance!r}",
+        "    static let prompt = [",
+        *packed(str(t) for t in prompt),
+        "    ]",
+        f"    static let greedy = {tokens_greedy}",
+        "",
+        "    /// One-call log-softmax at every position of `prompt + greedy.dropLast()`,",
+        f"    /// [{logprobs.shape[0]}, {logprobs.shape[1]}] row-major.",
+        "    static let logprobs: [Float] = [",
+        *packed(f"{float(v):.9g}" for v in logprobs.reshape(-1)),
+        "    ]",
+        "}",
+        "",
+    ]
+    opts.output.write_text("\n".join(lines))
+    print(json.dumps(dict(report, weight_seed=seed, seeds_rejected=rejected, tolerance=tolerance,
+                          torch=torch.__version__), indent=1))
+    print(f"Wrote {opts.output} ({len(lines)} lines)")
 
 
 if __name__ == "__main__":
