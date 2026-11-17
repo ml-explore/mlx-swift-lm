@@ -38,7 +38,7 @@ MLXLMCommon     - Core infra (ModelContainer, ChatSession, Evaluate, KVCache, wi
 MLXLLM          - Text-only LLM support (Llama, Qwen, Gemma, Phi, DeepSeek, etc.)
 MLXVLM          - Vision-Language Models (Qwen-VL, PaliGemma, Gemma3, etc.)
 MLXEmbedders    - Embedding models and pooling utilities
-MLXDecisions    - Decision models and their API (LiquidAI d1-3B)
+MLXDecisions    - Decision models and their API (LiquidAI d1-3B, d1-omni-600M)
 ```
 
 ## 2. Key File Reference

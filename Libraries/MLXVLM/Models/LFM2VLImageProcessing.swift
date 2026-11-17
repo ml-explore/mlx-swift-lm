@@ -10,8 +10,8 @@ import MLXLMCommon
 
 /// LFM2-VL image processor settings, with the defaults of transformers' `Lfm2VlImageProcessor`.
 package struct LFM2VLImageSettings: Equatable, Sendable {
-    var tileSize = 512
-    var encoderPatchSize = 16
+    package var tileSize = 512
+    package var encoderPatchSize = 16
     var downsampleFactor = 2
     var minImageTokens = 64
     var maxImageTokens = 256
@@ -20,11 +20,11 @@ package struct LFM2VLImageSettings: Equatable, Sendable {
     var minTiles = 2
     var maxTiles = 10
     var useThumbnail = true
-    var resample = ResampleFilter.bilinear
-    var imageMean: [Double] = [0.5, 0.5, 0.5]
-    var imageStd: [Double] = [0.5, 0.5, 0.5]
+    package var resample = ResampleFilter.bilinear
+    package var imageMean: [Double] = [0.5, 0.5, 0.5]
+    package var imageStd: [Double] = [0.5, 0.5, 0.5]
     var rescaleFactor = 1.0 / 255.0
-    var doRescale = true
+    package var doRescale = true
     var doNormalize = true
     var doPad = true
 
@@ -35,7 +35,7 @@ package struct LFM2VLImageSettings: Equatable, Sendable {
 
     /// Rows per vision-tower view. transformers derives it and ignores a configured
     /// `max_num_patches`.
-    var maxNumPatches: Int {
+    package var maxNumPatches: Int {
         let side = tileSize / encoderPatchSize
         let tilePatches = doImageSplitting ? side * side : 0
         return max(maxImageTokens * downsampleFactor * downsampleFactor, tilePatches)
@@ -44,7 +44,7 @@ package struct LFM2VLImageSettings: Equatable, Sendable {
     /// Normalised value of every byte per channel in float32, as transformers'
     /// `rescale_and_normalize` computes it: `table[channel * 256 + byte]`. Not
     /// `MediaProcessing.normalize`, a Core Image filter that is not bit-exact.
-    func normalizationTable() -> [Float] {
+    package func normalizationTable() -> [Float] {
         var table = [Float](repeating: 0, count: 3 * 256)
         for c in 0 ..< 3 {
             var mean = Float(imageMean.count == 1 ? imageMean[0] : imageMean[c])
@@ -271,7 +271,7 @@ extension LFM2VLImageSettings: Codable {
 // MARK: - Layout
 
 /// LFM2-VL smart resize, tile grid and thumbnail, as `resize_and_split` plans them.
-struct LFM2VLImageLayout: Equatable, Sendable {
+package struct LFM2VLImageLayout: Equatable, Sendable {
     var tiled: Bool
     /// (1, 1) when not tiled.
     var gridColumns: Int
@@ -283,7 +283,9 @@ struct LFM2VLImageLayout: Equatable, Sendable {
     /// `use_thumbnail` and more than one tile.
     var includesThumbnail: Bool
 
-    static func plan(width: Int, height: Int, settings: LFM2VLImageSettings) throws -> Self {
+    package static func plan(width: Int, height: Int, settings: LFM2VLImageSettings) throws
+        -> Self
+    {
         guard width >= 1, height >= 1 else {
             throw VLMError.imageProcessingFailure("empty image (\(width)x\(height))")
         }
@@ -310,7 +312,7 @@ struct LFM2VLImageLayout: Equatable, Sendable {
     }
 
     /// The vision-tower views in transformers' order: tiles row-major, then the thumbnail.
-    func crops<Image>(
+    package func crops<Image>(
         of image: Image, tileSize: Int, resize: (Image, _ width: Int, _ height: Int) -> RGB8Image
     ) -> [RGB8Image] {
         var crops: [RGB8Image] = []

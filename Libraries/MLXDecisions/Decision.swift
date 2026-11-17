@@ -365,6 +365,10 @@ public enum DecisionError: LocalizedError, Sendable, Equatable {
     case duplicateLabel(name: String, label: String)
     /// The request has no state or images.
     case missingState
+    /// The media take too many of the model's positions.
+    case mediaTooLong(positions: Int, maximum: Int)
+    /// The options of a question do not fit in the model's context.
+    case optionsDoNotFit(name: String)
     /// The tokenizer has no distinct single-token code left for every option.
     case noSingleTokenAlias(optionCount: Int)
     /// The tokenizer has no token the model needs, such as an answer or an image marker.
@@ -401,6 +405,10 @@ public enum DecisionError: LocalizedError, Sendable, Equatable {
             "Decision labels must be unique: \(label) (question \(name))"
         case .missingState:
             "A state is required unless images are given"
+        case .mediaTooLong(let positions, let maximum):
+            "The media take \(positions) of the \(maximum) positions; send fewer images"
+        case .optionsDoNotFit(let name):
+            "The options do not fit in the context (question \(name))"
         case .noSingleTokenAlias(let count):
             "No single-token alias left for \(count) options"
         case .missingToken(let message):

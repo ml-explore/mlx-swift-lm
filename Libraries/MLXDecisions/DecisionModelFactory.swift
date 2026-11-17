@@ -93,6 +93,10 @@ public final class DecisionModelFactory: Sendable {
                 resolved: resolved, modelID: modelID, tokenizerLoader: tokenizerLoader)
             return DecisionModelContainer(model: model, tokenizer: tokenizer)
                 .decisionContainer(modelID: modelID)
+        case .d1Omni:
+            return try await loadDecisionModel(
+                resolved: resolved, modelID: modelID, using: tokenizerLoader
+            ) { try D1Omni(configurationData: $0) }
         case nil:
             throw DecisionError.unsupportedModel(descriptor.unsupportedMessage)
         }
@@ -115,6 +119,45 @@ public final class DecisionModelFactory: Sendable {
         return (D1(base, imageSettings: processor.imageSettings), context.tokenizer)
     }
 
+    /// Load a decision model that has no generative counterpart: build it from `config.json`
+    /// with `create`, load its weights and tokenizer, and wrap it.
+    func loadDecisionModel(
+        resolved: ResolvedModelConfiguration,
+        modelID: String,
+        using tokenizerLoader: any TokenizerLoader,
+        create: (Data) throws -> any DecisionModel
+    ) async throws -> DecisionContainer {
+        let modelDirectory = resolved.modelDirectory
+        let configurationURL = modelDirectory.appending(component: "config.json")
+        let configData: Data
+        do {
+            configData = try Data(contentsOf: configurationURL)
+        } catch {
+            throw ModelFactoryError.configurationFileError(
+                configurationURL.lastPathComponent, resolved.name, error)
+        }
+
+        let baseConfig: BaseConfiguration
+        let model: any DecisionModel
+        do {
+            baseConfig = try JSONDecoder.json5().decode(BaseConfiguration.self, from: configData)
+            model = try create(configData)
+        } catch let error as DecodingError {
+            throw ModelFactoryError.configurationDecodingError(
+                configurationURL.lastPathComponent, resolved.name, error)
+        }
+
+        async let tokenizerTask = tokenizerLoader.load(from: resolved.tokenizerDirectory)
+        try await loadWeights(
+            modelDirectory: modelDirectory, model: model,
+            perLayerQuantization: baseConfig.perLayerQuantization,
+            weightFileSelection: resolved.weightFileSelection,
+            excludedComponents: resolved.excludedComponents)
+        let tokenizer = try await tokenizerTask
+        return DecisionModelContainer(model: model, tokenizer: tokenizer)
+            .decisionContainer(modelID: modelID)
+    }
+
     private func loadDescriptor(_ resolved: ResolvedModelConfiguration) throws
         -> DecisionDescriptor
     {
@@ -135,6 +178,8 @@ public final class DecisionModelFactory: Sendable {
 enum DecisionArchitecture: Sendable, Equatable {
     /// LiquidAI d1: LFM2-VL weights with an answer-slot readout.
     case d1
+    /// LiquidAI d1-omni: a bidirectional trunk with a decision head.
+    case d1Omni
 }
 
 /// The `config.json` fields that select a decision architecture.
@@ -147,6 +192,8 @@ struct DecisionDescriptor: Decodable, Sendable {
         switch modelType {
         case "lfm2_vl", "lfm2-vl":
             autoModel?.hasSuffix("D1Model") == true ? .d1 : nil
+        case "d1_omni":
+            .d1Omni
         default:
             nil
         }

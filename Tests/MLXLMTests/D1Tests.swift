@@ -165,11 +165,6 @@ private let route = DecisionQuestion.choice("Route", options: ["A", "B"])
 private let quality = DecisionQuestion.score("Rate", levels: ["low", "mid", "high"])
 private let finished = DecisionQuestion.bool("Finished")
 
-private func maxAbsDifference(_ a: [[Double]], _ b: [[Double]]) -> Double {
-    precondition(a.map(\.count) == b.map(\.count))
-    return zip(a.joined(), b.joined()).map { abs($0 - $1) }.max() ?? 0
-}
-
 private func container(_ model: D1, tokenizer: any Tokenizer) -> DecisionContainer {
     DecisionModelContainer(model: model, tokenizer: tokenizer).decisionContainer(modelID: "test/d1")
 }
@@ -295,7 +290,7 @@ struct D1Tests {
             [[0, 2], [1]], logProbabilities: [0: -3, 2: -1, 1: -2])
         let pooledBool = D1Prompt.readout(
             [[3, 4], [5]], logProbabilities: [3: -4, 4: -0.5, 5: -1.5])
-        #expect(maxAbsDifference([pooledChoice, pooledBool], [expected, expected]) < 1e-12)
+        #expect(maxAbsDiff([pooledChoice, pooledBool], [expected, expected]) < 1e-12)
     }
 
     @Test("Missing answer tokens throw, after every alias is found")
@@ -511,12 +506,12 @@ struct D1Tests {
             let (chunked, _) = try model.probabilities(
                 state: nil, questions: questions, images: images, tokenizer: tokenizer,
                 tokenBudget: 1)
-            #expect(maxAbsDifference(chunked, together) < 1e-5)
+            #expect(maxAbsDiff(chunked, together) < 1e-5)
             for (index, question) in questions.enumerated() {
                 let (alone, aloneRead) = try model.probabilities(
                     state: nil, questions: [question], images: images, tokenizer: tokenizer)
                 #expect(aloneRead == inputs.trunk.count + inputs.branches[index].count)
-                #expect(maxAbsDifference(alone, [together[index]]) < 1e-5)
+                #expect(maxAbsDiff(alone, [together[index]]) < 1e-5)
             }
         }
     }
@@ -798,14 +793,14 @@ struct D1Tests {
             let (chunked, chunkedRead) = try model.probabilities(
                 state: state, questions: questions, tokenizer: tokenizer, tokenBudget: 1)
             #expect(chunkedRead == read)
-            #expect(maxAbsDifference(chunked, together) < 1e-5)
+            #expect(maxAbsDiff(chunked, together) < 1e-5)
 
             for (question, probabilities) in zip(questions, together) {
                 let (alone, aloneRead) = try model.probabilities(
                     state: state, questions: [question], tokenizer: tokenizer)
                 let single = encode(prefix + (try suffix(question)))
                 #expect(aloneRead == single.count)
-                #expect(maxAbsDifference(alone, [probabilities]) < 1e-5)
+                #expect(maxAbsDiff(alone, [probabilities]) < 1e-5)
             }
         }
     }
@@ -831,11 +826,11 @@ struct D1Tests {
             #expect(together.map(\.count) == [2, 2, 2, 3])
             let (reversed, _) = try model.probabilities(
                 state: state, questions: questions.reversed(), tokenizer: tokenizer)
-            #expect(maxAbsDifference(reversed.reversed(), together) < 1e-5)
+            #expect(maxAbsDiff(reversed.reversed(), together) < 1e-5)
             for (question, probabilities) in zip(questions, together) {
                 let (alone, _) = try model.probabilities(
                     state: state, questions: [question], tokenizer: tokenizer)
-                #expect(maxAbsDifference(alone, [probabilities]) < 1e-5)
+                #expect(maxAbsDiff(alone, [probabilities]) < 1e-5)
             }
         }
     }
@@ -1341,7 +1336,7 @@ struct D1ParityTests {
             let expected = zip(questions, c.probabilities).map { question, p in
                 question.kind == .bool ? Array(p.reversed()) : p
             }
-            let difference = maxAbsDifference(output.probabilities, expected)
+            let difference = maxAbsDiff(output.probabilities, expected)
             print("d1-3B \(c.tag): max |dp| \(difference)")
             #expect(difference <= c.tolerance, "\(c.tag)")
             #expect(output.inputTokens == c.inputTokens, "\(c.tag)")

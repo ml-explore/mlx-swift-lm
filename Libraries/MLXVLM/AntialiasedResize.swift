@@ -17,7 +17,7 @@ import MLX
 
 /// The `PIL.Image.Resampling` ids that torchvision's antialiased resize supports, as image
 /// processor configs store them in `resample`.
-enum ResampleFilter: Int, Sendable, CaseIterable {
+package enum ResampleFilter: Int, Sendable, CaseIterable {
     case bilinear = 2
     case bicubic = 3
 

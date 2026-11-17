@@ -246,3 +246,58 @@ struct Siglip2NaFlexTests {
         }
     }
 }
+
+// MARK: - Real-weight parity
+
+/// The d1-omni-600M tower against mlx-vlm 370f4ccf on mlx-vlm's own pixels for `cats.jpg`, in
+/// float32. Needs `MLX_D1_OMNI_MODEL` and `MLX_D1_FIXTURES` (see README.md).
+@Suite(
+    .serialized,
+    .enabled(if: D1Fixtures.omniModel != nil && D1Fixtures.directory != nil))
+struct Siglip2NaFlexParityTests {
+
+    @Test("d1-omni tower matches vision.tower_out, masked and cut to the patches")
+    func omniTower() throws {
+        struct Config: Decodable {
+            let visionConfig: LFM2VLConfiguration.VisionConfiguration
+            enum CodingKeys: String, CodingKey { case visionConfig = "vision_config" }
+        }
+        let directory = try #require(D1Fixtures.omniModel)
+        let config = try JSONDecoder().decode(
+            Config.self, from: Data(contentsOf: directory.appending(component: "config.json")))
+        let tower = Siglip2NaFlex.VisionModel(
+            Siglip2NaFlex.Configuration(config.visionConfig, visionFeatureLayer: -1))
+
+        let prefix = "vision.tower.vision_model."
+        var weights = [String: MLXArray]()
+        for (key, value) in try loadArrays(url: directory.appending(component: "model.safetensors"))
+        where key.hasPrefix(prefix) && !key.contains("position_ids") {
+            weights[String(key.dropFirst(prefix.count))] = value
+        }
+        try tower.update(parameters: ModuleParameters.unflattened(weights), verify: [.all])
+
+        let fixtures = try loadArrays(
+            url: try D1Fixtures.url("d1-omni-600M-float32-tower.safetensors"))
+        let flat = try #require(fixtures["vision.spatial_shapes"]).asArray(Int32.self)
+        let shapes = stride(from: 0, to: flat.count, by: 2).map {
+            (Int(flat[$0]), Int(flat[$0 + 1]))
+        }
+        let pixels = try #require(fixtures["vision.pixel_values"])
+        let out = tower(
+            pixels, spatialShapes: shapes, mask: fixtures["vision.pixel_attention_mask"])
+        let expected = try #require(fixtures["vision.tower_out"])
+
+        let all = maxAbsDiff(out, expected)
+        // d1-omni runs each view cut to its patches, without the mask.
+        let states = tower.viewStates(pixels, spatialShapes: shapes)
+        var cut: Float = 0
+        for (i, (h, w)) in shapes.enumerated() {
+            cut = max(cut, maxAbsDiff(states[i], expected[i, 0 ..< h * w]))
+        }
+        let scale = abs(expected).max().item(Float.self)
+        print(
+            "d1-omni tower: max |diff| all rows \(all), cut views \(cut), max |ref| \(scale)")
+        #expect(all < 1e-3)
+        #expect(cut < 1e-3)
+    }
+}

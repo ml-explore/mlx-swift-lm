@@ -4,14 +4,17 @@ Python references for the d1 tests in Tests/MLXLMTests.
 
 d1-3B's reference is the code in the LiquidAI/d1-3B repository (`modeling_d1.py`, loaded
 with `trust_remote_code`). It prepares images with Pillow and transformers'
-`Lfm2VlProcessor`, and needs transformers 5.19 or later, torch, torchvision, Pillow,
-numpy and huggingface_hub.
+`Lfm2VlProcessor`, and needs transformers 5.19 or later, torch and torchvision.
+d1-omni-600M's reference is mlx-vlm's `mlx_vlm.models.d1_omni` (merged at 370f4ccf). Both
+need Pillow, numpy and huggingface_hub.
 
-    python tools/d1_fixtures.py write --out <dir>
-        Writes the directory the gated real-weight suite reads from MLX_D1_FIXTURES. The
+    python tools/d1_fixtures.py write --out <dir> [--only ...]
+        Writes the directory the gated real-weight suites read from MLX_D1_FIXTURES. The
         input cats.jpg is downloaded at a pinned revision unless <dir> already holds it, and
-        the PNG inputs are derived from it. The checkpoint is LiquidAI/d1-3B at the revision
-        below, from the Hugging Face cache or downloaded.
+        the PNG inputs are derived from it. The checkpoints are LiquidAI/d1-3B and
+        LiquidAI/d1-omni-600M at the revisions below, from the Hugging Face cache or
+        downloaded. `--only d1-3b` or `--only omni` writes the files of one model, so each
+        can run in its own environment.
 
     python tools/d1_fixtures.py readme
         Prints the bfloat16 probabilities `DecisionIntegrationTests` expects for the
@@ -22,11 +25,17 @@ numpy and huggingface_hub.
 
 Files written by `write`, besides the inputs:
 - d1-3B-float32.json: d1-3B text and image cases (`D1ParityTests`).
+- d1-omni-600M-<dtype>-media.{json,safetensors} for float32, float16 and bfloat16: d1-omni
+  text and image cases (`D1OmniParityTests`).
+- d1-omni-600M-float32-tower.safetensors: SigLIP2 tower inputs and output on cats.jpg
+  (`Siglip2NaFlexParityTests`).
 
 Case files name their inputs by file name, relative to the fixture directory. Questions
 are lists Swift decodes in order. Probabilities are the reference's, unrounded, in its
-order (bool as [yes, no]). Each case carries the tolerance the Swift test applies, and keeps
-the prompt texts with their ids, so the Swift tests can use Python's tokenizer output.
+order (d1-3B bool as [yes, no], d1-omni bool as [false, true]). Each case carries the
+tolerance the Swift test applies. d1-3B cases keep the prompt texts with their ids, and
+d1-omni files map every string the prompt encoder tokenized to its ids, so the Swift tests
+can use Python's tokenizer output.
 """
 
 from __future__ import annotations
@@ -42,6 +51,7 @@ from pathlib import Path
 import numpy as np
 
 D1_3B = ("LiquidAI/d1-3B", "051bcc464b01b9f92942b364d9586b0ef5912432")
+D1_OMNI = ("LiquidAI/d1-omni-600M", "02b55d7076f15129e59ab3f94783f32c4b088674")
 
 # The two cats photo of the model READMEs (COCO val2017 39769).
 CATS_JPG = (
@@ -86,9 +96,33 @@ TEXT_3B = {
     "urgency": URGENCY,
 }
 
+TEXT_OMNI = {
+    "refund": REFUND,
+    "team": {
+        "type": "choice",
+        "instructions": "Which team should handle this?",
+        "criteria": {
+            "billing": "Charges, refunds, invoices",
+            "technical": "App or site faults",
+            "fraud": "Suspected unauthorised use",
+        },
+    },
+    "urgency": URGENCY,
+}
+
 # d1-3B probability tolerances: exact pixels, and JPEG, which Core Image decodes a few
 # levels away from libjpeg-turbo.
 D1_3B_TOLERANCES = {"exact": 1e-5, "jpeg": 2e-2}
+# d1-omni (max |probability difference|, prefix relative L2). Half precision allows for
+# its rounding noise.
+OMNI_TOLERANCES = {
+    "float32": {"exact": (1e-4, 1e-4), "jpeg": (3e-2, 5e-2)},
+    "float16": {"exact": (1e-2, 1e-2), "jpeg": (5e-2, 5e-2)},
+    "bfloat16": {"exact": (1e-1, 5e-2), "jpeg": (1e-1, 1e-1)},
+}
+OMNI_SPECIAL = ["<|startoftext|>", "<|mask|>"] + [
+    f"<|reserved_{i}|>" for i in range(7, 12)
+]
 
 
 def ordered(questions):
@@ -333,11 +367,135 @@ def d1_3b(out):
     )
 
 
+# MARK: - d1-omni
+
+
+class RecordingTokenizer:
+    """Forwards to the real tokenizer and records every string it encodes."""
+
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+        self.bos_token_id = tokenizer.bos_token_id
+        self.table = {}
+
+    def convert_tokens_to_ids(self, token):
+        return self.tokenizer.convert_tokens_to_ids(token)
+
+    def __call__(self, text, add_special_tokens=False):
+        ids = self.tokenizer(text, add_special_tokens=add_special_tokens)["input_ids"]
+        self.table[text] = list(ids)
+        return {"input_ids": ids}
+
+
+def omni_media(out, path, dtype):
+    """Text and image requests, with their image prefixes."""
+    import mlx.core as mx
+    from mlx_vlm import load
+    from mlx_vlm.models.d1_omni.d1_omni import _image
+
+    model, processor = load(path)
+    if dtype != "float32":
+        model.set_dtype(getattr(mx, dtype))
+    tokenizer = RecordingTokenizer(getattr(processor, "tokenizer", processor))
+
+    tensors = {}
+    cases = [
+        ("text", TICKET, TEXT_OMNI, []),
+        ("jpeg", None, IMAGE, ["cats.jpg"]),
+        ("png-400x600", None, IMAGE, ["cats_400x600.png"]),
+        ("png-1024x768", None, IMAGE, ["cats_1024x768.png"]),
+        ("png-720x1600", ROOM, IMAGE, ["cats_720x1600.png"]),
+        (
+            "png-two",
+            # Keys sorted: Swift tests read states as JSONValue, which keeps no order.
+            {"photos": 2, "room": "living room"},
+            {"cats": CATS, "animal": ANIMAL},
+            ["cats_400x600.png", "cats_1024x768.png"],
+        ),
+    ]
+    results = []
+    for tag, state, questions, names in cases:
+        images = [str(out / name) for name in names]
+        request = (state, list(questions.values()), images or None, None)
+        [(probabilities, tokens)] = model.probabilities(tokenizer, [request])
+        if images:
+            tensors[f"{tag}.prefix"] = model.vision([_image(p) for p in images])
+        tolerance, prefix_tolerance = OMNI_TOLERANCES[dtype][
+            "jpeg" if tag == "jpeg" else "exact"
+        ]
+        results.append(
+            {
+                "tag": tag,
+                "state": state,
+                "questions": ordered(questions),
+                "images": names,
+                "probabilities": probabilities,
+                "input_tokens": tokens,
+                "prefix": f"{tag}.prefix" if f"{tag}.prefix" in tensors else None,
+                "tolerance": tolerance,
+                "prefix_tolerance": prefix_tolerance,
+            }
+        )
+        print(
+            dtype,
+            tag,
+            tokens,
+            [[round(p, 4) for p in row] for row in probabilities],
+            flush=True,
+        )
+
+    special = {t: tokenizer.convert_tokens_to_ids(t) for t in OMNI_SPECIAL}
+    stem = out / f"d1-omni-600M-{dtype}-media"
+    write_json(
+        stem.with_suffix(".json"),
+        {
+            "model": f"{D1_OMNI[0]}@{D1_OMNI[1]}",
+            "dtype": dtype,
+            "special": special,
+            "tokens": tokenizer.table,
+            "cases": results,
+        },
+    )
+    mx.eval(tensors)
+    mx.save_safetensors(
+        str(stem.with_suffix(".safetensors")),
+        {
+            k: v.astype(mx.float32) if v.dtype in (mx.float16, mx.bfloat16) else v
+            for k, v in tensors.items()
+        },
+    )
+
+
+def omni_tower(out, path):
+    """SigLIP2 tower inputs and last hidden state for cats.jpg, from mlx-vlm's pixels."""
+    import mlx.core as mx
+    from mlx_vlm import load
+    from mlx_vlm.models.d1_omni.vision import preprocess
+    from mlx_vlm.utils import load_image
+
+    model, _ = load(path)
+    inputs = preprocess(load_image(str(out / "cats.jpg")))
+    tensors = {f"vision.{k}": mx.array(v) for k, v in inputs.items()}
+    *_, tensors["vision.tower_out"] = model.vision.tower(
+        tensors["vision.pixel_values"],
+        spatial_shapes=tensors["vision.spatial_shapes"],
+        pixel_attention_mask=tensors["vision.pixel_attention_mask"],
+    )
+    mx.eval(tensors)
+    mx.save_safetensors(str(out / "d1-omni-600M-float32-tower.safetensors"), tensors)
+
+
 def write(args):
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     inputs(out)
-    d1_3b(out)
+    if "d1-3b" in args.only:
+        d1_3b(out)
+    if "omni" in args.only:
+        path = snapshot(D1_OMNI)
+        omni_tower(out, path)
+        for dtype in ("float32", "float16", "bfloat16"):
+            omni_media(out, path, dtype)
 
 
 def readme(args):
@@ -391,6 +549,13 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("write", help="write the fixture directory")
     run.add_argument("--out", type=Path, required=True)
+    run.add_argument(
+        "--only",
+        nargs="+",
+        choices=["d1-3b", "omni"],
+        default=["d1-3b", "omni"],
+        help="the models to write fixtures for",
+    )
     run.set_defaults(handler=write)
     commands.add_parser("readme", help="print the README example answers").set_defaults(
         handler=readme

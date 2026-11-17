@@ -8,8 +8,8 @@ import MLXLMCommon
 import Testing
 import Tokenizers
 
-/// Skipped unless `MLX_RUN_DECISION_INTEGRATION=1`: it downloads d1-3B (6 GB). If you run
-/// `xcodebuild`, prefix the variable with `TEST_RUNNER_`.
+/// Skipped unless `MLX_RUN_DECISION_INTEGRATION=1`: it downloads d1-3B (6 GB) and
+/// d1-omni-600M (2.3 GB). If you run `xcodebuild`, prefix the variable with `TEST_RUNNER_`.
 @Suite(
     .serialized,
     .timeLimit(.minutes(20)),
@@ -25,6 +25,11 @@ struct DecisionModelIntegrationTests {
 
     @Test func d1StillChats() async throws {
         try await DecisionIntegrationTests.d1Chat(
+            downloader: downloader, tokenizerLoader: tokenizerLoader)
+    }
+
+    @Test func d1OmniReadmeExamples() async throws {
+        try await DecisionIntegrationTests.d1Omni(
             downloader: downloader, tokenizerLoader: tokenizerLoader)
     }
 }

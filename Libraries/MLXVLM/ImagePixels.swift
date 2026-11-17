@@ -430,7 +430,7 @@ package struct OrientedImage: Sendable {
     package var orientation: Int
 
     /// Orientations outside 1...8 read as 1, as `exif_transpose` ignores them.
-    init(_ stored: RGB8Image, orientation: Int = 1) {
+    package init(_ stored: RGB8Image, orientation: Int = 1) {
         self.stored = stored
         self.orientation = (1 ... 8).contains(orientation) ? orientation : 1
     }
@@ -439,10 +439,10 @@ package struct OrientedImage: Sendable {
     package var width: Int { orientation >= 5 ? stored.height : stored.width }
     package var height: Int { orientation >= 5 ? stored.width : stored.height }
 
-    var upright: RGB8Image { stored.oriented(orientation) }
+    package var upright: RGB8Image { stored.oriented(orientation) }
 
     /// The upright image resized as `RGB8Image.resized(width:height:filter:)` does.
-    func resized(width: Int, height: Int, filter: ResampleFilter) -> RGB8Image {
+    package func resized(width: Int, height: Int, filter: ResampleFilter) -> RGB8Image {
         stored.resized(width: width, height: height, filter: filter, orientation: orientation)
     }
 

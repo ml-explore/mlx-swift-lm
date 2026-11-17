@@ -326,14 +326,14 @@ private class Lfm2VlMultiModalProjector: Module, UnaryLayer {
 /// Space-to-depth over a `[N, W, H, C]` feature map, as `Lfm2VlMultiModalProjector.pixel_unshuffle`
 /// does. Odd sizes are zero padded, which transformers does not do; the processor makes them only
 /// when `tile_size` / `encoder_patch_size` is odd.
-final class PixelUnshuffleBlock: Module, UnaryLayer {
+package final class PixelUnshuffleBlock: Module, UnaryLayer {
     let factor: Int
 
-    init(factor: Int) {
+    package init(factor: Int) {
         self.factor = factor
     }
 
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
+    package func callAsFunction(_ x: MLXArray) -> MLXArray {
         var x = x
         var (n, w, h, c) = (x.dim(0), x.dim(1), x.dim(2), x.dim(3))
 
@@ -762,7 +762,7 @@ extension LFM2VL {
 
 extension Siglip2NaFlex.Configuration {
     /// The LFM2-VL tower, truncated after `visionFeatureLayer` unless it is -1.
-    init(_ vision: LFM2VLConfiguration.VisionConfiguration, visionFeatureLayer: Int) {
+    package init(_ vision: LFM2VLConfiguration.VisionConfiguration, visionFeatureLayer: Int) {
         var layers = vision.numHiddenLayers
         if visionFeatureLayer != -1 {
             let index =

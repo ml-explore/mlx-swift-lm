@@ -945,10 +945,13 @@ public enum RerankerIntegrationTests {
 ///
 /// The expected probabilities come from the same pinned checkpoints and inputs, each in the
 /// precision it ships in: d1-3B from its own code (`modeling_d1.py`) in bfloat16, as
-/// `tools/d1_fixtures.py readme` prints them.
+/// `tools/d1_fixtures.py readme` prints them, and d1-omni-600M from mlx-vlm's `predict` at
+/// commit 370f4ccf in float32.
 public enum DecisionIntegrationTests {
     private static let d1Configuration = ModelConfiguration(
         id: "LiquidAI/d1-3B", revision: "051bcc464b01b9f92942b364d9586b0ef5912432")
+    private static let d1OmniConfiguration = ModelConfiguration(
+        id: "LiquidAI/d1-omni-600M", revision: "02b55d7076f15129e59ab3f94783f32c4b088674")
 
     private static let ticket: DecisionState = "I was charged twice, please refund one."
     private static let urgency = DecisionQuestion.score(
@@ -1028,10 +1031,57 @@ public enum DecisionIntegrationTests {
         try check(reply.contains("Paris"), "Expected 'Paris' in d1-3B's reply, got: \(reply)")
     }
 
+    /// d1-omni-600M answers the README's support ticket and the two cats photo like mlx-vlm. The
+    /// image tolerance covers Core Image decoding JPEG a few levels away from libjpeg-turbo.
+    public static func d1Omni(
+        downloader: any Downloader,
+        tokenizerLoader: any TokenizerLoader
+    ) async throws {
+        let decider = try await DecisionModelFactory.shared.loadContainer(
+            from: downloader, using: tokenizerLoader, configuration: d1OmniConfiguration,
+            progressHandler: logProgress(d1OmniConfiguration.name))
+        try check(decider.capabilities.media == [.images], "d1-omni must read images")
+
+        let text = try await decider.predict(
+            state: ticket,
+            questions: [
+                "refund": .bool("Is the customer asking for a refund?"),
+                "team": .choice(
+                    "Which team should handle this?",
+                    options: [
+                        DecisionOption("billing", description: "Charges, refunds, invoices"),
+                        DecisionOption("technical", description: "App or site faults"),
+                        DecisionOption("fraud", description: "Suspected unauthorised use"),
+                    ]),
+                "urgency": urgency,
+            ])
+        try checkAnswers(
+            text, label: "d1-omni text", tolerance: 1e-4, inputTokens: 142,
+            expected: [
+                "refund": [0.998_614_311_218_261_7],
+                "team": [
+                    0.992_582_440_376_281_7, 0.005_665_129_050_612_45, 0.001_752_396_579_831_838_6,
+                ],
+                "urgency": [
+                    0.012_962_193_228_304_386, 0.650_820_314_884_185_8, 0.336_217_552_423_477_2,
+                ],
+            ])
+
+        let photo = try await decider.predict(
+            state: nil, questions: cats, images: [try await catsImage()])
+        try checkAnswers(
+            photo, label: "d1-omni image", tolerance: 0.02, inputTokens: 256,
+            expected: [
+                "cats": [
+                    0.055_680_528_283_119_2, 0.933_421_969_413_757_3, 0.010_897_504_165_768_623,
+                ]
+            ])
+    }
+
     /// Check each answer's probabilities, P(true) for a bool, and that the most probable
     /// option is the reference's.
     private static func checkAnswers(
-        _ response: DecisionResponse, label: String, tolerance: Double,
+        _ response: DecisionResponse, label: String, tolerance: Double, inputTokens: Int? = nil,
         expected: KeyValuePairs<String, [Double]>
     ) throws {
         try check(
@@ -1056,6 +1106,11 @@ public enum DecisionIntegrationTests {
             try check(
                 top(actual) == top(reference),
                 "\(label) \(name): answered \(answer.value), not the reference's answer")
+        }
+        if let inputTokens {
+            try check(
+                response.inputTokens == inputTokens,
+                "\(label): read \(response.inputTokens) tokens, the reference read \(inputTokens)")
         }
         print("\(label): max |dp| \(largest) (tolerance \(tolerance))")
     }

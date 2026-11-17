@@ -8,10 +8,10 @@ import MLXLMCommon
 import MLXNN
 
 /// SigLIP2 NaFlex vision tower (no pooling head), as LFM2-VL uses it.
-enum Siglip2NaFlex {
+package enum Siglip2NaFlex {
 
     /// Tower hyperparameters. LFM2-VL builds them from its `vision_config`.
-    struct Configuration: Sendable, Equatable {
+    package struct Configuration: Sendable, Equatable {
         var hiddenSize: Int
         var intermediateSize: Int
         var numHiddenLayers: Int
@@ -171,12 +171,12 @@ enum Siglip2NaFlex {
         }
     }
 
-    final class VisionModel: Module {
+    package final class VisionModel: Module {
         @ModuleInfo var embeddings: VisionEmbeddings
         @ModuleInfo var encoder: Encoder
         @ModuleInfo(key: "post_layernorm") var postLayernorm: LayerNorm
 
-        init(_ config: Configuration) {
+        package init(_ config: Configuration) {
             self.embeddings = VisionEmbeddings(config)
             self.encoder = Encoder(config)
             self._postLayernorm.wrappedValue = LayerNorm(
@@ -203,7 +203,7 @@ enum Siglip2NaFlex {
         /// The last hidden state `[h * w, D]` of each view in `pixels`, which may be padded past
         /// `h * w`. Views with the same patch count run as one batch cut to that count, without a
         /// mask. This is the same math as the padded batch with a mask, with less work.
-        func viewStates(_ pixels: MLXArray, spatialShapes: [(Int, Int)]) -> [MLXArray] {
+        package func viewStates(_ pixels: MLXArray, spatialShapes: [(Int, Int)]) -> [MLXArray] {
             let lengths = spatialShapes.map { $0.0 * $0.1 }
             var groups: [(length: Int, views: [Int])] = []
             for (view, length) in lengths.enumerated() {
@@ -261,7 +261,7 @@ package struct Siglip2Patches {
 /// Patches for SigLIP2 NaFlex, padded to `maxPatches` per crop. Each crop is cut to whole
 /// patches, as `convert_image_to_patches` does. `table[channel * 256 + byte]` normalises each
 /// byte, as `LFM2VLImageSettings.normalizationTable()` makes it.
-func siglip2Patches(
+package func siglip2Patches(
     _ crops: [RGB8Image], patchSize: Int, maxPatches: Int, table: [Float]
 ) -> Siglip2Patches {
     precondition(table.count == 3 * 256, "the table needs 768 entries")

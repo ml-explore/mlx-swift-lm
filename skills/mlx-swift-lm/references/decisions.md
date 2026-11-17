@@ -31,10 +31,13 @@ full reference, with the precision notes.
 |------------|--------|------|
 | `LiquidAI/d1-3B` (bfloat16) | text, JSON, images | 6.2 GB |
 | `LiquidAI/d1-3B-MLX-4bit` | text, JSON, images | 2.4 GB |
+| `LiquidAI/d1-omni-600M` (float32) | text, JSON, images | 2.3 GB |
+| `LiquidAI/d1-omni-600M-MLX-8bit` | text, JSON, images | 0.7 GB |
 
 - On an iPhone, use `LiquidAI/d1-3B-MLX-4bit`: the bfloat16 d1-3B does not fit in an app's
-  memory.
-- LiquidAI also publishes `d1-3B-MLX-8bit` and `d1-3B-MLX-fp16`.
+  memory. d1-omni-600M runs in float32 or 8-bit.
+- LiquidAI also publishes `d1-3B-MLX-8bit`, `d1-3B-MLX-fp16` and `d1-omni-600M-MLX-fp16`.
+  Avoid 4-bit d1-omni conversions: they change many answers.
 - The factory routes by `config.json`, so any `mlx_vlm.convert` conversion loads.
   `VLMModelFactory` loads d1-3B as a plain LFM2-VL chat model.
 
@@ -120,8 +123,8 @@ reference counts them.
 
 - `predict` throws `DecisionError`. The container checks the request before the model runs,
   for example `duplicateQuestionName`, `tooFewCriteria`, `missingState`, `unsupportedMedia`,
-  or `invalidImage` for a remote URL. The model throws `invalidImage` for images it cannot
-  read.
+  or `invalidImage` for a remote URL. The models throw `mediaTooLong`, `optionsDoNotFit`, and
+  `invalidImage` for images they cannot read.
 - Loading a checkpoint that is not a decision model throws `DecisionError.unsupportedModel`.
 - `DecisionContainer` is `Sendable`. Share one container across tasks; requests run one at a
   time. `DecisionRequest` is not `Sendable`, and `predict` consumes it.
