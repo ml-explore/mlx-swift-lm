@@ -109,7 +109,8 @@ def load_reference(directory, source):
     for name, digest in SHA256.items():
         shutil.copyfile(Path(source) / name, package / name)
         actual = hashlib.sha256((package / name).read_bytes()).hexdigest()
-        assert actual == digest, f"{name}: sha256 {actual}, expected {digest}"
+        if actual != digest:
+            raise SystemExit(f"{name}: sha256 {actual}, expected {digest}")
     (package / "__init__.py").write_text("")
     spec = importlib.util.spec_from_file_location(
         PACKAGE, package / "__init__.py", submodule_search_locations=[str(package)])
