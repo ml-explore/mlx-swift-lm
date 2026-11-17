@@ -175,12 +175,8 @@ final class GLM5NextTests: XCTestCase {
 
     // MARK: - Cache consistency
 
-    /// Token-by-token decode reproduces the full-prefill logits while the
-    /// indexer keeps a strict subset of the pools. Eight indexer heads and this
-    /// seed keep every top-k boundary clear of ties (with two heads, scores the
-    /// ReLU clamps to exactly 0 often tie at the boundary). It runs on the CPU:
-    /// on an M5 GPU a multi-row float32 matmul differs from the one-row path by
-    /// about 1e-3 relative, enough to flip a close selection.
+    /// Token-by-token decode reproduces the full-prefill logits while the indexer keeps a
+    /// strict subset of the pools. On the CPU: GPU float32 can flip a near-tied selection.
     func testIncrementalDecodeMatchesPrefill() throws {
         try Self.onCPU {
             let model = GLM5NextTextModel(try configuration(indexTopk: 8, indexHeads: 8))
