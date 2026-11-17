@@ -294,7 +294,8 @@ struct LFM2DSparkMetalTests {
         let actualLogits = target(next, cache: speculativeCache, state: nil).logits
         let expectedLogits = target(next, cache: baselineCache, state: nil).logits
         let difference = abs(actualLogits - expectedLogits).max().item(Float.self)
-        #expect(difference < 1e-4)
+        // TF32 matmuls (neural accelerators) leave ~2e-4 here; see MatmulPrecision.
+        #expect(difference < MatmulPrecision.tolerance(float32: 1e-4, reduced: 1e-3))
     }
 
     @Test
