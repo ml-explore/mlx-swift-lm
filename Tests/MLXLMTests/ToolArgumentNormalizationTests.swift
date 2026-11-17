@@ -196,4 +196,24 @@ struct ToolArgumentNormalizationTests {
         #expect(tryParsePythonLiteral("'''a''''") == nil)
         #expect(tryParsePythonLiteral("'''a''") == nil)
     }
+
+    @Test("Python string prefixes and adjacent strings read as Python does")
+    func pythonStringPrefixesAndAdjacentStrings() throws {
+        for (literal, value) in [
+            (#"r'\d+\.\d'"#, #"\d+\.\d"#),
+            (#"R"C:\new\table""#, #"C:\new\table"#),
+            (#"r'it\'s'"#, #"it\'s"#),
+            (#"u'caf\xe9'"#, "café"),
+            ("'Hello, ' 'world'", "Hello, world"),
+            (#"'tab\t' r'\t'"#, "tab\t\\t"),
+            ("(\"first line \"\n \"second line\")", "first line second line"),
+        ] {
+            #expect(tryParsePythonLiteral(literal) as? String == value)
+        }
+        let object = try #require(tryParsePythonLiteral(#"{'path': r'C:\tmp', 'a' 'b': 1}"#))
+        #expect(JSONValue.from(object) == .object(["path": .string(#"C:\tmp"#), "ab": .int(1)]))
+        for literal in [#"r'a\'"#, "b'bytes'", "f'{x}'", "r 'x'", "'a' b"] {
+            #expect(tryParsePythonLiteral(literal) == nil)
+        }
+    }
 }

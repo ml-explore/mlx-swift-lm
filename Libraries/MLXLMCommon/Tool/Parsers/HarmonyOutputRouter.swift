@@ -36,6 +36,10 @@ package struct HarmonyOutputRouter {
     private var responseDetokenizer: any StreamingDetokenizer
     private let tokenizer: any Tokenizer
 
+    /// Whether the latest step streamed analysis or public text that ends in a
+    /// visible character. Headers, tool frames, and closing markers never do.
+    private(set) var endsInVisibleText = false
+
     package init(
         tokenizer: any Tokenizer, tools: [[String: any Sendable]]?,
         toolCallPolicy: ToolCallPolicy = .init()
@@ -70,6 +74,7 @@ package struct HarmonyOutputRouter {
     /// preambles stream as ``Event/response``; tool calls are emitted when a
     /// committed commentary frame targets an allowed function.
     package mutating func route(_ step: HarmonyParseStep) -> [Event] {
+        endsInVisibleText = false
         switch step {
         case .consumed:
             return []
@@ -78,6 +83,7 @@ package struct HarmonyOutputRouter {
             if header.channel == .analysis {
                 reasoningDetokenizer.append(token: token)
                 if let text = reasoningDetokenizer.next(), !text.isEmpty {
+                    endsInVisibleText = text.last?.isWhitespace == false
                     return [.reasoning(text)]
                 }
                 return []
@@ -85,6 +91,7 @@ package struct HarmonyOutputRouter {
             guard isPublicResponse(header) else { return [] }
             responseDetokenizer.append(token: token)
             if let text = responseDetokenizer.next(), !text.isEmpty {
+                endsInVisibleText = text.last?.isWhitespace == false
                 return [.response(text)]
             }
             return []

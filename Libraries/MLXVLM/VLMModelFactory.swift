@@ -96,10 +96,12 @@ public enum VLMTypeRegistry {
         "qwen3_5_moe": create(Qwen35Configuration.self, Qwen35MoE.init),
         "qwen3_8": create(Qwen35Configuration.self, Qwen35.init),
         "qwen3_8_moe": create(Qwen35Configuration.self, Qwen35MoE.init),
+        "prism_hadamard_qwen35": createPrismHadamardQwen35Model,
         "idefics3": create(Idefics3Configuration.self, Idefics3.init),
         "gemma3": create(Gemma3Configuration.self, Gemma3.init),
         "gemma4": create(Gemma4Configuration.self, Gemma4.init),
         "gemma4_unified": create(Gemma4UnifiedConfiguration.self, Gemma4Unified.init),
+        "diffusion_gemma": create(DiffusionGemmaVLMConfiguration.self, DiffusionGemma.init),
         "smolvlm": create(SmolVLM2Configuration.self, SmolVLM2.init),
         "fastvlm": create(FastVLMConfiguration.self, FastVLM.init),
         "llava_qwen2": create(FastVLMConfiguration.self, FastVLM.init),
@@ -140,6 +142,8 @@ public enum VLMProcessorTypeRegistry {
             Gemma4ProcessorConfiguration.self, Gemma4Processor.init),
         "Gemma4UnifiedProcessor": create(
             Gemma4UnifiedProcessorConfiguration.self, Gemma4UnifiedProcessor.init),
+        "DiffusionGemma4Processor": create(
+            DiffusionGemma4ProcessorConfiguration.self, DiffusionGemma4Processor.init),
         "SmolVLMProcessor": create(
             SmolVLMProcessorConfiguration.self, SmolVLMProcessor.init),
         "FastVLMProcessor": create(
@@ -259,6 +263,12 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<turn|>"]
     )
 
+    static public let diffusionGemma_26BA4B_it_mxfp4 = ModelConfiguration(
+        id: "mlx-community/diffusiongemma-26B-A4B-it-mxfp4",
+        defaultPrompt: "Describe the image in English",
+        extraEOSTokens: ["<end_of_turn>"]
+    )
+
     static public let smolvlm = ModelConfiguration(
         id: "HuggingFaceTB/SmolVLM2-500M-Video-Instruct-mlx",
         defaultPrompt:
@@ -294,16 +304,18 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         extraEOSTokens: ["<|im_end|>"]
     )
 
+    static public let bonsai2_27B_ternary_2bit = ModelConfiguration(
+        id: "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit",
+        defaultPrompt: "Describe the image in English",
+        extraEOSTokens: ["<|im_end|>"]
+    )
+
     static public let museGlimmer30B4bit = ModelConfiguration(
         id: "mlx-community/Muse-Glimmer-30B-4bit",
         defaultPrompt: "Describe the image in English",
         extraEOSTokens: ["<|eot|>", "<|end_of_text|>"],
         toolCallFormat: .atem,
-        reasoningConfig: ReasoningConfig(
-            startDelimiter: "to=self<|message|>",
-            endDelimiter: "<|eom|>",
-            promptStrategy: .none,
-            isSpecialToken: true)
+        reasoningConfig: OnyxReasoningProtocol.glimmer
     )
 
     static public func all() -> [ModelConfiguration] {
@@ -320,6 +332,7 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             gemma4_E2B_it_4bit,
             gemma4_E4B_it_4bit,
             gemma4_26BA4B_it_4bit,
+            diffusionGemma_26BA4B_it_mxfp4,
             gemma4_31B_it_4bit,
             smolvlm,
             fastvlm,
@@ -327,6 +340,7 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             qwen3_5_35B_A3B_4bit,
             qwen3_8_27B_4bit,
             qwen3_8_27B_8bit,
+            bonsai2_27B_ternary_2bit,
             museGlimmer30B4bit,
         ]
     }
@@ -490,6 +504,7 @@ public final class VLMModelFactory: GenericModelFactory {
             excludedComponents: configuration.excludedComponents)
 
         let tokenizer = try await tokenizerTask
+        try model.validate(tokenizer: tokenizer)
         let processorConfiguration: VLMProcessorConfiguration
         do {
             processorConfiguration = try await processorConfigTask

@@ -7,8 +7,7 @@ import Foundation
 ///
 /// Conform only if the media encoder computes each item's features independently
 /// of the others; otherwise dropping cached items changes the features of the
-/// items that remain. `Qwen25VL` masks each frame to itself and conforms;
-/// `Qwen2VL` attends across the whole buffer and does not.
+/// items that remain. `Qwen25VL`, for example, masks each frame to itself and conforms.
 public protocol PreparedInputSplitting {
 
     /// Return the suffix of `input` that begins at `prefixTokenCount`, carrying only

@@ -206,10 +206,9 @@ final class Qwen25VLContinuationTests: XCTestCase {
         try assertImagePromptKeepsCacheDtype(makeTinyQwen2VL())
     }
 
-    /// The counterexample the conformance rests on. `Qwen2VL` does not conform, so
-    /// the split runs through `QwenVL` directly with this model's ids; the logits
-    /// must diverge because its vision attention is unmasked across images.
-    func testQwen2VLAppendOnlyMediaSplitDiverges() throws {
+    /// `Qwen2VL` vision attention stays inside each image, so the split is exact.
+    /// `Qwen2VL` does not conform, so the split runs through `QwenVL` directly.
+    func testQwen2VLAppendOnlyMediaSplitMatchesFullPrefill() throws {
         let model = try makeTinyQwen2VL()
         try continuation.assertAppendOnlyMediaSplit(
             model,
@@ -221,6 +220,6 @@ final class Qwen25VLContinuationTests: XCTestCase {
                     videoTokenId: model.config.baseConfiguration.videoTokenId,
                     mergeSize: model.config.visionConfiguration.spatialMergeSize)
             },
-            expectsIsolation: false)
+            expectsIsolation: true)
     }
 }

@@ -1,3 +1,4 @@
+import Foundation
 import MLXLMCommon
 import Testing
 
@@ -76,6 +77,45 @@ struct ToolCallIdTests {
         #expect(dictionary["content"] as? String == "hi")
         #expect(dictionary["tool_call_id"] == nil)
         #expect(dictionary["tool_calls"] == nil)
+    }
+
+    @Test("Null tool call arguments reach the template as nil, not NSNull")
+    func nullToolCallArgumentsAreNil() throws {
+        let call = ToolCall(
+            function: .init(
+                name: "search",
+                arguments: [
+                    "limit": .null,
+                    "filter": .object(["tag": .null, "page": .array([.int(1), .null])]),
+                ]
+            )
+        )
+        let message = DefaultMessageGenerator().generate(message: .assistant("", toolCalls: [call]))
+        let calls = try #require(message["tool_calls"] as? [[String: any Sendable]])
+        let function = try #require(calls.first?["function"] as? [String: any Sendable])
+        let arguments = try #require(function["arguments"] as? [String: any Sendable])
+        let filter = try #require(arguments["filter"] as? [String: any Sendable])
+        let page = try #require(filter["page"] as? [any Sendable])
+
+        func isNil(_ value: (any Sendable)?) -> Bool {
+            guard let value else { return false }
+            let mirror = Mirror(reflecting: value)
+            return mirror.displayStyle == .optional && mirror.children.isEmpty
+        }
+        func containsNSNull(_ value: Any) -> Bool {
+            switch value {
+            case is NSNull: true
+            case let dict as [String: any Sendable]: dict.values.contains(where: containsNSNull)
+            case let array as [any Sendable]: array.contains(where: containsNSNull)
+            default: false
+            }
+        }
+
+        #expect(isNil(arguments["limit"]))
+        #expect(isNil(filter["tag"]))
+        #expect(isNil(page[1]))
+        #expect(page[0] as? Int == 1)
+        #expect(!containsNSNull(message))
     }
 
     @Test("ToolCall id defaults to nil for source compatibility")

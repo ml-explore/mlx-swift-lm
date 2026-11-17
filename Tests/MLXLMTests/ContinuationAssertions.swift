@@ -150,11 +150,9 @@ struct ContinuationAssertions {
     /// suffix on turn 1's cache must land where a cold prefill of the whole prompt
     /// does -- but only if the vision encoder computes each image independently.
     ///
-    /// `expectsIsolation` says which model this is. `Qwen25VL` masks each frame to
-    /// itself, so the split is exact; `Qwen2VL` attends across the concatenated
-    /// buffer, so dropping the cached image changes the kept image's features and
-    /// the logits must differ. Asserting the divergence is what makes the
-    /// conformance a measured claim rather than a stated one.
+    /// `expectsIsolation` says whether the encoder keeps each image to itself. If it
+    /// does, the split is exact. If it attends across images, dropping the cached
+    /// image changes the kept image's features, so the logits must differ.
     func assertAppendOnlyMediaSplit<M: LanguageModel>(
         _ model: M, split: (LMInput, Int) -> LMInput?, expectsIsolation: Bool,
         file: StaticString = #filePath, line: UInt = #line
