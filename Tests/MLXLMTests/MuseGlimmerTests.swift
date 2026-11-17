@@ -1200,11 +1200,30 @@ struct MuseGlimmerAgenticProtocolTests {
     func conventions() throws {
         let model = try MuseGlimmerForwardTests.model()
         #expect(model.toolCallFormat == .atem)
+        #expect(model.reasoningConfig == OnyxReasoningProtocol.glimmer)
         #expect(model.reasoningConfig?.startDelimiter == "to=self<|message|>")
         #expect(model.reasoningConfig?.endDelimiter == "<|eom|>")
         #expect(VLMRegistry.museGlimmer30B4bit.toolCallFormat == .atem)
+        #expect(VLMRegistry.museGlimmer30B4bit.reasoningConfig == OnyxReasoningProtocol.glimmer)
         #expect(VLMRegistry.museGlimmer30B4bit.extraEOSTokens.contains("<|eot|>"))
         #expect(VLMRegistry.museGlimmer30B4bit.extraEOSTokens.contains("<|end_of_text|>"))
+    }
+
+    /// A budget cut must force the frame boundary and nothing else: the model
+    /// opens its own answer frame, and `<|eom|>` is not an end-of-turn token.
+    @Test("budget transition forces only the reasoning frame boundary")
+    func budgetTransitionClosesTheFrame() throws {
+        let tokenizer = OnyxTestTokenizer()
+        let reasoning = OnyxReasoningProtocol.glimmer
+        #expect(reasoning.budgetTransition == .immediate)
+
+        let plan = try ThinkingBudgetPlan(
+            configuration: ThinkingBudgetConfiguration(maximumTokenCount: 8),
+            reasoning: reasoning,
+            tokenizer: tokenizer)
+
+        #expect(plan.forcedTransitionTokenIDs == [tokenizer.eom])
+        #expect(!VLMRegistry.museGlimmer30B4bit.extraEOSTokens.contains("<|eom|>"))
     }
 
     @Test("ATEM parser extracts schema-typed arguments")

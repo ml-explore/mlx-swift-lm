@@ -108,7 +108,7 @@ final class ChatConventionsModelTests: XCTestCase {
         let model = Qwen35TextModel(config)
 
         XCTAssertEqual(model.toolCallFormat, .qwen35)
-        XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.tagged)
+        XCTAssertEqual(model.reasoningConfig, QwenReasoningProtocol.qwen35)
     }
 
     // MARK: Registry injection
@@ -159,6 +159,31 @@ struct ChatConventionsTests {
         let config = QwenReasoningProtocol.qwen3
         #expect(config.budgetTransition != nil)
         #expect(config.implicitEndDelimiters == ["<tool_call>"])
+    }
+
+    @Test func qwen35BudgetProtocol() {
+        let config = QwenReasoningProtocol.qwen35
+        // Qwen3.5 answers from a span that was only closed, so the declared
+        // transition adds no text of its own.
+        #expect(config.budgetTransition == .immediate)
+        #expect(config.implicitEndDelimiters == ["<tool_call>"])
+    }
+
+    /// A validated transition must be the only thing a family adds to the
+    /// protocol it derives from, so the wire syntax cannot drift per family.
+    @Test func budgetTransitionsAreTheOnlyFamilyDelta() {
+        for derived in [QwenReasoningProtocol.qwen3, QwenReasoningProtocol.qwen35] {
+            var withoutTransition = derived
+            withoutTransition.budgetTransition = nil
+            #expect(withoutTransition == QwenReasoningProtocol.tagged)
+            #expect(derived.budgetTransition != nil)
+        }
+
+        var glimmerWithoutTransition = OnyxReasoningProtocol.glimmer
+        glimmerWithoutTransition.budgetTransition = nil
+        #expect(glimmerWithoutTransition == OnyxReasoningProtocol.frames)
+        #expect(OnyxReasoningProtocol.glimmer.budgetTransition == .immediate)
+        #expect(OnyxReasoningProtocol.frames.budgetTransition == nil)
     }
 
     @Test func alwaysOnPreset() {
