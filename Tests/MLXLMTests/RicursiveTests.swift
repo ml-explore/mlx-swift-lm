@@ -309,4 +309,59 @@ final class RicursiveTests: XCTestCase {
             XCTAssertTrue(arrayEqual(actual, expected).item(Bool.self))
         }
     }
+
+    /// Bit patterns of `1.0 / (10000.0 ** (torch.arange(0, 128, 2).float() / 128))` from
+    /// torch 2.15, the reference's RoPE frequencies at Ripple's head size.
+    func testInverseFrequenciesMatchTorch() throws {
+        let torch: [UInt32] = [
+            0x3F80_0000, 0x3F5D_AFD7, 0x3F3F_F911, 0x3F26_3DE0, 0x3F0F_F59A, 0x3EF9_53CF,
+            0x3ED7_E89B, 0x3EBA_F81B, 0x3EA1_E89B, 0x3E8C_3504, 0x3E72_D423, 0x3E52_47ED,
+            0x3E36_1887, 0x3E1D_B040, 0x3E08_8D77, 0x3DEC_7FD6, 0x3DCC_CCCD, 0x3DB1_5978,
+            0x3D99_940D, 0x3D84_FE4D, 0x3D66_55C2, 0x3D47_763F, 0x3D2C_BA15, 0x3D15_9348,
+            0x3D01_86E3, 0x3CE0_54D2, 0x3CC2_434F, 0x3CA8_398B, 0x3C91_AD39, 0x3C7C_4D33,
+            0x3C5A_7BF2, 0x3C3D_3311, 0x3C23_D70A, 0x3C0D_E12D, 0x3BF5_B9B0, 0x3BD4_CA15,
+            0x3BB8_449C, 0x3B9F_91CC, 0x3B8A_2E77, 0x3B6F_520E, 0x3B4F_3E38, 0x3B33_770F,
+            0x3B1B_690D, 0x3B06_946F, 0x3AE9_1528, 0x3AC9_D75C, 0x3AAE_C98E, 0x3A97_5C0E,
+            0x3A83_126F, 0x3A63_01E2, 0x3A44_948C, 0x3A2A_3B44, 0x3A13_6A16, 0x39FF_4FAC,
+            0x39DD_1725, 0x39BF_74D7, 0x39A5_CB60, 0x398F_9272, 0x3978_A815, 0x3957_53E4,
+            0x393A_7753, 0x3921_7916, 0x390B_D472, 0x38F2_2CE2,
+        ]
+        let frequencies = ricursiveInverseFrequencies(theta: 10_000, dimensions: 128)
+        XCTAssertEqual(frequencies.asArray(Float.self).map(\.bitPattern), torch)
+    }
+
+    /// `torch.lerp` on bfloat16 computes in float32 and rounds once, and the blend is the
+    /// sigmoid of the bfloat16 lambda rounded to bfloat16. At lambda -2 MLX's bfloat16 sigmoid
+    /// rounds differently from the float32 one.
+    func testValueResidualBlendRoundsOnce() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let x = MLXRandom.normal([1, 4, 64], key: MLXRandom.key(4)).asType(.bfloat16)
+            let residual = MLXRandom.normal([1, 4, 64], key: MLXRandom.key(5)).asType(.bfloat16)
+            for value: Float in [-2, 0.7, 2.39] {
+                let lambda = MLXArray([value]).asType(.bfloat16)
+                let blend = MLXArray(Float(1 / (1 + Foundation.exp(-Double(value)))))
+                    .asType(.bfloat16).asType(.float32)
+                let start = residual.asType(.float32)
+                let expected = (start + blend * (x.asType(.float32) - start)).asType(.bfloat16)
+                let stepwise = residual + sigmoid(lambda[0]) * (x - residual)
+                XCTAssertFalse(arrayEqual(stepwise, expected).item(Bool.self), "lambda \(value)")
+                let actual = ricursiveValueInput(x, residual: residual, lambda: lambda)
+                XCTAssertEqual(actual.dtype, .bfloat16)
+                XCTAssertTrue(arrayEqual(actual, expected).item(Bool.self), "lambda \(value)")
+            }
+        }
+    }
+
+    /// `F.silu` on bfloat16 computes in float32 and rounds once.
+    func testSiLURoundsOnce() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let gate = (8 * MLXRandom.normal([4, 256], key: MLXRandom.key(6))).asType(.bfloat16)
+            let wide = gate.asType(.float32)
+            let expected = (wide / (1 + exp(-wide))).asType(.bfloat16)
+            XCTAssertFalse(arrayEqual(silu(gate), expected).item(Bool.self))
+            let actual = ricursiveSiLU(gate)
+            XCTAssertEqual(actual.dtype, .bfloat16)
+            XCTAssertTrue(arrayEqual(actual, expected).item(Bool.self))
+        }
+    }
 }

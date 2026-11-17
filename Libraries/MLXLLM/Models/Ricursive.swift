@@ -106,6 +106,32 @@ extension RicursiveConfiguration: ModelConfigurationValidating {
     }
 }
 
+/// `1 / theta^(i / dimensions)` for even `i`, as float32 values bitwise equal to the
+/// reference's `1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))`: the power is
+/// rounded to float32 once, then inverted in float32. MLX's float32 `pow` can differ by an ulp.
+func ricursiveInverseFrequencies(theta: Float, dimensions: Int) -> MLXArray {
+    MLXArray(
+        stride(from: 0, to: dimensions, by: 2).map { i -> Float in
+            1 / Float(Foundation.pow(Double(theta), Double(Float(i) / Float(dimensions))))
+        })
+}
+
+/// The value-projection input `lerp(residual, x, sigmoid(lambda))`. The reference takes the
+/// sigmoid in the parameter's precision and `torch.lerp` computes in float32 and rounds once,
+/// so both are done in float32 here and rounded where the reference rounds.
+func ricursiveValueInput(_ x: MLXArray, residual: MLXArray, lambda: MLXArray) -> MLXArray {
+    let blend = sigmoid(lambda[0].asType(.float32)).asType(lambda.dtype).asType(x.dtype)
+        .asType(.float32)
+    let start = residual.asType(x.dtype).asType(.float32)
+    return (start + blend * (x.asType(.float32) - start)).asType(x.dtype)
+}
+
+/// SiLU in float32, rounded once to the input's precision, as PyTorch's `F.silu` does on a
+/// reduced-precision tensor. MLXNN's `silu` rounds the sigmoid before the product.
+func ricursiveSiLU(_ x: MLXArray) -> MLXArray {
+    silu(x.asType(.float32)).asType(x.dtype)
+}
+
 /// RoPE in float32 on `[B, heads, T, headDim]`. Positions cannot go through bfloat16,
 /// which loses integer precision after 256. The reference casts cos and sin to the model
 /// precision before widening them again, so the same rounding is applied here.
@@ -162,12 +188,8 @@ private final class RicursiveAttention: Module {
         scale = pow(Float(config.headDim), -0.5)
         isSliding = config.isSliding(layer: layer)
         gateFullPrecision = config.gateFullPrecision
-        _inverseFrequencies =
-            1
-            / pow(
-                MLXArray(config.ropeTheta),
-                MLXArray(stride(from: 0, to: config.headDim, by: 2).map { Float($0) })
-                    / Float(config.headDim))
+        _inverseFrequencies = ricursiveInverseFrequencies(
+            theta: config.ropeTheta, dimensions: config.headDim)
 
         _queryProj.wrappedValue = Linear(dim, nHeads * headDim, bias: false)
         _keyProj.wrappedValue = Linear(dim, nKVHeads * headDim, bias: false)
@@ -191,9 +213,7 @@ private final class RicursiveAttention: Module {
 
         var valueInput = x
         if let valueResidual, let lambda = valueResidualLambda {
-            let blend = sigmoid(lambda[0]).asType(x.dtype)
-            let start = valueResidual.asType(x.dtype)
-            valueInput = start + blend * (x - start)
+            valueInput = ricursiveValueInput(x, residual: valueResidual, lambda: lambda)
         }
 
         var queries = queryNorm(queryProj(x).reshaped(B, L, nHeads, headDim))
@@ -254,7 +274,7 @@ private final class RicursiveMLP: Module, UnaryLayer {
             gate = minimum(gate, limit)
             up = clip(up, min: -limit, max: limit)
         }
-        return downProj(silu(gate) * up)
+        return downProj(ricursiveSiLU(gate) * up)
     }
 }
 
