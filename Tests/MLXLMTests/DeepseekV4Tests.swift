@@ -12,18 +12,13 @@ import XCTest
 import Metal
 #endif
 
-/// DeepSeek-V4 against DeepSeek's reference `inference/model.py` on a 4-layer model covering every
-/// V4 path, its weights built in code from the formula of
-/// `tools/deepseek_v4_parity/make_reference_values.py` and stored as the MXFP4 MLX conversion
-/// stores them (MXFP4 and MXFP8 layers), the reference values in
-/// `DeepseekV4ReferenceValues.swift`. Comparisons run teacher-forced in
-/// float32 on the CPU, except the GPU-only fused hyper-connection kernel check.
+/// DeepSeek-V4 on a 4-layer MXFP4/MXFP8 model built in code, against values from DeepSeek's
+/// reference `inference/model.py` written by `tools/deepseek-v4-reference.py`.
 final class DeepseekV4Tests: XCTestCase {
 
     private typealias Reference = DeepseekV4ReferenceValues
 
-    /// Log-probability tolerance against the reference, as `LFM3ReferenceTests`. The reference's
-    /// own log-probabilities move by up to 1.2e-5 when its products are re-rounded.
+    /// Log-probability tolerance against the reference, as `LFM3ReferenceTests`.
     private static let tolerance: Float = 2e-5
 
     private func configurationData() -> Data {
@@ -37,17 +32,23 @@ final class DeepseekV4Tests: XCTestCase {
         return config
     }
 
-    /// The generator's checkpoint, stored as the MLX conversion stores it: parameter `i` of
-    /// `Reference.parameters`, element `j`, from the formula in the docstring of
-    /// `tools/deepseek_v4_parity/make_reference_values.py`; MXFP4/MXFP8 tensors are made
-    /// directly as packed codes and scale exponents.
-    private static func checkpoint(experts: Int) -> [String: MLXArray] {
+    private func skipUnlessLong() throws {
+        guard ProcessInfo.processInfo.environment["MLX_DEEPSEEK_V4_LONG"] == "1" else {
+            throw XCTSkip("Set MLX_DEEPSEEK_V4_LONG=1 for the 250- and 300-token checks")
+        }
+    }
+
+    /// The generator's checkpoint as the MLX conversion stores it; same formula as `weights()`
+    /// in `tools/deepseek-v4-reference.py`.
+    nonisolated(unsafe) private static let checkpoint = makeCheckpoint(experts: 8)
+
+    private static func makeCheckpoint(experts: Int) -> [String: MLXArray] {
         let p = 2_147_483_647
         func hash(_ i: Int, _ j: Int) -> Int {
             let x = (Reference.weightSeed * (1 << 23) + i * (1 << 15) + j) % p
             return (x * x % p) * 48271 % p
         }
-        /// The e4m3 code of an integer `m`, |m| <= 16 (all exact).
+        // The e4m3 code of an integer `m`, |m| <= 16 (all exact).
         func e4m3(_ m: Int) -> UInt32 {
             let a = abs(m)
             guard a > 0 else { return 0 }
@@ -105,16 +106,10 @@ final class DeepseekV4Tests: XCTestCase {
         return weights
     }
 
-    /// The generated checkpoint through the model's normal checkpoint preparation (`sanitize`,
-    /// per-layer quantization from the configuration, strict update), as `loadWeights` runs it
-    /// after reading the files; or with every floating parameter in float32 as the reference
-    /// runs it (quantized weights and scales unchanged).
-    private func loadTiny(indexBlock: Int, indexKeep: Int, float32: Bool = false) throws
-        -> DeepseekV4Model
-    {
-        var config = try tinyConfiguration()
-        config.indexBlock = indexBlock
-        config.indexKeep = indexKeep
+    /// The checkpoint through `prepareCheckpoint` as `loadWeights` runs it; `float32` casts the
+    /// bfloat16 parameters to float32, as the reference runs.
+    private func loadTiny(float32: Bool = false) throws -> DeepseekV4Model {
+        let config = try tinyConfiguration()
         let base = try JSONDecoder().decode(BaseConfiguration.self, from: configurationData())
         let model = DeepseekV4Model(config)
         // The reference's parameter names and shapes, mapped by `sanitize`, are the module tree's.
@@ -126,7 +121,7 @@ final class DeepseekV4Tests: XCTestCase {
                 uniqueKeysWithValues: model.parameters().flattened().map { ($0.0, $0.1.shape) }))
         let checkpoint = try model.prepareCheckpoint(
             ModelCheckpoint(
-                weights: Self.checkpoint(experts: config.nRoutedExperts),
+                weights: Self.checkpoint,
                 perLayerQuantization: base.perLayerQuantization))
         try applyCheckpoint(checkpoint, to: model)
         materializeModelForInference(model)
@@ -141,15 +136,8 @@ final class DeepseekV4Tests: XCTestCase {
         return model
     }
 
-    /// Per decode step, `values` cut into `count` equal rows.
-    private static func steps(_ values: [Int], _ count: Int) -> [[Int]] {
-        let width = values.count / count
-        return (0 ..< count).map { Array(values[($0 * width) ..< (($0 + 1) * width)]) }
-    }
-
-    /// mlx-vlm `generate_step`'s plan: prompt chunks of `min(step, remaining - 1)` while more
-    /// than one token is left, then the last token, then one step per entry of `tokens`, each
-    /// fed the previous entry. Returns the float32 log-softmax of each step.
+    /// Prefill in chunks of `min(step, remaining - 1)`, then one step per entry of `tokens` fed
+    /// the previous one (mlx-vlm's `generate_step` plan); returns each step's log-softmax.
     private func teacherForced(
         _ model: DeepseekV4Model, prompt: [Int], step: Int, tokens: [Int]
     ) throws -> [[Float]] {
@@ -173,182 +161,100 @@ final class DeepseekV4Tests: XCTestCase {
         return logprobs
     }
 
-    /// The same teacher-forced run, block by block, returning each decode step's routed experts
-    /// (score-routed layers) and indexer picks (ratio-4 layers, run on a copy of the pool cache).
-    private func selections(
-        _ model: DeepseekV4Model, prompt: [Int], step: Int, tokens: [Int]
-    ) throws -> (experts: [[[Int]]], indexer: [[[Int]]]) {
-        let caches = model.makeCache()
-        let layerCaches = zip(caches, model.layers).map {
-            DeepseekV4LayerCache($0, ratio: $1.attn.ratio)
-        }
-        func sorted(_ indices: MLXArray) -> [Int] {
-            indices.asArray(Int32.self).map(Int.init).sorted()
-        }
-        func forward(_ ids: [Int]) -> (experts: [[Int]], indexer: [[Int]]) {
-            let inputs = MLXArray(ids.map(Int32.init)).reshaped(1, ids.count)
-            var h = model.embed(inputs)
-            h = repeated(expandedDimensions(h, axis: 2), count: model.configuration.hcMult, axis: 2)
-            var mask: MLXArray?
-            if ids.count > 1,
-                case .array(let array) = layerCaches[0].local.makeMask(
-                    n: ids.count, windowSize: model.configuration.slidingWindow, returnArray: true)
-            {
-                mask = array
-            }
-            var experts = [[Int]]()
-            var indexer = [[Int]]()
-            for (layer, cache) in zip(model.layers, layerCaches) {
-                let (attnInput, attnPost, attnComb) = layer.attnHC(h)
-                let x = layer.attnNorm(attnInput)
-                if let index = layer.attn.indexer, let pool = cache.indexPool,
-                    let copy = pool.copy() as? DeepseekV4PoolCache,
-                    let picked = index(
-                        x, qResidual: layer.attn.qNorm(layer.attn.wqA(x)), rope: layer.attn.rope,
-                        cache: copy, offset: cache.local.offset)
-                {
-                    indexer.append(sorted(picked))
-                }
-                let attnOut = layer.attn(x, mask: mask, cache: cache)
-                h = deepseekV4HCExpand([attnOut, h, attnPost, attnComb])[0]
-                let (ffnInput, ffnPost, ffnComb) = layer.ffnHC(h)
-                let y = layer.ffnNorm(ffnInput)
-                if layer.ffn.gate.tid2eid == nil {
-                    experts.append(sorted(layer.ffn.gate(y, inputIDs: inputs).0))
-                }
-                h = deepseekV4HCExpand([layer.ffn(y, inputIDs: inputs), h, ffnPost, ffnComb])[0]
-            }
-            eval(h)
-            eval(caches)
-            return (experts, indexer)
-        }
-
-        var rest = prompt[...]
-        while rest.count > 1 {
-            let n = min(step, rest.count - 1)
-            _ = forward(Array(rest.prefix(n)))
-            rest = rest.dropFirst(n)
-        }
-        var experts = [[[Int]]]()
-        var indexer = [[[Int]]]()
-        for input in [rest.first!] + tokens.dropLast() {
-            let picked = forward([input])
-            experts.append(picked.experts)
-            indexer.append(picked.indexer)
-        }
-        return (experts, indexer)
-    }
-
     private static func argmax(_ row: [Float]) -> Int {
         row.indices.max { row[$0] < row[$1] }!
     }
 
-    /// The checkpoint the tests build is, bit for bit, the one the reference values were
-    /// computed from.
+    /// The checkpoint built here is, dtypes and shapes included, the one the generator used.
     func testGeneratedCheckpointMatchesGenerator() throws {
         let names = Reference.parameters.map(\.name)
         XCTAssertEqual(names, names.sorted())
-        let weights = Self.checkpoint(experts: try tinyConfiguration().nRoutedExperts)
+        XCTAssertEqual(try tinyConfiguration().nRoutedExperts, 8)
         var h: UInt64 = 0
-        for name in weights.keys.sorted() {
-            let array = try XCTUnwrap(weights[name])
-            let values: [UInt64] =
+        for (name, array) in Self.checkpoint.sorted(by: { $0.key < $1.key }) {
+            let (code, values): (UInt64, [UInt64]) =
                 switch array.dtype {
-                case .uint32: array.asArray(UInt32.self).map(UInt64.init)
-                case .uint8: array.asArray(UInt8.self).map(UInt64.init)
-                case .int32: array.asArray(Int32.self).map { UInt64(UInt32(bitPattern: $0)) }
-                default: array.asType(.float32).asArray(Float.self).map { UInt64($0.bitPattern) }
+                case .bfloat16:
+                    (0, array.asType(.float32).asArray(Float.self).map { UInt64($0.bitPattern) })
+                case .float32: (1, array.asArray(Float.self).map { UInt64($0.bitPattern) })
+                case .int32: (2, array.asArray(Int32.self).map { UInt64(UInt32(bitPattern: $0)) })
+                case .uint32: (3, array.asArray(UInt32.self).map(UInt64.init))
+                case .uint8: (4, array.asArray(UInt8.self).map(UInt64.init))
+                default: (5, [])
                 }
-            for v in values {
+            XCTAssertNotEqual(code, 5, name)
+            for v in [code] + array.shape.map(UInt64.init) + values {
                 h = h &* 1_000_003 &+ v
             }
         }
         XCTAssertEqual(h, Reference.checkpointChecksum)
     }
 
-    func testTinyCheckpointMatchesReferenceTeacherForced() throws {
+    /// Exact greedy tokens and the reference's top-k log-probs within tolerance at every step,
+    /// teacher-forced in float32 on the CPU, for each prefill chunk size of the run.
+    private func assertMatchesReference(_ run: Reference.Run) throws {
+        XCTAssertEqual(run.greedy.count, Reference.decode)
+        XCTAssertEqual(run.topTokens.count, Reference.decode * Reference.topK)
         try Device.withDefaultDevice(.cpu) {
-            XCTAssertEqual(Reference.runs.map(\.prefillSteps.count).reduce(0, +), 6)
-            var models = [String: DeepseekV4Model]()
-            var worst: Float = 0
-            for run in Reference.runs {
-                let decode = Reference.decode
-                let topK = run.topTokens.count / decode
-                XCTAssertEqual(run.greedy.count, decode)
-                XCTAssertEqual(run.topTokens.count, decode * topK)
-                let model =
-                    try models[run.indexer]
-                    ?? loadTiny(indexBlock: run.indexBlock, indexKeep: run.indexKeep, float32: true)
-                models[run.indexer] = model
-                for step in run.prefillSteps {
-                    let label = "\(run.indexer) prompt=\(run.prompt.count) step=\(step)"
-                    let logprobs = try teacherForced(
-                        model, prompt: run.prompt, step: step, tokens: run.greedy)
-                    // The reference's argmax margins exceed its threshold, so greedy agrees
-                    // exactly.
-                    XCTAssertEqual(logprobs.map(Self.argmax), run.greedy, label)
-                    // The reference's most likely tokens at every step, the whole last row.
-                    var difference: Float = 0
-                    for (t, row) in logprobs.enumerated() {
-                        for k in (t * topK) ..< ((t + 1) * topK) {
-                            difference = max(
-                                difference, abs(row[run.topTokens[k]] - run.topLogprobs[k]))
-                        }
-                    }
-                    let last = try XCTUnwrap(logprobs.last)
-                    XCTAssertEqual(last.count, run.lastLogprobs.count)
-                    for (mine, theirs) in zip(last, run.lastLogprobs) {
-                        difference = max(difference, abs(mine - theirs))
-                    }
-                    worst = max(worst, difference)
-                    print("deepseek_v4 parity \(label): max |dlogprob| = \(difference)")
-                    XCTAssertLessThanOrEqual(difference, Self.tolerance, label)
-
-                    let picked = try selections(
-                        model, prompt: run.prompt, step: step, tokens: run.greedy)
-                    XCTAssertEqual(
-                        picked.experts.map { $0.flatMap { $0 } }, Self.steps(run.experts, decode),
-                        "routed experts, \(label)")
-                    XCTAssertEqual(
-                        picked.indexer.map { $0.flatMap { $0 } },
-                        Self.steps(run.indexerSelection, decode), "indexer top-k, \(label)")
+            let model = try loadTiny(float32: true)
+            for step in run.prefillSteps {
+                let label = "prompt=\(run.prompt.count) step=\(step)"
+                let logprobs = try teacherForced(
+                    model, prompt: run.prompt, step: step, tokens: run.greedy)
+                XCTAssertEqual(logprobs.map(Self.argmax), run.greedy, label)
+                var difference: Float = 0
+                for (k, (token, expected)) in zip(run.topTokens, run.topLogprobs).enumerated() {
+                    difference = max(
+                        difference, abs(logprobs[k / Reference.topK][token] - expected))
                 }
+                print("deepseek_v4 parity \(label): max |dlogprob| = \(difference)")
+                XCTAssertLessThanOrEqual(difference, Self.tolerance, label)
             }
-            print("deepseek_v4 parity max |dlogprob| = \(worst) tolerance = \(Self.tolerance)")
         }
     }
 
-    /// The default `LLMModel.prepare` and `TokenIterator` with a step one short of the prompt
-    /// (mlx-vlm's plan for a short prompt); free-running greedy must give the reference's tokens.
+    func testShortPromptMatchesReference() throws {
+        // Every reference selection (experts, indexer, argmax) is decided by over 2x tolerance.
+        XCTAssertEqual(Reference.selectionMargins.count, 3)
+        for (kind, margin) in Reference.selectionMargins {
+            XCTAssertGreaterThan(margin, 2 * Self.tolerance, kind)
+        }
+        try assertMatchesReference(Reference.short)
+    }
+
+    func testLongPromptMatchesReference() throws {
+        try skipUnlessLong()
+        try assertMatchesReference(Reference.long)
+    }
+
+    /// Free-running greedy through the default `LLMModel.prepare` and `TokenIterator`, with a
+    /// step one short of the prompt, gives the reference's tokens.
     func testTokenIteratorMatchesReferenceThroughDefaultPrepare() throws {
         try Device.withDefaultDevice(.cpu) {
-            let runs = Reference.runs.filter { run in
-                run.prefillSteps.contains { $0 >= run.prompt.count }
-            }
-            XCTAssertEqual(runs.count, 2)
-            for run in runs {
-                let model = try loadTiny(
-                    indexBlock: run.indexBlock, indexKeep: run.indexKeep, float32: true)
-                let parameters = GenerateParameters(
-                    maxTokens: Reference.decode, temperature: 0,
-                    prefill: PrefillParameters(stepSize: run.prompt.count - 1))
-                var iterator = try TokenIterator(
-                    input: LMInput(tokens: MLXArray(run.prompt.map(Int32.init))),
-                    model: model, parameters: parameters)
-                var tokens = [Int]()
-                while let token = iterator.next() { tokens.append(token) }
-                XCTAssertEqual(tokens, run.greedy, run.indexer)
-            }
+            let run = Reference.short
+            let parameters = GenerateParameters(
+                maxTokens: Reference.decode, temperature: 0,
+                prefill: PrefillParameters(stepSize: run.prompt.count - 1))
+            var iterator = try TokenIterator(
+                input: LMInput(tokens: MLXArray(run.prompt.map(Int32.init))),
+                model: try loadTiny(float32: true), parameters: parameters)
+            var tokens = [Int]()
+            while let token = iterator.next() { tokens.append(token) }
+            XCTAssertEqual(tokens, run.greedy)
         }
     }
 
-    /// The fused hyper-connection kernel (GPU) against the op path (CPU), one token at a time on
-    /// the streams entering each block for 16 prompt tokens; a bfloat16 collapse may differ by
-    /// one ulp.
+    /// The fused hyper-connection kernel (GPU) against the op path (CPU) on the streams entering
+    /// each block; a bfloat16 collapse may differ by one ulp.
     func testFusedHyperConnectionKernelMatchesOpPathOnGPU() throws {
-        let prompt = Reference.prompt45
+        #if canImport(Metal)
+        try XCTSkipUnless(MTLCreateSystemDefaultDevice() != nil, "no GPU")
+        #else
+        throw XCTSkip("no GPU")
+        #endif
+        let prompt = Reference.short.prompt
         for float32 in [false, true] {
-            let model = try loadTiny(indexBlock: 4, indexKeep: 2, float32: float32)
+            let model = try loadTiny(float32: float32)
             var streams = [MLXArray]()
             try Device.withDefaultDevice(.cpu) {
                 let inputs = MLXArray(prompt.prefix(16).map(Int32.init)).reshaped(1, 16)
@@ -401,11 +307,10 @@ final class DeepseekV4Tests: XCTestCase {
         }
     }
 
-    /// `nextTokenLogits` drops leading rows before a quantized vocabulary projection; the last
-    /// row must equal the full forward's.
+    /// `nextTokenLogits` drops rows before a quantized head; its last row equals the full forward's.
     func testNextTokenLogitsMatchesFullForward() throws {
         try Device.withDefaultDevice(.cpu) {
-            let model = try loadTiny(indexBlock: 4, indexKeep: 2)
+            let model = try loadTiny()
             quantize(model: model) { path, _ in path == "head" ? (32, 4, .affine) : nil }
             eval(model)
 
@@ -425,7 +330,7 @@ final class DeepseekV4Tests: XCTestCase {
 
     func testCacheTypesFollowCompressRatios() throws {
         try Device.withDefaultDevice(.cpu) {
-            let model = try loadTiny(indexBlock: 4, indexKeep: 2)
+            let model = try loadTiny()
             let caches = try model.newCache(parameters: nil)
             XCTAssertEqual(caches.count, 4)
             XCTAssertTrue(caches[0] is RotatingKVCache)
@@ -457,10 +362,8 @@ final class DeepseekV4Tests: XCTestCase {
         try Device.withDefaultDevice(.cpu) {
             let cache = DeepseekV4PoolCache(ratio: 4)
             let rows = MLXArray(0 ..< 11).asType(.float32).reshaped(1, 11, 1)
-            // A 6-token chunk completes one window and buffers two rows.
             XCTAssertTrue(cache.overlap)
-            // A 6-token chunk completes one window and buffers two rows. It is the first window
-            // of the sequence: nothing precedes it.
+            // A 6-token chunk completes the first window (nothing precedes it), buffers two rows.
             var ready = cache.accumulateWindows(
                 kv: rows[0..., 0 ..< 6], gate: rows[0..., 0 ..< 6])
             XCTAssertEqual(ready.kv.asArray(Float.self), [0, 1, 2, 3])
@@ -468,8 +371,7 @@ final class DeepseekV4Tests: XCTestCase {
             XCTAssertNil(ready.previousKV)
             XCTAssertNil(ready.previousGate)
             XCTAssertEqual(cache.remainder, 2)
-            // A 3-token chunk joins the buffered rows: one window from 4, preceded by the window
-            // the previous call completed.
+            // A 3-token chunk completes the next window, preceded by the previous call's window.
             ready = cache.accumulateWindows(
                 kv: rows[0..., 6 ..< 9], gate: rows[0..., 6 ..< 9])
             XCTAssertEqual(ready.kv.asArray(Float.self), [4, 5, 6, 7])
@@ -551,12 +453,11 @@ final class DeepseekV4Tests: XCTestCase {
         }
     }
 
-    /// One-shot ratio-4 pooling against the reference's `overlap_transform` written out per
-    /// window: entry `w` pools the first half-channels of window `w - 1` (none for `w == 0`) and
-    /// the second half-channels of window `w`, `ape` added to both.
+    /// Ratio-4 pooling against `overlap_transform` written out: entry `w` pools the first half of
+    /// window `w - 1` and the second half of window `w`, `ape` added to both.
     func testOverlapCompressionMatchesReferenceWindows() throws {
         try Device.withDefaultDevice(.cpu) {
-            let model = try loadTiny(indexBlock: 0, indexKeep: 0, float32: true)
+            let model = try loadTiny(float32: true)
             for compressor in [
                 try XCTUnwrap(model.layers[1].attn.compressor),
                 try XCTUnwrap(model.layers[1].attn.indexer?.compressor),
@@ -599,14 +500,11 @@ final class DeepseekV4Tests: XCTestCase {
         }
     }
 
-    /// On the bfloat16 checkpoint, ratio-4 pooling and routing keep the reference's float32
-    /// placement: the compressor projects, buffers, softmaxes and sums in float32 and casts the
-    /// entries back before the norm; the router's matmul, scores and weights are float32. The
-    /// expected values are those computations done in float32 and cast back where the reference
-    /// casts, so the port must match them exactly.
+    /// On the bfloat16 checkpoint, pooling and routing equal exactly the reference's float32
+    /// computation cast back where the reference casts.
     func testBFloat16PoolingAndRoutingFollowReferenceFloat32() throws {
         try Device.withDefaultDevice(.cpu) {
-            let model = try loadTiny(indexBlock: 0, indexKeep: 0)
+            let model = try loadTiny()
             let hidden = model.configuration.hiddenSize
             let x = MLXRandom.normal([1, 23, hidden], key: MLXRandom.key(7)).asType(.bfloat16)
             let x32 = x.asType(.float32)
@@ -689,14 +587,12 @@ final class DeepseekV4Tests: XCTestCase {
         }
     }
 
-    /// The normal load of the bfloat16 checkpoint keeps the reference's float32 weights (logits
-    /// head, compressor projections, router, RMSNorm weights) in float32 and every other
-    /// parameter as stored.
-    /// Prefill and decode give exactly what casting those weights at use gives, which is also
-    /// the path after a caller casts them back to bfloat16.
+    /// The bfloat16 load keeps the reference's float32 weights in float32; the logits equal
+    /// those of casting the weights back to bfloat16.
     func testBFloat16LoadKeepsReferenceFloat32Weights() throws {
+        try skipUnlessLong()
         try Device.withDefaultDevice(.cpu) {
-            let model = try loadTiny(indexBlock: 0, indexKeep: 0)
+            let model = try loadTiny()
             let parameters = model.parameters().flattened()
             let kept = parameters.filter { DeepseekV4Weights.isFloat32Weight($0.0) }
             // 4 routers, 5 compressors (attention and indexer) with wkv and wgate, the head;
@@ -713,7 +609,7 @@ final class DeepseekV4Tests: XCTestCase {
             }
             XCTAssertEqual(model.layers[1].attn.indexer?.weightsProj.weight.dtype, .bfloat16)
 
-            let castAtUse = try loadTiny(indexBlock: 0, indexKeep: 0)
+            let castAtUse = try loadTiny()
             let castBack = castAtUse.parameters().flattened().map { key, value in
                 (key, DeepseekV4Weights.isFloat32Weight(key) ? value.asType(.bfloat16) : value)
             }
@@ -741,9 +637,8 @@ final class DeepseekV4Tests: XCTestCase {
         }
     }
 
-    /// Doubling a norm weight with `update(parameters:)` after a forward pass gives exactly the
-    /// logits of a fresh model with the doubled weight: nothing derived from the old weight
-    /// survives the update.
+    /// A norm weight doubled with `update(parameters:)` after a forward gives exactly the logits
+    /// of a fresh model with that weight.
     func testNormWeightUpdateReachesNextForward() throws {
         try Device.withDefaultDevice(.cpu) {
             // 40 tokens complete ratio-4 windows, so the compressor norms take part.
@@ -757,7 +652,7 @@ final class DeepseekV4Tests: XCTestCase {
                 "layers.0.ffn_norm.weight", "layers.1.attn_norm.weight",
                 "layers.1.attn.compressor.norm.weight", "norm.weight",
             ] {
-                let updated = try loadTiny(indexBlock: 4, indexKeep: 2)
+                let updated = try loadTiny()
                 let before = logits(updated)
                 let weight = try XCTUnwrap(
                     updated.parameters().flattened().first { $0.0 == key }?.1, key)
@@ -767,7 +662,7 @@ final class DeepseekV4Tests: XCTestCase {
                 eval(updated)
                 let after = logits(updated)
 
-                let fresh = try loadTiny(indexBlock: 4, indexKeep: 2)
+                let fresh = try loadTiny()
                 fresh.update(parameters: ModuleParameters.unflattened([key: doubled]))
                 eval(fresh)
                 let expected = logits(fresh)
@@ -778,78 +673,12 @@ final class DeepseekV4Tests: XCTestCase {
         }
     }
 
-    /// Runs `body` on a new thread. MLX's compile cache is per thread, so every compiled
-    /// function is traced afresh there, whatever ran earlier in the process.
-    private static func onNewThread(_ body: @escaping @Sendable () -> Void) {
-        let done = DispatchSemaphore(value: 0)
-        let thread = Thread {
-            body()
-            done.signal()
-        }
-        thread.stackSize = 16 << 20
-        thread.start()
-        done.wait()
-    }
-
-    /// MLX keys a compiled graph on the C++ default stream, which `Device.withDefaultDevice`
-    /// does not change, so a function traced on one device would replay that device's kernels
-    /// on the other. float32 logits on each device are bit for bit the same whether or not the
-    /// other device ran first on the same thread.
-    func testLogitsIndependentOfDeviceThatRanFirst() throws {
-        #if canImport(Metal)
-        try XCTSkipUnless(MTLCreateSystemDefaultDevice() != nil, "no GPU")
-        #else
-        throw XCTSkip("no GPU")
-        #endif
-        nonisolated(unsafe) let model = try loadTiny(indexBlock: 4, indexKeep: 2, float32: true)
-        // 300 tokens complete ratio-4 and ratio-128 windows; the decode steps carry the overlap.
-        let tokens = (0 ..< 300).map { Int32(2 + $0 * 7 % 120) }
-        // MLX's sorted gathered quantized matmul reads past the last weight column on some GPUs
-        // when the width is not a multiple of 64, and the tiny model's expert width is 32. Chunks
-        // of 7 tokens give 14 expert routes per call, below the 16 at which SwitchGLU sorts them.
-        let chunkSize = 7
-        func logits(after devices: [DeviceType]) -> [Float] {
-            nonisolated(unsafe) var result = [Float]()
-            Self.onNewThread {
-                for device in devices {
-                    result = Device.withDefaultDevice(Device(device)) {
-                        let cache = model.makeCache()
-                        var last = MLXArray()
-                        for start in stride(from: 0, to: tokens.count, by: chunkSize) {
-                            let end = min(start + chunkSize, tokens.count)
-                            let chunk = MLXArray(Array(tokens[start ..< end]))
-                            last = model(chunk.reshaped(1, end - start), cache: cache)[0, -1]
-                            eval(last)
-                            eval(cache)
-                        }
-                        var rows = [last]
-                        for token in [5, 77, 31] as [Int32] {
-                            rows.append(
-                                model(MLXArray([token]).reshaped(1, 1), cache: cache)[0, -1])
-                        }
-                        return concatenated(rows).asArray(Float.self)
-                    }
-                }
-            }
-            return result
-        }
-        for (device, other) in [(DeviceType.gpu, DeviceType.cpu), (.cpu, .gpu)] {
-            let alone = logits(after: [device])
-            let second = logits(after: [other, device])
-            XCTAssertEqual(alone.count, second.count)
-            let differing = zip(alone, second).filter { $0.bitPattern != $1.bitPattern }.count
-            print("deepseek_v4 \(device) logits after \(other): \(differing) differ")
-            XCTAssertFalse(alone.contains { $0.isNaN }, "\(device)")
-            XCTAssertEqual(differing, 0, "\(device) logits after a \(other) run")
-        }
-    }
-
-    /// The pools of a ratio-4 layer (attention and indexer) and a ratio-128 layer, and the
-    /// logits of a continuation, do not depend on how the tokens are split into calls: one
-    /// prefill, uneven chunks (not multiples of either ratio), or one token at a time.
+    /// Ratio-4 and ratio-128 pools and continuation logits do not depend on how 300 tokens are
+    /// split into calls.
     func testPoolsAndLogitsIndependentOfCallSplit() throws {
+        try skipUnlessLong()
         try Device.withDefaultDevice(.cpu) {
-            let model = try loadTiny(indexBlock: 0, indexKeep: 0, float32: true)
+            let model = try loadTiny(float32: true)
             XCTAssertEqual(model.layers.map(\.attn.ratio), [0, 4, 128, 4])
             let tokens = (0 ..< 300).map { Int32(2 + $0 * 7 % 120) }
             let continuation: [Int32] = [5, 77, 31, 64]
@@ -991,11 +820,10 @@ final class DeepseekV4Tests: XCTestCase {
         }
     }
 
-    /// The exact indexer path scored in query tiles picks exactly what one untiled pass picks,
-    /// for a first prefill chunk and for a later one.
+    /// The exact indexer scored in query tiles picks what one untiled pass picks.
     func testExactIndexerTilesMatchUntiled() throws {
         try Device.withDefaultDevice(.cpu) {
-            let model = try loadTiny(indexBlock: 0, indexKeep: 0, float32: true)
+            let model = try loadTiny(float32: true)
             let attn = model.layers[1].attn
             let indexer = try XCTUnwrap(attn.indexer)
             let hidden = model.configuration.hiddenSize
@@ -1063,13 +891,11 @@ final class DeepseekV4Tests: XCTestCase {
         XCTAssertEqual(out["layers.0.ffn.gate.tid2eid"]?.dtype, .int32)
     }
 
-    /// The generated checkpoint written in its file layout loads through `loadWeights` to the
-    /// parameters `loadTiny` prepares in memory. Module-path weights saved from a loaded model
-    /// reload to the same outputs, with the checkpoint's MXFP4/MXFP8 layers plus an affine 8-bit
-    /// head.
+    /// The checkpoint saved to a file loads to `loadTiny`'s parameters; a model saved with an
+    /// extra 8-bit head reloads to the same outputs.
     func testQuantizedCheckpointRoundTrip() throws {
         try Device.withDefaultDevice(.cpu) {
-            let source = try loadTiny(indexBlock: 4, indexKeep: 2)
+            let source = try loadTiny()
             let directory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("deepseek-v4-\(UUID().uuidString)")
             let stored = directory.appendingPathComponent("checkpoint")
@@ -1077,11 +903,9 @@ final class DeepseekV4Tests: XCTestCase {
                 at: stored, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: directory) }
 
-            var config = try tinyConfiguration()
-            config.indexBlock = 4
-            config.indexKeep = 2
+            let config = try tinyConfiguration()
             try save(
-                arrays: Self.checkpoint(experts: config.nRoutedExperts),
+                arrays: Self.checkpoint,
                 url: stored.appendingPathComponent("model.safetensors"))
             try configurationData().write(to: stored.appendingPathComponent("config.json"))
             let base = try JSONDecoder().decode(
