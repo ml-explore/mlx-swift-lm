@@ -1,9 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
 // port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/deepseek_v4 (MIT)
-// DeepSeek-V4 text model (no MTP): mHC hyper-connections, one KV head shared by keys and values,
-// a sliding window plus compressed KV pools (ratio 4 or 128) with a lightning indexer, and
-// sqrt-softplus or token-id hash routing. Module paths follow the MLX checkpoint layout.
+// DeepSeek-V4 text model (no MTP), checked against DeepSeek's inference/model.py.
 
 import Foundation
 import MLX
@@ -217,9 +215,8 @@ private func deepseekV4MultiLinear(_ module: Module, _ x: MLXArray) -> MLXArray 
     }
 }
 
-// MLX keys its compile cache on the C++ default stream, which `Device.withDefaultDevice` does not
-// change (the Swift default device is task-local), so a function traced under one device would
-// replay that device's kernels under the other. These compile one function per device type.
+// One compiled function per device type: MLX keys compiled graphs on the C++ default stream,
+// which `Device.withDefaultDevice` does not change, so a trace would replay the other device.
 
 private func deepseekV4PerDevice(
     _ make: () -> @Sendable (MLXArray, MLXArray) -> MLXArray
@@ -261,8 +258,7 @@ private func deepseekV4LimitedSwiGLU(limit: Float) -> @Sendable (MLXArray, MLXAr
 }
 
 /// As the reference's `RMSNorm`: float32 input and weight, rounded once to the input dtype.
-/// The weight is stored in float32 (`sanitize`), so its cast here only acts on a weight that a
-/// caller has set to another dtype.
+/// The weight is float32 after `sanitize`; the cast only acts on one a caller changed.
 final class DeepseekV4RMSNorm: RMSNorm {
     override func callAsFunction(_ x: MLXArray) -> MLXArray {
         self(float32: x.asType(.float32), dtype: x.dtype)
@@ -276,11 +272,8 @@ final class DeepseekV4RMSNorm: RMSNorm {
 
 // MARK: - RoPE
 
-/// Interleaved RoPE on the last `dims` channels, optional YaRN (no mscale) and an inverse mode.
-/// With `freqScale`, pooled entry `i` of a call at `base` sits at token `base + i * freqScale`.
-/// Not `YarnRoPE`: this rotates the trailing channels (interleaved pairs) and has an inverse mode.
-/// The frequency tables of every rotated head width (`headDims`) are built here, forward and
-/// inverse.
+/// Interleaved RoPE on the last `dims` channels with optional YaRN (no mscale) and an inverse,
+/// which `YarnRoPE` lacks; with `freqScale`, pooled entry `i` sits at `base + i * freqScale`.
 final class DeepseekV4RoPE {
     let dims: Int
     let freqScale: Int
@@ -346,9 +339,8 @@ final class DeepseekV4RoPE {
 
 // MARK: - Hyper-connections
 
-/// `post * x + comb^T @ residual`: the residual update of one mHC branch.
-/// Inputs: branch output `[B, L, D]`, residual `[B, L, hc, D]`, post `[B, L, hc]`,
-/// comb `[B, L, hc, hc]`.
+/// `post * x + comb^T @ residual`, one mHC branch's residual update: x `[B, L, D]`, residual
+/// `[B, L, hc, D]`, post `[B, L, hc]`, comb `[B, L, hc, hc]`.
 let deepseekV4HCExpand: @Sendable ([MLXArray]) -> [MLXArray] = deepseekV4PerDevice {
     compile(shapeless: true) { args in
         let (x, residual, post, comb) = (args[0], args[1], args[2], args[3])
@@ -359,9 +351,7 @@ let deepseekV4HCExpand: @Sendable ([MLXArray]) -> [MLXArray] = deepseekV4PerDevi
     }
 }
 
-/// For `hc_mult == 4`: the `pre`/`post` sigmoids, the Sinkhorn-normalized `comb` and the
-/// `pre`-weighted collapse of the streams. Inputs: `x_in` `[B, L, 4, D]`, `mixes` `[B, L, 24]`,
-/// float32 `scale` and `base`.
+/// `hc_mult == 4`: pre/post sigmoids, Sinkhorn `comb` and the pre-weighted stream collapse.
 /// Metal source from mlx-vlm `hyper_connection.py` (Copyright © 2026 Apple Inc., MIT).
 private let deepseekV4HCSinkhornCollapseKernel = MLXFast.metalKernel(
     name: "deepseek_v4_hc_sinkhorn_collapse",
@@ -602,9 +592,8 @@ final class DeepseekV4MLP: Module, UnaryLayer {
     }
 }
 
-/// Router: `sqrt(softplus(logits))` scores. Hash layers take their experts from
-/// `tid2eid[token]`, the others the top-k of `scores + bias`. The weights are the scores at the
-/// chosen experts, renormalized and scaled.
+/// Router: experts from `tid2eid[token]` (hash layers) or the top-k of `sqrt(softplus(logits))
+/// + bias`; weights are the unbiased scores at those experts, renormalized and scaled.
 final class DeepseekV4MoEGate: Module {
     @ParameterInfo(key: "weight") var weight: MLXArray
     @ParameterInfo(key: "bias") var bias: MLXArray?
@@ -689,10 +678,8 @@ final class DeepseekV4MoE: Module {
 
 // MARK: - Compressed pool cache
 
-/// The state of one compressed-attention branch: the raw kv/gate rows of the window still
-/// filling up (fewer than `ratio`), on ratio-4 (overlapping) pools the raw rows of the last
-/// completed window, and the pool of compressed entries, one per `ratio` tokens.
-/// After mlx-vlm's `PoolingCache`. `offset` counts the tokens seen, like the window cache.
+/// One compressed branch (after mlx-vlm's `PoolingCache`): rows of the open window, on ratio-4
+/// pools the last completed window, and one pooled entry per `ratio` tokens seen (`offset`).
 final class DeepseekV4PoolCache: BaseKVCache {
     let ratio: Int
     /// As the reference's `Compressor.overlap`: each ratio-4 entry also pools the window before
@@ -709,9 +696,8 @@ final class DeepseekV4PoolCache: BaseKVCache {
     private(set) var previousKV: MLXArray?
     private(set) var previousGate: MLXArray?
 
-    /// `[B, capacity, D]` storage of the compressed entries in token order, grown `step` entries
-    /// at a time like `KVCacheSimple`; the first `pooledCount` are live. `nil` before the first
-    /// window.
+    /// `[B, capacity, D]` pooled entries in token order, grown `step` at a time; the first
+    /// `pooledCount` are live. `nil` before the first window.
     private var pooledStorage: MLXArray?
     private(set) var pooledCount = 0
     var step = 256
@@ -734,10 +720,8 @@ final class DeepseekV4PoolCache: BaseKVCache {
         [bufferKV, bufferGate, previousKV, previousGate, pooledStorage].compactMap { $0 }
     }
 
-    /// Rows of every window this call completes, `[B, W * ratio, D]` (empty when none), the
-    /// token position of the first such row and, on overlapping pools, the `[B, ratio, D]` rows
-    /// of the window before that one (`nil` for the first window of the sequence). `kv`/`gate`
-    /// are `[B, L, D]` projections of the next `L` tokens.
+    /// Rows of the windows this call completes `[B, W * ratio, D]`, the first one's position and,
+    /// on overlapping pools, the window before it (`nil` for the sequence's first window).
     func accumulateWindows(kv: MLXArray, gate: MLXArray)
         -> (kv: MLXArray, gate: MLXArray, base: Int, previousKV: MLXArray?, previousGate: MLXArray?)
     {
@@ -817,9 +801,8 @@ final class DeepseekV4PoolCache: BaseKVCache {
         return pooledStorage![0..., ..<pooledCount]
     }
 
-    /// `[L, P]` visibility of the pooled entries to the queries at `offset ..< offset + L`:
-    /// entry `i` is visible to the query at `t` iff `i < (t + 1) / ratio`. `nil` for one query
-    /// or an empty pool.
+    /// `[L, P]`: entry `i` is visible to the query at token `t` iff `i < (t + 1) / ratio`;
+    /// `nil` for one query or an empty pool.
     func poolMask(queries L: Int, offset: Int) -> MLXArray? {
         guard pooledCount > 0, L > 1 else { return nil }
         let poolIndex = MLXArray.arange(pooledCount, dtype: .int32)
@@ -888,11 +871,8 @@ private let deepseekV4SimpleCompress: @Sendable (MLXArray, MLXArray, MLXArray) -
         }
     }
 
-/// Ratio-4 overlapping windows, as the reference's `overlap_transform`: each entry pools the
-/// `2 * ratio` rows of the first half-channels of the window before it and the second
-/// half-channels of its own window, `ape` added to both. Inputs: `kv`/`gate` `[B, W, R, 2D]`
-/// windows, `ape` `[R, 2D]`, and the `[B, 1, R, 2D]` window before the first one (zeros and
-/// gate `-inf` for the first window of the sequence, which has none).
+/// `overlap_transform` on kv/gate windows `[B, W, R, 2D]`: first half-channels of the previous
+/// window (zeros, gate `-inf`, before the first) and second half of its own, plus `ape`.
 private let deepseekV4OverlapCompress: @Sendable ([MLXArray]) -> [MLXArray] = deepseekV4PerDevice {
     compile { args in
         let (kv, gate, ape) = (args[0], args[1], args[2])
@@ -937,9 +917,8 @@ final class DeepseekV4Compressor: Module {
         super.init()
     }
 
-    /// The whole pool `[B, P, headDim]` after adding the windows that `x` (`[B, L, hidden]`)
-    /// completes. A caller that already has `x` in float32 passes it as `projectionInput` (the
-    /// two compressors of a ratio-4 layer share it).
+    /// The whole pool `[B, P, headDim]` after the windows `x` completes; `projectionInput` is `x`
+    /// already in float32, shared by the two compressors of a ratio-4 layer.
     func callAsFunction(
         _ x: MLXArray, cache: DeepseekV4PoolCache, projectionInput: MLXArray? = nil
     ) -> MLXArray {
@@ -1046,9 +1025,8 @@ final class DeepseekV4Indexer: Module {
 
 // MARK: - Attention
 
-/// All query heads attend to one KV head (keys = values): the sliding window plus the compressed
-/// pool (every entry, or the indexer's top-k once a ratio-4 pool exceeds `index_topk`), with
-/// per-head sinks. The output is inverse-rotated and projected through `o_groups` groups.
+/// Every query head attends to one KV head (keys = values) over the window and the pool (the
+/// indexer's top-k on ratio-4 layers), with per-head sinks; output projected in `o_groups`.
 final class DeepseekV4Attention: Module {
     let ratio: Int
     let heads: Int
@@ -1079,10 +1057,8 @@ final class DeepseekV4Attention: Module {
         self.scale = pow(Float(config.headDim), -0.5)
         self.normEps = config.rmsNormEps
         let eps = config.rmsNormEps
-        // The reference's ops in the activation dtype. Compiled on the GPU, where the fused
-        // steps after the reduction round exactly as when run one by one; the CPU's compiled
-        // float32 kernel does not, so the CPU runs them one by one. `mean` is its sum times
-        // `1 / headDim` in the input dtype, written out so the traced graph holds a constant.
+        // The reference's ops in the activation dtype; compiled on the GPU only, since the CPU's
+        // compiled kernel rounds differently. `mean` is written out so the trace holds a constant.
         let inverseCount = 1 / Double(config.headDim)
         let compiled = compile(shapeless: true) { (q: MLXArray) -> MLXArray in
             let meanSquare =
@@ -1423,11 +1399,8 @@ extension DeepseekV4Model: HiddenStateLanguageModel {
 // MARK: - Weight sanitization
 
 enum DeepseekV4Weights {
-    /// Map MLX checkpoint names to module paths: drop `mtp.*` and layers past
-    /// `num_hidden_layers`, stack per-expert weights into `switch_mlp`, group `wo_a`, move the
-    /// hyper-connection tensors under `attn_hc`/`ffn_hc`/`hc_head`, and make `tid2eid` int32.
-    /// Dense (unquantized) weights the reference keeps in float32 become float32 here, so the
-    /// forward pass does not cast them each step.
+    /// Checkpoint names to module paths (`mtp.*` and extra layers dropped, experts stacked, `wo_a`
+    /// grouped, `tid2eid` int32); dense weights the reference keeps in float32 become float32.
     static func sanitize(
         _ weights: [String: MLXArray], configuration: DeepseekV4Configuration
     ) -> [String: MLXArray] {
@@ -1491,9 +1464,8 @@ enum DeepseekV4Weights {
         return result
     }
 
-    /// The reference's float32 weights: the logits head, the compressor projections, the router
-    /// and the RMSNorm weights. Their forward passes also cast at use, so a later cast to another
-    /// dtype only brings back the per-step cast.
+    /// The reference's float32 weights (head, compressor projections, router, RMSNorm); their
+    /// forwards also cast at use, so a later cast elsewhere only costs a per-step cast.
     static func isFloat32Weight(_ name: String) -> Bool {
         name == "head.weight" || name.hasSuffix(".compressor.wkv.weight")
             || name.hasSuffix(".compressor.wgate.weight") || name.hasSuffix(".ffn.gate.weight")
