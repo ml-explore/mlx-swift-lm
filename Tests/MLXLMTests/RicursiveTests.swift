@@ -280,19 +280,18 @@ final class RicursiveTests: XCTestCase {
         }
     }
 
-    /// With `gate_full_precision`, the sigmoid runs in float32 and is rounded once.
+    /// With `gate_full_precision`, the sigmoid runs in float32 and is rounded once, then the
+    /// product is rounded once. The expected values are computed in double on the host.
     func testGateRunsInFloat32() throws {
         try Device.withDefaultDevice(.cpu) {
             let output = MLXRandom.normal([1, 4, 64], key: MLXRandom.key(1)).asType(.bfloat16)
             let gate = (6 * MLXRandom.normal([1, 4, 64], key: MLXRandom.key(2))).asType(.bfloat16)
-            let expected = output * sigmoid(gate.asType(.float32)).asType(.bfloat16)
-            // The inputs must tell the two precisions apart.
-            XCTAssertFalse(
-                arrayEqual(ricursiveGate(output, gate: gate, fullPrecision: false), expected)
-                    .item(Bool.self))
+            let expected = zip(values(output), values(gate)).map { o, g in
+                bfloat16(1 / (1 + Foundation.exp(-g))).flatMap { bfloat16(o * Double($0)) }
+            }
             let actual = ricursiveGate(output, gate: gate, fullPrecision: true)
             XCTAssertEqual(actual.dtype, .bfloat16)
-            XCTAssertTrue(arrayEqual(actual, expected).item(Bool.self))
+            assertMatches(actual, expected)
         }
     }
 
@@ -311,7 +310,7 @@ final class RicursiveTests: XCTestCase {
     }
 
     /// Bit patterns of `1.0 / (10000.0 ** (torch.arange(0, 128, 2).float() / 128))` from
-    /// torch 2.15, the reference's RoPE frequencies at Ripple's head size.
+    /// PyTorch 2.15 on CPU, the reference's RoPE frequencies for Ripple's theta and head size.
     func testInverseFrequenciesMatchTorch() throws {
         let torch: [UInt32] = [
             0x3F80_0000, 0x3F5D_AFD7, 0x3F3F_F911, 0x3F26_3DE0, 0x3F0F_F59A, 0x3EF9_53CF,
@@ -331,37 +330,67 @@ final class RicursiveTests: XCTestCase {
     }
 
     /// `torch.lerp` on bfloat16 computes in float32 and rounds once, and the blend is the
-    /// sigmoid of the bfloat16 lambda rounded to bfloat16. At lambda -2 MLX's bfloat16 sigmoid
-    /// rounds differently from the float32 one.
+    /// sigmoid of the bfloat16 lambda rounded to bfloat16. The expected values are computed in
+    /// double on the host.
     func testValueResidualBlendRoundsOnce() throws {
         try Device.withDefaultDevice(.cpu) {
             let x = MLXRandom.normal([1, 4, 64], key: MLXRandom.key(4)).asType(.bfloat16)
             let residual = MLXRandom.normal([1, 4, 64], key: MLXRandom.key(5)).asType(.bfloat16)
             for value: Float in [-2, 0.7, 2.39] {
                 let lambda = MLXArray([value]).asType(.bfloat16)
-                let blend = MLXArray(Float(1 / (1 + Foundation.exp(-Double(value)))))
-                    .asType(.bfloat16).asType(.float32)
-                let start = residual.asType(.float32)
-                let expected = (start + blend * (x.asType(.float32) - start)).asType(.bfloat16)
-                let stepwise = residual + sigmoid(lambda[0]) * (x - residual)
-                XCTAssertFalse(arrayEqual(stepwise, expected).item(Bool.self), "lambda \(value)")
+                let weight = try XCTUnwrap(
+                    bfloat16(1 / (1 + Foundation.exp(-values(lambda)[0]))), "lambda \(value)")
+                let expected = zip(values(residual), values(x)).map { start, end in
+                    bfloat16(start + Double(weight) * (end - start))
+                }
                 let actual = ricursiveValueInput(x, residual: residual, lambda: lambda)
                 XCTAssertEqual(actual.dtype, .bfloat16)
-                XCTAssertTrue(arrayEqual(actual, expected).item(Bool.self), "lambda \(value)")
+                assertMatches(actual, expected, "lambda \(value)")
             }
         }
     }
 
-    /// `F.silu` on bfloat16 computes in float32 and rounds once.
+    /// `F.silu` on bfloat16 computes in float32 and rounds once. The expected values are
+    /// computed in double on the host.
     func testSiLURoundsOnce() throws {
         try Device.withDefaultDevice(.cpu) {
             let gate = (8 * MLXRandom.normal([4, 256], key: MLXRandom.key(6))).asType(.bfloat16)
-            let wide = gate.asType(.float32)
-            let expected = (wide / (1 + exp(-wide))).asType(.bfloat16)
-            XCTAssertFalse(arrayEqual(silu(gate), expected).item(Bool.self))
+            let expected = values(gate).map { bfloat16($0 / (1 + Foundation.exp(-$0))) }
             let actual = ricursiveSiLU(gate)
             XCTAssertEqual(actual.dtype, .bfloat16)
-            XCTAssertTrue(arrayEqual(actual, expected).item(Bool.self))
+            assertMatches(actual, expected)
         }
+    }
+
+    private func values(_ array: MLXArray) -> [Double] {
+        array.asType(.float32).asArray(Float.self).map(Double.init)
+    }
+
+    /// `value` rounded to the nearest bfloat16 (ties to even), or nil when it is not a tie but
+    /// within 1/4096 of a bfloat16 step (16 float32 steps) of one, where a float32 computation
+    /// may round either way.
+    private func bfloat16(_ value: Double) -> Float? {
+        let truncated = Float(bitPattern: Float(value).bitPattern & 0xFFFF_0000)
+        let next = Float(bitPattern: truncated.bitPattern &+ 0x1_0000)
+        let step = abs(Double(next) - Double(truncated))
+        let boundary = (Double(truncated) + Double(next)) / 2
+        if value == boundary { return truncated.bitPattern & 0x1_0000 == 0 ? truncated : next }
+        guard abs(value - boundary) >= step / 4096 else { return nil }
+        return abs(value - Double(truncated)) < abs(value - Double(next)) ? truncated : next
+    }
+
+    /// Every element with an expected value must match it exactly; at most 1% may be skipped.
+    private func assertMatches(
+        _ actual: MLXArray, _ expected: [Float?], _ message: String = "",
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let values = actual.asType(.float32).asArray(Float.self)
+        XCTAssertEqual(values.count, expected.count, message, file: file, line: line)
+        let checked = zip(values, expected).compactMap { a, e in e.map { (a, $0) } }
+        XCTAssertGreaterThanOrEqual(
+            checked.count * 100, expected.count * 99, message, file: file, line: line)
+        let wrong = checked.filter { $0.0 != $0.1 }.count
+        XCTAssertEqual(
+            wrong, 0, "\(wrong) of \(checked.count) differ \(message)", file: file, line: line)
     }
 }

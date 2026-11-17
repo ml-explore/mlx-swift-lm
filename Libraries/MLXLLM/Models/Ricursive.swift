@@ -106,9 +106,11 @@ extension RicursiveConfiguration: ModelConfigurationValidating {
     }
 }
 
-/// `1 / theta^(i / dimensions)` for even `i`, as float32 values bitwise equal to the
-/// reference's `1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))`: the power is
-/// rounded to float32 once, then inverted in float32. MLX's float32 `pow` can differ by an ulp.
+/// `1 / theta^(i / dimensions)` for even `i`, in float32: the power is taken in double,
+/// rounded to float32 once, then inverted in float32. For Ripple's theta (10000) and head
+/// size (128) this equals the reference's `1.0 / (theta ** (torch.arange(0, dim, 2).float() /
+/// dim))` bit for bit on PyTorch 2.15 CPU; that is not shown for other values. MLX's float32
+/// `pow` was an ulp off on 16 of those 64 values.
 func ricursiveInverseFrequencies(theta: Float, dimensions: Int) -> MLXArray {
     MLXArray(
         stride(from: 0, to: dimensions, by: 2).map { i -> Float in
@@ -116,9 +118,13 @@ func ricursiveInverseFrequencies(theta: Float, dimensions: Int) -> MLXArray {
         })
 }
 
-/// The value-projection input `lerp(residual, x, sigmoid(lambda))`. The reference takes the
-/// sigmoid in the parameter's precision and `torch.lerp` computes in float32 and rounds once,
-/// so both are done in float32 here and rounded where the reference rounds.
+/// The value-projection input `lerp(residual, x, sigmoid(lambda))`. The sigmoid is taken in
+/// float32 and rounded to the parameter's precision, and the blend is computed in float32 and
+/// rounded once, as PyTorch does on reduced-precision tensors. `torch.lerp` switches to
+/// `end - (end - start) * (1 - weight)` for weights of 0.5 and above; this uses its
+/// `start + weight * (end - start)` form for every weight, so that the weight never has to be
+/// read back. With PyTorch 2.15 on CPU, on bfloat16, the two forms gave no differing element
+/// at weights up to 0.92 and about 1e-5 of elements as the weight approaches 1.
 func ricursiveValueInput(_ x: MLXArray, residual: MLXArray, lambda: MLXArray) -> MLXArray {
     let blend = sigmoid(lambda[0].asType(.float32)).asType(lambda.dtype).asType(x.dtype)
         .asType(.float32)
@@ -127,7 +133,7 @@ func ricursiveValueInput(_ x: MLXArray, residual: MLXArray, lambda: MLXArray) ->
 }
 
 /// SiLU in float32, rounded once to the input's precision, as PyTorch's `F.silu` does on a
-/// reduced-precision tensor. MLXNN's `silu` rounds the sigmoid before the product.
+/// reduced-precision tensor. MLXNN's `silu` on bfloat16 rounds the sigmoid before the product.
 func ricursiveSiLU(_ x: MLXArray) -> MLXArray {
     silu(x.asType(.float32)).asType(x.dtype)
 }
