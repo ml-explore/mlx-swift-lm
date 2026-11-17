@@ -9,10 +9,8 @@ import XCTest
 /// checkpoint described in `tools/glm5-next-reference.py`.
 final class GLM5NextReferenceTests: XCTestCase {
 
-    // The hash gives untied, reproducible weights without a checked-in file; norm weights are
-    // offset to 1 and hyper-connection scales to 0.5 so they start near their trained values.
-    /// The generator's `weight_values`: a hash of the flat element index, the tensor's index
-    /// in sorted checkpoint-name order and the seed, then one float32 division.
+    /// The generator's `weight_values`: reproducible untied weights from a hash of the element
+    /// index, the sorted tensor index and the seed; norms are offset to 1, hc scales to 0.5.
     private func weightValues(_ name: String, index: Int, shape: [Int], seed: Int) -> MLXArray {
         let (numeratorShift, denominator): (Int, Int) =
             if name.hasSuffix("norm.weight") {

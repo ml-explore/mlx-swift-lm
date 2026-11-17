@@ -333,7 +333,7 @@ final class GLM5NextLinearAttention: Module {
 
         let decay = forgetGate(x)
         let beta = sigmoid(bProj(x))
-        let (out, state) = gatedDeltaUpdateVectorized(
+        let (out, state) = gatedDeltaUpdate(
             q: q, k: k, v: v, g: decay, beta: beta, state: cache?[1], useKernel: !training)
 
         if let cache {
@@ -416,6 +416,7 @@ final class GLM5NextAttentionCache: BaseKVCache {
     }
 
     /// `[latent, pooledKeys, pendingKeys, pendingGates]`; absent parts are empty arrays.
+    /// The `KVCache` protocol requires the setter; `copy()` uses it. There is no prompt-cache file.
     override var state: [MLXArray] {
         get {
             let empty = MLXArray.zeros([0])
@@ -432,13 +433,6 @@ final class GLM5NextAttentionCache: BaseKVCache {
             pooledKeys = present(newValue[1])
             pendingKeys = present(newValue[2])
             pendingGates = present(newValue[3])
-        }
-    }
-
-    override var metaState: [String] {
-        get { ["\(kpool)"] }
-        set {
-            precondition(newValue == ["\(kpool)"], "GLM5NextAttentionCache pool width mismatch")
         }
     }
 

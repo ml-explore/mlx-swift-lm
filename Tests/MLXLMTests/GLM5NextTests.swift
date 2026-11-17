@@ -72,10 +72,7 @@ final class GLM5NextTests: XCTestCase {
         }
     }
 
-    /// Run `body` on the CPU with compilation off. MLX's compile cache matches
-    /// entries on its global default stream, not on `withDefaultDevice`'s
-    /// task-local device, so a function compiled by an earlier GPU test would
-    /// replay its GPU trace here.
+    /// On the CPU with compilation off, so no GPU trace compiled by another test replays here.
     static func onCPU<R>(_ body: () throws -> R) rethrows -> R {
         compile(enable: false)
         defer { compile(enable: true) }
@@ -310,25 +307,83 @@ final class GLM5NextTests: XCTestCase {
         XCTAssertEqual(generated, expected)
     }
 
-    func testVectorizedGatedDeltaKernelMatchesOps() throws {
-        let (B, T, H, Dk, Dv) = (1, 12, 2, 32, 32)
-        let (q, k, v, g, beta, state) = withRandomState(MLXRandom.RandomState(seed: 5)) {
+    /// Per-channel gate `[B, T, H, Dk]` through `gatedDeltaUpdate`: the Metal kernel
+    /// against the ops recurrence, in float32 and in bfloat16 at GLM-5.3-Flash's
+    /// linear-attention sizes (64 heads of 128).
+    func testPerChannelGatedDeltaKernelMatchesOps() throws {
+        for (dtype, H, D, yTolerance, stateTolerance) in [
+            (DType.float32, 2, 32, Float(1e-4), Float(1e-4)),
+            (DType.bfloat16, 64, 128, Float(2e-2), Float(1e-4)),
+        ] {
+            let (B, T) = (1, 12)
+            let (q, k, v, g, beta, state) = withRandomState(MLXRandom.RandomState(seed: 5)) {
+                (
+                    (MLXRandom.normal([B, T, H, D]) * 0.2 / sqrt(Float(D) / 32)).asType(dtype),
+                    (MLXRandom.normal([B, T, H, D]) * 0.2 / sqrt(Float(D) / 32)).asType(dtype),
+                    MLXRandom.normal([B, T, H, D]).asType(dtype),
+                    exp(-MLXRandom.uniform(low: 0, high: 1, [B, T, H, D])),
+                    sigmoid(MLXRandom.normal([B, T, H])).asType(dtype),
+                    MLXRandom.normal([B, H, D, D]) * 0.1
+                )
+            }
+            let (yKernel, sKernel) = gatedDeltaUpdate(
+                q: q, k: k, v: v, g: g, beta: beta, state: state, useKernel: true)
+            let (yOps, sOps) = gatedDeltaUpdate(
+                q: q, k: k, v: v, g: g, beta: beta, state: state, useKernel: false)
+            eval(yKernel, sKernel, yOps, sOps)
+            XCTAssertEqual(yKernel.dtype, dtype)
+            let yDifference = maxAbsDifference(yKernel, yOps)
+            let stateDifference = maxAbsDifference(sKernel, sOps)
+            print(
+                "glm5_next gated delta \(dtype) H=\(H) D=\(D): y \(yDifference), state \(stateDifference)"
+            )
+            XCTAssertLessThan(yDifference, yTolerance, "\(dtype)")
+            XCTAssertLessThan(stateDifference, stateTolerance, "\(dtype)")
+        }
+    }
+
+    /// A per-channel decay from the public `a`/`aLog`/`dtBias` entry point at a layout
+    /// MLXFast's fused kernel accepts (16 heads of 128) is not sent to that kernel or to
+    /// the per-head kernel, which both read one decay per head: kernel and ops paths
+    /// match the recurrence written out here.
+    func testPerChannelGateThroughGatedDeltaUpdateMatchesRecurrence() throws {
+        let (B, T, H, D) = (1, 5, 16, 128)
+        let (q, k, v, a, b, aLog, dtBias, state) = withRandomState(
+            MLXRandom.RandomState(seed: 9)
+        ) {
             (
-                MLXRandom.normal([B, T, H, Dk]) * 0.2,
-                MLXRandom.normal([B, T, H, Dk]) * 0.2,
-                MLXRandom.normal([B, T, H, Dv]),
-                exp(-MLXRandom.uniform(low: 0, high: 1, [B, T, H, Dk])),
-                sigmoid(MLXRandom.normal([B, T, H])),
-                MLXRandom.normal([B, H, Dv, Dk]) * 0.1
+                MLXRandom.normal([B, T, H, D]) * 0.05, MLXRandom.normal([B, T, H, D]) * 0.05,
+                MLXRandom.normal([B, T, H, D]), MLXRandom.normal([B, T, H, D]),
+                MLXRandom.normal([B, T, H]), MLXRandom.normal([H, 1]) * 0.1,
+                MLXRandom.normal([H, D]), MLXRandom.normal([B, H, D, D]) * 0.1
             )
         }
-        let (yKernel, sKernel) = gatedDeltaUpdateVectorized(
-            q: q, k: k, v: v, g: g, beta: beta, state: state, useKernel: true)
-        let (yOps, sOps) = gatedDeltaUpdateVectorized(
-            q: q, k: k, v: v, g: g, beta: beta, state: state, useKernel: false)
-        eval(yKernel, sKernel, yOps, sOps)
-        XCTAssertLessThan(maxAbsDifference(yKernel, yOps), 1e-4)
-        XCTAssertLessThan(maxAbsDifference(sKernel, sOps), 1e-4)
+        // The recurrence, one step at a time, with the decay the entry point computes.
+        let g = exp(-exp(aLog) * softplus(a + dtBias))
+        let beta = sigmoid(b)
+        var expectedState = state
+        var ys = [MLXArray]()
+        for t in 0 ..< T {
+            let (qt, kt, vt) = (q[0..., t], k[0..., t], v[0..., t])
+            expectedState = expectedState * expandedDimensions(g[0..., t], axis: -2)
+            let memory = (expectedState * expandedDimensions(kt, axis: -2)).sum(axis: -1)
+            let delta = (vt - memory) * expandedDimensions(beta[0..., t], axis: -1)
+            expectedState =
+                expectedState + expandedDimensions(kt, axis: -2)
+                * expandedDimensions(delta, axis: -1)
+            ys.append((expectedState * expandedDimensions(qt, axis: -2)).sum(axis: -1))
+        }
+        let expected = stacked(ys, axis: 1)
+
+        for useKernel in [true, false] {
+            let (y, newState) = gatedDeltaUpdate(
+                q: q, k: k, v: v, a: a, b: b, aLog: aLog, dtBias: dtBias, state: state,
+                useKernel: useKernel)
+            eval(y, newState)
+            XCTAssertLessThan(maxAbsDifference(y, expected), 1e-4, "useKernel \(useKernel)")
+            XCTAssertLessThan(
+                maxAbsDifference(newState, expectedState), 1e-4, "useKernel \(useKernel)")
+        }
     }
 
     // MARK: - Weights
