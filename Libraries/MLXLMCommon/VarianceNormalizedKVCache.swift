@@ -996,6 +996,10 @@ public class VarianceNormalizedKVCache: BaseKVCache, KVCacheAttentionProtocol,
         return state
     }
 
+    public override func currentKeyValues() -> (keys: MLXArray, values: MLXArray)? {
+        materializedState()
+    }
+
     public func updateAndAttend(
         queries: MLXArray,
         keys: MLXArray,

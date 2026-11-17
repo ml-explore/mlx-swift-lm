@@ -168,6 +168,10 @@ let stream = session.streamDetails(to: "Explain this implementation")
 try session.steer("Focus on memory usage")
 ```
 
+To stop a response and keep what it wrote, call `interrupt()` rather than
+cancelling the consumer, which rolls the turn back. The stream finishes normally
+and the next call continues the same cache.
+
 ### Streaming with `ModelContainer.generate(...)`
 
 For lower-level control, prepare `UserInput` and generate directly:

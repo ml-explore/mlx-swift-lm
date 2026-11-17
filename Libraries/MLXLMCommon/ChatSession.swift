@@ -277,8 +277,9 @@ public final class ChatSession {
         /// for an empty generation and rolled back along with the user's message.
         var producedReasoning = false
 
-        /// Reasoning the model finished: an answer or a tool call followed it.
-        /// Recorded beside the message for templates that replay it.
+        /// Reasoning the model finished: an answer or a tool call followed it, or the
+        /// step ended at a safe point. Recorded beside the message for templates that
+        /// replay it.
         var finishedReasoning = ""
 
         /// Reasoning with nothing after it yet. A turn that ends here was cut off
@@ -293,7 +294,11 @@ public final class ChatSession {
         }
 
         mutating func consume(_ item: Generation) {
-            if item.chunk != nil || item.toolCall != nil {
+            // A step that ends at a safe point stops where its cache does, so its thought is
+            // complete as far as the cache goes. Recording it lets the next step continue.
+            if item.chunk != nil || item.toolCall != nil
+                || item.info?.stopReason.isSafePoint == true
+            {
                 finishedReasoning += openReasoning
                 openReasoning = ""
             }
@@ -772,7 +777,7 @@ public final class ChatSession {
     /// > transcript, so this initializer uses fragment-based continuation. A later
     /// > image-bearing turn continues warm from the cached prefix rather than rebuilding and
     /// > re-rendering earlier messages. Positions stay correct, but the prompt differs — and on
-    /// > vision encoders that attend across image boundaries (Qwen2-VL today) so do the new
+    /// > vision encoders that attend across image boundaries so do the new
     /// > image's features, since it is encoded alone rather than beside the cached one.
     /// > Use a history initializer when later turns must re-render the full conversation.
     public convenience init(
@@ -1090,6 +1095,27 @@ public final class ChatSession {
         _ text: String, policy: SteeringPolicy = .nextSafeBoundary, response: ResponseID? = nil
     ) throws -> UUID {
         try steeringRequests.steer(text, policy: policy, response: response)
+    }
+
+    /// End a running response at its next safe point and keep what it generated.
+    ///
+    /// Cancelling the stream's consumer rolls the turn back: the prompt and the
+    /// partial reply leave the transcript, and the next call prefills the whole
+    /// conversation again. An interrupted response instead records the reply up to
+    /// that point, so the next call continues the same cache. Its stream finishes
+    /// normally, and the step it ends reports ``GenerateStopReason/interrupted``.
+    ///
+    /// The response stops as a steered step does, inside a thought too. With
+    /// `toolDispatch`, calls the model already made run first, and the step that
+    /// answers their results stops at its first safe point. Instructions the
+    /// response has not applied are reported as ``SteeringEvent/failed(_:)``.
+    ///
+    /// - Parameter response: the response to interrupt. The default targets the
+    ///   response ``steer(_:policy:response:)`` would target.
+    /// - Throws: ``SteeringError/noActiveResponse`` or ``SteeringError/responseEnded``
+    ///   when no response is running.
+    public func interrupt(response: ResponseID? = nil) throws {
+        try steeringRequests.interrupt(response)
     }
 
     /// Produces a streaming response to a prompt by transforming the
@@ -1674,7 +1700,7 @@ public final class ChatSession {
                                 modelConfiguration: modelConfiguration,
                                 tokenizer: tokenizer,
                                 iterator: iterator,
-                                steering: conversation == nil ? nil : steering,
+                                steering: steering,
                                 handler: transformer.makeHandler(wrapping: base))
                         }
 
@@ -1716,7 +1742,18 @@ public final class ChatSession {
                             requiresMainOnlyContinuation = true
                         }
 
-                        if !speculationIsEligibleForParameters || requiresMainOnlyContinuation {
+                        if let diffusionModel = model as? any BlockDiffusionLanguageModel {
+                            guard speculativeDecoding == nil else {
+                                throw GenerateError.unsupportedSpeculativeDecoding(
+                                    String(describing: type(of: model)))
+                            }
+                            let iterator = try BlockDiffusionTokenIterator(
+                                input: input, model: diffusionModel, cacheStorage: kvCache,
+                                parameters: generateParameters, components: components)
+                            generation = startGeneration(iterator)
+                        } else if !speculationIsEligibleForParameters
+                            || requiresMainOnlyContinuation
+                        {
                             if speculativeDecoding != nil {
                                 if !speculationIsEligibleForParameters {
                                     speculativeDecodingFallbackReason = .unsupportedSampling
@@ -1779,6 +1816,12 @@ public final class ChatSession {
                                 let draftModel = await draftContainer.perform { context in
                                     SendableBox(context.model)
                                 }.consume()
+
+                                guard !draftModel.capabilities.contains(.blockDiffusion) else {
+                                    throw GenerateError.unsupportedSpeculativeDecoding(
+                                        String(describing: type(of: draftModel)))
+                                }
+
                                 let memoryEvaluation = speculativeDecoding.memoryPolicy?.evaluate(
                                     mainModel: model,
                                     draftModel: draftModel)
@@ -1972,6 +2015,7 @@ public final class ChatSession {
 
                         try Task.checkCancellation()
                         // Let the assistant answer tool results before adding a user turn.
+                        // An interrupted response takes no more instructions.
                         if !pendingMessages.contains(where: { $0.role == .tool }) {
                             applyingSteering = try steering.take(
                                 closeIfEmpty: pendingMessages.isEmpty)

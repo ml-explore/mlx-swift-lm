@@ -70,7 +70,11 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
     private var detokenizer: any StreamingDetokenizer
     private let toolCallProcessor: ToolCallProcessor
     private var stopStringFilter: StopStringFilter
-    private var hasCompleteText = false
+
+    /// Whether the latest token completed text that ends in a visible character.
+    /// Chat templates commonly trim a message's trailing whitespace, so a step that
+    /// ended after it would leave the cache holding tokens a re-render drops.
+    private var endsInVisibleText = false
 
     /// Absent for models with no reasoning protocol, which then decode and cost
     /// exactly what they did before.
@@ -110,22 +114,24 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
 
     var isInsideReasoning: Bool { reasoningEmitter?.isInsideReasoning ?? false }
 
-    /// Reasoning models finish their step, so a thought is never cut short.
+    /// A step can end where the transcript renders back what the cache holds: after
+    /// visible text, in a thought or in the answer, with nothing held back.
     var canEndForSteering: Bool {
-        reasoningEmitter == nil && hasCompleteText && stopStringFilter.buffer.isEmpty
+        endsInVisibleText && stopStringFilter.buffer.isEmpty
+            && (reasoningEmitter?.canEndForSteering ?? true)
             && toolCallProcessor.canEndForSteering
     }
 
     mutating func push(_ token: Int, emit: (TokenStreamEvent) -> Bool) -> Bool {
+        endsInVisibleText = false
         if let boundary = reasoningTokens?.boundary(for: token),
             reasoningEmitter?.isBoundary(boundary) == true
         {
             return push(boundary, emit: emit)
         }
         detokenizer.append(token: token)
-        hasCompleteText = false
         guard let chunk = detokenizer.next() else { return true }
-        hasCompleteText = !chunk.isEmpty
+        endsInVisibleText = chunk.last?.isWhitespace == false
         return process(chunk, emit: emit)
     }
 

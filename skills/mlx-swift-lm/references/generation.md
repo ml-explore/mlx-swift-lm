@@ -153,6 +153,8 @@ let (tokenStream, tokenTask) = try generateTokensTask(
 - `.cancelled`: task cancellation or early termination path.
 - `.steered`: a `ChatSession` step ended early to apply `steer(...)` input; the
   response continues with another step.
+- `.interrupted`: `interrupt()` ended a `ChatSession` response at a safe point;
+  its output is kept.
 
 ## Throwing vs Non-Throwing Behavior
 
