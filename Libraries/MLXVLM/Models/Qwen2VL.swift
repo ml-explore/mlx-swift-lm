@@ -508,6 +508,29 @@ private enum Language {
 
 // MARK: - Vision
 
+/// Per-image vision attention. Patch rows of every image are concatenated;
+/// `cuSeqlens` are the block boundaries. Returns `[rows, heads * headDim]`.
+func qwen2VLSegmentedVisionAttention(
+    queries: MLXArray, keys: MLXArray, values: MLXArray, scale: Float, cuSeqlens: [Int]
+) -> MLXArray {
+    let rows = queries.dim(0)
+    precondition(
+        cuSeqlens.first == 0 && cuSeqlens.last == rows,
+        "vision cu_seqlens \(cuSeqlens) do not cover \(rows) patch rows")
+    var outputs = [MLXArray]()
+    outputs.reserveCapacity(cuSeqlens.count - 1)
+    for i in 1 ..< cuSeqlens.count {
+        let range = cuSeqlens[i - 1] ..< cuSeqlens[i]
+        let q = queries[range][.newAxis].transposed(0, 2, 1, 3)
+        let k = keys[range][.newAxis].transposed(0, 2, 1, 3)
+        let v = values[range][.newAxis].transposed(0, 2, 1, 3)
+        let o = MLXFast.scaledDotProductAttention(
+            queries: q, keys: k, values: v, scale: scale, mask: .none)
+        outputs.append(o.transposed(0, 2, 1, 3).reshaped(range.count, -1))
+    }
+    return concatenated(outputs, axis: 0)
+}
+
 private enum Vision {
 
     static fileprivate func applyMultimodalRotaryPositionEmbedding(
@@ -573,8 +596,6 @@ private enum Vision {
             _ x: MLXArray, frames: [THW], rotaryPositionEmbedding: MLXArray
         ) -> MLXArray {
             let sequenceLength = x.dim(0)
-            let B = frames[0].t
-            let L = sequenceLength / B
 
             let qkv = qkv(x)
             let s = split(qkv, parts: 3, axis: -1)
@@ -586,20 +607,13 @@ private enum Vision {
 
             q = applyMultimodalRotaryPositionEmbedding(q, freqs: rotaryPositionEmbedding)
             k = applyMultimodalRotaryPositionEmbedding(k, freqs: rotaryPositionEmbedding)
+            // Rotary adds a leading batch axis. Segmented attention indexes rows on axis 0.
+            q = q.reshaped(sequenceLength, numHeads, -1)
+            k = k.reshaped(sequenceLength, numHeads, -1)
 
-            q = q.reshaped(B, L, numHeads, -1).transposed(0, 2, 1, 3)
-            k = k.reshaped(B, L, numHeads, -1).transposed(0, 2, 1, 3)
-            v = v.reshaped(B, L, numHeads, -1).transposed(0, 2, 1, 3)
-
-            let output = MLXFast.scaledDotProductAttention(
-                queries: q,
-                keys: k,
-                values: v,
-                scale: scale,
-                mask: .none
-            )
-            .transposed(0, 2, 1, 3)
-            .reshaped(sequenceLength, -1)
+            let output = qwen2VLSegmentedVisionAttention(
+                queries: q, keys: k, values: v, scale: scale,
+                cuSeqlens: visionCuSeqlens(frames))
 
             return proj(output)
         }
