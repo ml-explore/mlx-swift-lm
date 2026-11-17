@@ -21,12 +21,7 @@ final class RicursiveTests: XCTestCase {
         return config
     }
 
-    /// Parameter `i` in sorted name order, element `j` in row-major order, takes
-    /// `v = (j * j * 7 + j * (13 + 2 * i) + i * 31 + seed) % 97 - 48`, then
-    /// `(2 * v + 65) / 64` (`v >= 0`) or `(2 * v - 63) / 64` for `value_res_lambda`,
-    /// `1 + v / 128` for norm weights, `v / 64` for the MLP gate and up projections and
-    /// `v / 256` otherwise. The same formula as the Python reference, keyed by the
-    /// reference's parameter names.
+    /// `formula_weights` in `tools/ricursive-reference.py`, keyed by the reference's names.
     private func tinyWeights() -> [String: MLXArray] {
         let seed = RicursiveReferenceValues.seed
         var weights = [String: MLXArray]()
@@ -117,7 +112,7 @@ final class RicursiveTests: XCTestCase {
                 rows(model(input, cache: nil)[0]),
                 try reference(RicursiveReferenceValues.fullLogits))
             print("ricursive parity uncached: max |dlogit| = \(difference)")
-            XCTAssertLessThan(difference, 1e-3)
+            XCTAssertLessThan(difference, 2e-5)
         }
     }
 
@@ -133,7 +128,7 @@ final class RicursiveTests: XCTestCase {
                 XCTAssertEqual(tokens, RicursiveReferenceValues.greedy, "prefill step \(step)")
                 let difference = maxDifference(logits, expected)
                 print("ricursive parity step \(step): max |dlogit| = \(difference)")
-                XCTAssertLessThan(difference, 1e-3, "prefill step \(step)")
+                XCTAssertLessThan(difference, 2e-5, "prefill step \(step)")
             }
         }
     }
@@ -161,7 +156,7 @@ final class RicursiveTests: XCTestCase {
                 [logits.asArray(Float.self)],
                 [try reference(RicursiveReferenceValues.decodeLogits)[0]])
             print("ricursive parity prepare: max |dlogit| = \(difference)")
-            XCTAssertLessThan(difference, 1e-3)
+            XCTAssertLessThan(difference, 2e-5)
         }
     }
 
@@ -239,6 +234,79 @@ final class RicursiveTests: XCTestCase {
             let difference = abs(a - b).max().item(Float.self)
             print("ricursive quantized reload: max |dlogit| = \(difference)")
             XCTAssertLessThan(difference, 1e-5)
+
+            // With a quantized lm_head, `nextTokenLogits` projects only trailing rows; the
+            // last row must stay bitwise equal to the full forward pass.
+            for length in [97, 200] {
+                let text = LMInput.Text(
+                    tokens: MLXArray((0 ..< length).map { Int32(($0 * 7 + 3) % 64) })
+                        .reshaped(1, length))
+                let expected = loaded(text.tokens, cache: nil)[0..., -1, 0...]
+                let actual = loaded.nextTokenLogits(text, cache: nil, state: nil).logits
+                XCTAssertLessThan(actual.dim(1), length)
+                XCTAssertTrue(
+                    arrayEqual(actual[0..., -1, 0...], expected).item(Bool.self),
+                    "length \(length)")
+            }
+        }
+    }
+
+    /// Positions above 256 are not exact in bfloat16, so RoPE must build them in float32.
+    /// Like the reference, cos and sin are rounded to the input precision.
+    func testRoPEKeepsPositionsInFloat32() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let x = MLXRandom.normal([1, 2, 3, 16], key: MLXRandom.key(0)).asType(.bfloat16)
+            let inverseFrequencies =
+                1
+                / pow(
+                    MLXArray(Float(10_000)),
+                    MLXArray(
+                        stride(from: 0, to: 16, by: 2).map {
+                            Float($0) / 16
+                        }))
+            let angles =
+                MLXArray([Float(300), 301, 302])[0..., .newAxis]
+                * inverseFrequencies[.newAxis, 0...]
+            let both = concatenated([angles, angles], axis: -1)
+            let cosine = cos(both).asType(.bfloat16).asType(.float32)
+            let sine = sin(both).asType(.bfloat16).asType(.float32)
+            let source = x.asType(.float32)
+            let rotated = concatenated(
+                [-source[.ellipsis, 8...], source[.ellipsis, ..<8]], axis: -1)
+            let expected = (source * cosine + rotated * sine).asType(.bfloat16)
+            let actual = ricursiveRoPE(x, offset: 300, inverseFrequencies: inverseFrequencies)
+            XCTAssertEqual(actual.dtype, .bfloat16)
+            XCTAssertTrue(arrayEqual(actual, expected).item(Bool.self))
+        }
+    }
+
+    /// With `gate_full_precision`, the sigmoid runs in float32 and is rounded once.
+    func testGateRunsInFloat32() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let output = MLXRandom.normal([1, 4, 64], key: MLXRandom.key(1)).asType(.bfloat16)
+            let gate = (6 * MLXRandom.normal([1, 4, 64], key: MLXRandom.key(2))).asType(.bfloat16)
+            let expected = output * sigmoid(gate.asType(.float32)).asType(.bfloat16)
+            // The inputs must tell the two precisions apart.
+            XCTAssertFalse(
+                arrayEqual(ricursiveGate(output, gate: gate, fullPrecision: false), expected)
+                    .item(Bool.self))
+            let actual = ricursiveGate(output, gate: gate, fullPrecision: true)
+            XCTAssertEqual(actual.dtype, .bfloat16)
+            XCTAssertTrue(arrayEqual(actual, expected).item(Bool.self))
+        }
+    }
+
+    /// PyTorch multiplies a bfloat16 tensor by a Python float in float32 and rounds once.
+    func testEmbedScaleRoundsOnce() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let h = MLXRandom.normal([1, 4, 64], key: MLXRandom.key(3)).asType(.bfloat16)
+            let scale = Float(5120).squareRoot()
+            let expected = (h.asType(.float32) * scale).asType(.bfloat16)
+            XCTAssertFalse(
+                arrayEqual(h * MLXArray(scale).asType(.bfloat16), expected).item(Bool.self))
+            let actual = ricursiveEmbedScale(h, scale: scale)
+            XCTAssertEqual(actual.dtype, .bfloat16)
+            XCTAssertTrue(arrayEqual(actual, expected).item(Bool.self))
         }
     }
 }

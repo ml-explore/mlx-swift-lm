@@ -46,6 +46,7 @@ final class RicursiveCheckpointTests: XCTestCase {
                     guard names.contains("\(path).scales"),
                         let option = perLayer.quantization(layer: path)
                     else { return nil }
+                    // Parameter names do not depend on the group size.
                     return (32, option.bits, option.mode)
                 }
             }

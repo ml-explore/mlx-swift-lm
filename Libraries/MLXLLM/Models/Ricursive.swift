@@ -106,6 +106,35 @@ extension RicursiveConfiguration: ModelConfigurationValidating {
     }
 }
 
+/// RoPE in float32 on `[B, heads, T, headDim]`. Positions cannot go through bfloat16,
+/// which loses integer precision after 256. The reference casts cos and sin to the model
+/// precision before widening them again, so the same rounding is applied here.
+func ricursiveRoPE(_ x: MLXArray, offset: Int, inverseFrequencies: MLXArray) -> MLXArray {
+    let length = x.dim(2)
+    let positions = MLXArray(Int32(offset) ..< Int32(offset + length)).asType(.float32)
+    let frequencies = positions[0..., .newAxis] * inverseFrequencies[.newAxis, 0...]
+    let angles = concatenated([frequencies, frequencies], axis: -1)
+    let cosine = cos(angles).asType(x.dtype).asType(.float32)
+    let sine = sin(angles).asType(x.dtype).asType(.float32)
+    let source = x.asType(.float32)
+    let half = source.dim(-1) / 2
+    let rotated = concatenated(
+        [-source[.ellipsis, half...], source[.ellipsis, ..<half]], axis: -1)
+    return (source * cosine + rotated * sine).asType(x.dtype)
+}
+
+/// `output * sigmoid(gate)`, with the sigmoid taken in float32 when `fullPrecision` is set
+/// and rounded to the output's precision, as the reference does.
+func ricursiveGate(_ output: MLXArray, gate: MLXArray, fullPrecision: Bool) -> MLXArray {
+    output * sigmoid(fullPrecision ? gate.asType(.float32) : gate).asType(output.dtype)
+}
+
+/// `h * scale`. PyTorch multiplies a reduced-precision tensor by a Python float in float32
+/// and rounds the product once, so the scale is not rounded to the model precision first.
+func ricursiveEmbedScale(_ h: MLXArray, scale: Float) -> MLXArray {
+    (h.asType(.float32) * scale).asType(h.dtype)
+}
+
 private final class RicursiveAttention: Module {
     let nHeads: Int
     let nKVHeads: Int
@@ -152,23 +181,6 @@ private final class RicursiveAttention: Module {
         super.init()
     }
 
-    /// RoPE in float32 on `[B, heads, T, headDim]`. Positions cannot go through bfloat16,
-    /// which loses integer precision after 256. The reference casts cos and sin to the model
-    /// precision before widening them again, so the same rounding is applied here.
-    private func rope(_ x: MLXArray, offset: Int) -> MLXArray {
-        let length = x.dim(2)
-        let positions = MLXArray(Int32(offset) ..< Int32(offset + length)).asType(.float32)
-        let frequencies = positions[0..., .newAxis] * _inverseFrequencies[.newAxis, 0...]
-        let angles = concatenated([frequencies, frequencies], axis: -1)
-        let cosine = cos(angles).asType(x.dtype).asType(.float32)
-        let sine = sin(angles).asType(x.dtype).asType(.float32)
-        let source = x.asType(.float32)
-        let half = source.dim(-1) / 2
-        let rotated = concatenated(
-            [-source[.ellipsis, half...], source[.ellipsis, ..<half]], axis: -1)
-        return (source * cosine + rotated * sine).asType(x.dtype)
-    }
-
     func callAsFunction(
         _ x: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
@@ -193,8 +205,9 @@ private final class RicursiveAttention: Module {
 
         if isSliding {
             let offset = cache?.offset ?? 0
-            queries = rope(queries, offset: offset)
-            keys = rope(keys, offset: offset)
+            queries = ricursiveRoPE(
+                queries, offset: offset, inverseFrequencies: _inverseFrequencies)
+            keys = ricursiveRoPE(keys, offset: offset, inverseFrequencies: _inverseFrequencies)
         }
 
         var output = attentionWithCacheUpdate(
@@ -209,11 +222,7 @@ private final class RicursiveAttention: Module {
         .reshaped(B, L, -1)
 
         if let gateProj {
-            var gate = gateProj(x)
-            if gateFullPrecision {
-                gate = gate.asType(.float32)
-            }
-            output = output * sigmoid(gate).asType(output.dtype)
+            output = ricursiveGate(output, gate: gateProj(x), fullPrecision: gateFullPrecision)
         }
         return outputProj(output)
     }
@@ -310,8 +319,7 @@ private final class RicursiveBackbone: Module {
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
         var h = embedTokens(inputs)
         if let embedScale = config.embedScale {
-            // The reference multiplies by a Python scalar, which takes the tensor's precision.
-            h = h * MLXArray(embedScale).asType(h.dtype)
+            h = ricursiveEmbedScale(h, scale: embedScale)
         }
         let valueResidual = config.useValueResidual ? h : nil
 
@@ -358,10 +366,6 @@ public final class RicursiveModel: Module, LLMModel {
     }
 
     public var loraLayers: [Module] { model.layers }
-
-    public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        weights.filter { !$0.key.contains("rotary_emb.inv_freq") }
-    }
 
     /// Sliding layers keep a rotating window; full layers keep the whole context.
     public func newCache(parameters: GenerateParameters? = nil) throws -> [KVCache] {
