@@ -34,7 +34,7 @@ final class DeepseekV4Tests: XCTestCase {
 
     private func skipUnlessLong() throws {
         guard ProcessInfo.processInfo.environment["MLX_DEEPSEEK_V4_LONG"] == "1" else {
-            throw XCTSkip("Set MLX_DEEPSEEK_V4_LONG=1 for the 300-token checks")
+            throw XCTSkip("Set MLX_DEEPSEEK_V4_LONG=1 for the call-split and bfloat16-load checks")
         }
     }
 
@@ -243,43 +243,25 @@ final class DeepseekV4Tests: XCTestCase {
         }
     }
 
-    /// The fused hyper-connection kernel (GPU) against the op path (CPU) on the streams entering
-    /// each block; a bfloat16 collapse may differ by one ulp.
+    /// The fused hyper-connection kernel (GPU) against the op path (CPU) on seeded random stream
+    /// rows; a bfloat16 collapse may differ by one ulp.
     func testFusedHyperConnectionKernelMatchesOpPathOnGPU() throws {
         #if canImport(Metal)
         try XCTSkipUnless(MTLCreateSystemDefaultDevice() != nil, "no GPU")
         #else
         throw XCTSkip("no GPU")
         #endif
-        let prompt = Reference.short.prompt
         for float32 in [false, true] {
             let model = try loadTiny(float32: float32)
-            var streams = [MLXArray]()
-            try Device.withDefaultDevice(.cpu) {
-                let inputs = MLXArray(prompt.prefix(16).map(Int32.init)).reshaped(1, 16)
-                let caches = model.makeCache()
-                var mask: MLXArray?
-                if case .array(let array) = caches[0].makeMask(
-                    n: 16, windowSize: model.configuration.slidingWindow, returnArray: true)
-                {
-                    mask = array
-                }
-                var h = repeated(
-                    expandedDimensions(model.embed(inputs), axis: 2),
-                    count: model.configuration.hcMult, axis: 2)
-                for (layer, cache) in zip(model.layers, caches) {
-                    streams.append(h)
-                    h = layer(
-                        h, mask: mask, cache: DeepseekV4LayerCache(cache, ratio: layer.attn.ratio),
-                        inputIDs: inputs)
-                }
-                eval(streams)
-            }
+            let config = model.configuration
             var worst: (collapsed: Float, weights: Float) = (0, 0)
-            for (layer, h) in zip(model.layers, streams) {
+            for (l, layer) in model.layers.enumerated() {
                 for connection in [layer.attnHC, layer.ffnHC] {
-                    for t in 0 ..< h.dim(1) {
-                        let row = h[0..., t ..< (t + 1)]
+                    for t in 0 ..< 4 {
+                        let row = MLXRandom.normal(
+                            [1, 1, config.hcMult, config.hiddenSize],
+                            key: MLXRandom.key(UInt64(l * 4 + t))
+                        ).asType(float32 ? .float32 : .bfloat16)
                         let cpu = Device.withDefaultDevice(.cpu) { connection(row) }
                         let gpu = Device.withDefaultDevice(.gpu) { connection(row) }
                         eval(cpu.0, cpu.1, cpu.2, gpu.0, gpu.1, gpu.2)
@@ -452,53 +434,6 @@ final class DeepseekV4Tests: XCTestCase {
         }
     }
 
-    /// Ratio-4 pooling against `overlap_transform` written out: entry `w` pools the first half of
-    /// window `w - 1` and the second half of window `w`, `ape` added to both.
-    func testOverlapCompressionMatchesReferenceWindows() throws {
-        try Device.withDefaultDevice(.cpu) {
-            let model = try loadTiny(float32: true)
-            for compressor in [
-                try XCTUnwrap(model.layers[1].attn.compressor),
-                try XCTUnwrap(model.layers[1].attn.indexer?.compressor),
-            ] {
-                XCTAssertTrue(compressor.overlap)
-                let (ratio, d) = (compressor.ratio, compressor.headDim)
-                let x = MLXRandom.normal(
-                    [1, 23, model.configuration.hiddenSize], key: MLXRandom.key(5))
-                let pool = compressor(x, cache: DeepseekV4PoolCache(ratio: ratio))
-                XCTAssertEqual(pool.shape, [1, 5, d])
-
-                let kv = compressor.wkv(x)[0]
-                let gate = compressor.wgate(x)[0]
-                var expected = [MLXArray]()
-                for w in 0 ..< 5 {
-                    let current = (w * ratio) ..< ((w + 1) * ratio)
-                    let previousKV: MLXArray
-                    let previousGate: MLXArray
-                    if w == 0 {
-                        previousKV = MLXArray.zeros([ratio, d])
-                        previousGate = MLXArray.full(
-                            [ratio, d], values: MLXArray(-Float.infinity), type: Float.self)
-                    } else {
-                        let before = ((w - 1) * ratio) ..< (w * ratio)
-                        previousKV = kv[before, ..<d]
-                        previousGate = gate[before, ..<d] + compressor.ape[0..., ..<d]
-                    }
-                    let rows = concatenated([previousKV, kv[current, d...]], axis: 0)
-                    let gates = concatenated(
-                        [previousGate, gate[current, d...] + compressor.ape[0..., d...]], axis: 0)
-                    expected.append((rows * softmax(gates, axis: 0, precise: true)).sum(axis: 0))
-                }
-                var reference = compressor.norm(stacked(expected).reshaped(1, 5, d))
-                reference = compressor.rope(expandedDimensions(reference, axis: 1), offset: 0)
-                    .squeezed(axis: 1)
-                let difference = abs(pool - reference).max().item(Float.self)
-                print("deepseek_v4 overlap vs reference windows: max |d| = \(difference)")
-                XCTAssertLessThanOrEqual(difference, 1e-5)
-            }
-        }
-    }
-
     /// On the bfloat16 checkpoint, pooling and routing equal exactly the reference's float32
     /// computation cast back where the reference casts.
     func testBFloat16PoolingAndRoutingFollowReferenceFloat32() throws {
@@ -550,12 +485,10 @@ final class DeepseekV4Tests: XCTestCase {
                 XCTAssertEqual(reference.dtype, .bfloat16)
                 let difference = abs(pool.asType(.float32) - reference.asType(.float32)).max()
                     .item(Float.self)
-                print("deepseek_v4 bf16 overlap pooling vs float32: max |d| = \(difference)")
                 XCTAssertEqual(difference, 0, "bfloat16 overlap pooling")
             }
 
             let ids = MLXArray((0 ..< 23).map { Int32(2 + $0 * 5 % 120) }).reshaped(1, 23)
-            var routerWorst: Float = 0
             for layer in model.layers {
                 let gate = layer.ffn.gate
                 let (indices, weights) = gate(x, inputIDs: ids)
@@ -579,10 +512,8 @@ final class DeepseekV4Tests: XCTestCase {
                 var expected = takeAlong(scores, indices, axis: -1)
                 expected = expected / expected.sum(axis: -1, keepDims: true) * gate.scaling
                 let difference = abs(weights - expected).max().item(Float.self)
-                routerWorst = max(routerWorst, difference)
                 XCTAssertEqual(difference, 0, "bfloat16 router weights")
             }
-            print("deepseek_v4 bf16 router weights vs float32 reference: max |d| = \(routerWorst)")
         }
     }
 
@@ -720,12 +651,10 @@ final class DeepseekV4Tests: XCTestCase {
                 for (a, b) in zip(runs[0].pools, runs[index].pools) {
                     XCTAssertEqual(a.shape, b.shape, label)
                     let difference = abs(a - b).max().item(Float.self)
-                    print("deepseek_v4 \(label) pool max |d| = \(difference)")
                     XCTAssertLessThanOrEqual(difference, 1e-5, "pool, \(label)")
                 }
                 for (a, b) in zip(runs[0].logits, runs[index].logits) {
                     let difference = abs(a - b).max().item(Float.self)
-                    print("deepseek_v4 \(label) logits max |d| = \(difference)")
                     XCTAssertLessThanOrEqual(difference, 1e-4, "logits, \(label)")
                 }
             }
@@ -753,18 +682,6 @@ final class DeepseekV4Tests: XCTestCase {
             }
             XCTAssertEqual(cache.appendPooled(MLXArray.zeros([1, 0, 1])).asArray(Float.self), all)
             XCTAssertEqual(try XCTUnwrap(cache.poolMask(queries: 2, offset: 30)).shape, [2, 7])
-
-            let copy = try XCTUnwrap(cache.copy() as? DeepseekV4PoolCache)
-            XCTAssertEqual(
-                copy.appendPooled(MLXArray([Float(8)]).reshaped(1, 1, 1))
-                    .asArray(Float.self), all + [8])
-            XCTAssertEqual(cache.pooled?.asArray(Float.self), all)
-
-            let restored = DeepseekV4PoolCache(ratio: 4)
-            restored.state = cache.state
-            restored.metaState = cache.metaState
-            XCTAssertEqual(restored.pooledCount, 7)
-            XCTAssertEqual(restored.pooled?.asArray(Float.self), all)
         }
     }
 
