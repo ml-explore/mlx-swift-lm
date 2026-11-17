@@ -64,7 +64,11 @@ final class HadamardQuantizedTests: XCTestCase {
         let h = TurboQuantRotation.hadamardMatrix(dim: block) / sqrt(Float(block))
         let expected = matmul((x * signs).reshaped(-1, block), h).reshaped(3, 16)
 
-        assertClose(rotation.forward(x, signs: signs), expected)
+        // TF32 matmuls (neural accelerators) need atol ~6e-4 here (max abs error 7.2e-4); see
+        // MatmulPrecision.
+        assertClose(
+            rotation.forward(x, signs: signs), expected,
+            atol: MatmulPrecision.tolerance(float32: 1e-4, reduced: 2e-3))
     }
 
     func testInverseUndoesForwardAndKeepsDType() {
@@ -98,7 +102,11 @@ final class HadamardQuantizedTests: XCTestCase {
 
         let dequantizedWeight = dequantized(
             weight, scales: scales, biases: biases, groupSize: groupSize, bits: bits)
-        assertClose(layer(x), matmul(rotated, dequantizedWeight.T), rtol: 1e-3, atol: 1e-3)
+        // TF32 matmuls (neural accelerators) need atol ~1.4e-3 here (max abs error 2.7e-3); see
+        // MatmulPrecision.
+        assertClose(
+            layer(x), matmul(rotated, dequantizedWeight.T), rtol: 1e-3,
+            atol: MatmulPrecision.tolerance(float32: 1e-3, reduced: 5e-3))
 
         let unrotated = quantizedMM(
             x, weight, scales: scales, biases: biases, transpose: true,

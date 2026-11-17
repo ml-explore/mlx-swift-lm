@@ -86,7 +86,7 @@ private func hasNaN(_ a: MLXArray) -> Bool {
 
 /// Batch rows against the same texts run one at a time: real positions and pooled output.
 private func expectBatchMatchesSingles(
-    _ m: EmbeddingGemma, lengths: [Int], left: Bool = false,
+    _ m: EmbeddingGemma, lengths: [Int], left: Bool = false, tolerance: Double = 1e-5,
     sourceLocation: SourceLocation = #_sourceLocation
 ) {
     let (ids, mask) = padded(lengths, left: left)
@@ -98,9 +98,11 @@ private func expectBatchMatchesSingles(
         let (single, singlePooled) = run(
             m, [Array(ids[row][real])], mask: [[Int32](repeating: 1, count: n)])
         let rowStates = states[row, real.lowerBound ..< real.upperBound]
-        #expect(relNorm(rowStates, single[0]) <= 1e-5, "row \(row)", sourceLocation: sourceLocation)
         #expect(
-            relNorm(pooled[row], singlePooled[0]) <= 1e-5, "row \(row)",
+            relNorm(rowStates, single[0]) <= tolerance, "row \(row)",
+            sourceLocation: sourceLocation)
+        #expect(
+            relNorm(pooled[row], singlePooled[0]) <= tolerance, "row \(row)",
             sourceLocation: sourceLocation)
     }
 }
@@ -208,8 +210,10 @@ struct EmbeddingGemmaMaskTests {
 
     @Test("G7: a left-padded batch matches the texts run one at a time")
     func leftPadding() throws {
+        // TF32 matmuls (neural accelerators) leave ~1.1e-3 here; see MatmulPrecision.
         expectBatchMatchesSingles(
-            model(try config(bidirectional: true)), lengths: [20, 3], left: true)
+            model(try config(bidirectional: true)), lengths: [20, 3], left: true,
+            tolerance: MatmulPrecision.tolerance(float32: 1e-5, reduced: 5e-3))
     }
 
     @Test("G8: a 1-D input with a 1-D mask equals the 2-D version")
