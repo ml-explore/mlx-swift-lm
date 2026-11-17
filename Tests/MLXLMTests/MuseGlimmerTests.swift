@@ -1359,6 +1359,30 @@ struct MuseGlimmerAgenticProtocolTests {
         #expect(answer == [.response("sunny")])
     }
 
+    @Test("the Onyx decoder can end for steering only after private or visible text")
+    func onyxEndsForSteeringOnlyAfterFrameText() throws {
+        let tokenizer = OnyxTestTokenizer()
+        var decoder = try #require(
+            ToolCallFormat.atem.makeProtocolTokenStreamDecoder(
+                tokenizer: tokenizer, tools: Self.tools, stopStrings: []))
+        let script: [(token: Int, canEnd: Bool)] = [
+            (tokenizer.id(" to=self"), false), (tokenizer.message, false),
+            (tokenizer.id("Plan"), true), (tokenizer.id(" it\n"), false), (tokenizer.eom, false),
+            (tokenizer.start, false), (tokenizer.id("assistant to=weather.get"), false),
+            (tokenizer.message, false), (tokenizer.id("<atem:function_calls>"), false),
+            (tokenizer.eom, false),
+            (tokenizer.start, false), (tokenizer.id("assistant to=user"), false),
+            (tokenizer.message, false), (tokenizer.id("Sunny"), true),
+            (tokenizer.id(" today\n"), false), (tokenizer.eot, false),
+        ]
+        for (token, canEnd) in script {
+            _ = decoder.push(token) { _ in true }
+            #expect(
+                decoder.canEndForSteering == canEnd,
+                "after \(tokenizer.decode(tokenIds: [token]).debugDescription)")
+        }
+    }
+
     @Test(
         "Onyx applies the selected validation policy and counts rejections",
         arguments: ToolCallValidationPolicy.allCases)

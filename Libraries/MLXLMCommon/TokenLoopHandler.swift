@@ -77,11 +77,12 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
     private var decoder: any TokenStreamDecoder
     var cachedPromptTokenCount = 0
     var speculativeDecodingFallbackReason: SpeculativeDecodingFallbackReason?
-    private var hasResponse = false
+    /// Whether the step wrote text the transcript can record, answer or reasoning.
+    private var hasOutput = false
     private var hasNonTextOutput = false
 
     public var canEndForSteering: Bool {
-        hasResponse && !hasNonTextOutput && decoder.canEndForSteering
+        hasOutput && !hasNonTextOutput && decoder.canEndForSteering
     }
 
     public init(
@@ -162,13 +163,14 @@ public struct TextToolTokenLoopHandler: TokenLoopHandler {
     ) -> TokenLoopDisposition {
         switch event {
         case .reasoning(let reasoning):
+            hasOutput = hasOutput || !reasoning.isEmpty
             if !emit(.reasoning(reasoning)) {
                 return .cancelled
             }
             return .more
 
         case .response(let response):
-            hasResponse = hasResponse || !response.isEmpty
+            hasOutput = hasOutput || !response.isEmpty
             if !emit(.chunk(response)) {
                 return .cancelled
             }

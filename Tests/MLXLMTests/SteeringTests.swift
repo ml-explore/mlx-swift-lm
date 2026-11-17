@@ -41,7 +41,7 @@ final class SteeringTests: XCTestCase {
             let pieces = [
                 1: "hello ", 2: "<en", 3: "ough", 4: " more",
                 5: "{\"name\":\"weather\",\"arguments\":", 6: "{}}",
-                7: "<function=weather>", 8: "</function>",
+                7: "<function=weather>", 8: "</function>", 12: "</th", 13: "ink>",
             ]
             if tokenIds == [10] { return "\u{fffd}" }
             if tokenIds == [10, 11] { return "é" }
@@ -59,11 +59,22 @@ final class SteeringTests: XCTestCase {
 
         decoder = StandardTokenStreamDecoder(
             tokenizer: BoundaryTokenizer(), format: .json, tools: nil, stopStrings: ["<end>"])
-        _ = decoder.push(1) { _ in true }
+        _ = decoder.push(4) { _ in true }
         XCTAssertTrue(decoder.canEndForSteering)
         _ = decoder.push(2) { _ in true }
         XCTAssertFalse(decoder.canEndForSteering)
         _ = decoder.push(3) { _ in true }
+        XCTAssertTrue(decoder.canEndForSteering)
+    }
+
+    func testDecoderWaitsForTextThatDoesNotEndInWhitespace() {
+        var decoder = StandardTokenStreamDecoder(
+            tokenizer: BoundaryTokenizer(), format: .json, tools: nil, stopStrings: [])
+        _ = decoder.push(4) { _ in true }
+        XCTAssertTrue(decoder.canEndForSteering)
+        _ = decoder.push(1) { _ in true }
+        XCTAssertFalse(decoder.canEndForSteering)
+        _ = decoder.push(4) { _ in true }
         XCTAssertTrue(decoder.canEndForSteering)
     }
 
@@ -72,19 +83,19 @@ final class SteeringTests: XCTestCase {
         _ = try control.enqueue("now", policy: .nextSafeBoundary)
         let (stream, task) = generateTaskRecordingTokens(
             promptTokenCount: 2, modelConfiguration: ModelConfiguration(id: "test"),
-            tokenizer: BoundaryTokenizer(), iterator: FinalizingIterator(tokens: [1, 4, 4]),
+            tokenizer: BoundaryTokenizer(), iterator: FinalizingIterator(tokens: [4, 4, 4]),
             steering: control)
         var info: GenerateCompletionInfo?
         for await event in stream { info = event.info ?? info }
         let result = (await task.value).consume()
-        XCTAssertEqual(result.generatedTokens, [1])
+        XCTAssertEqual(result.generatedTokens, [4])
         XCTAssertEqual(result.state?[LMOutput.Key<Int>("finalizedAt")], 1)
         XCTAssertEqual(info?.stopReason, .steered)
         // Ending a step does not consume or close its turn's mailbox.
         XCTAssertTrue(control.requestsEarlyBoundary)
     }
 
-    func testReasoningModelUsesNaturalStepBoundary() async throws {
+    func testReasoningModelEndsAtTheNextSafePointInItsAnswer() async throws {
         let control = SteeringControl()
         _ = try control.enqueue("now", policy: .nextSafeBoundary)
         let configuration = ModelConfiguration(
@@ -96,8 +107,50 @@ final class SteeringTests: XCTestCase {
         var info: GenerateCompletionInfo?
         for await event in stream { info = event.info ?? info }
         let result = (await task.value).consume()
-        XCTAssertEqual(result.generatedTokens, [1, 4, 4])
-        XCTAssertEqual(info?.stopReason, .length)
+        XCTAssertEqual(result.generatedTokens, [1, 4])
+        XCTAssertEqual(info?.stopReason, .steered)
+    }
+
+    func testReasoningModelEndsInsideAThought() async throws {
+        let control = SteeringControl()
+        _ = try control.enqueue("now", policy: .nextSafeBoundary)
+        let configuration = ModelConfiguration(
+            id: "test", reasoningConfig: QwenReasoningProtocol.qwen3)
+        let (stream, task) = generateTaskRecordingTokens(
+            promptTokenCount: 2, modelConfiguration: configuration,
+            tokenizer: BoundaryTokenizer(), iterator: FinalizingIterator(tokens: [4, 4, 4]),
+            reasoningPrimedInside: true, steering: control)
+        var reasoning = ""
+        var info: GenerateCompletionInfo?
+        for await event in stream {
+            XCTAssertNil(event.chunk)
+            reasoning += event.reasoning ?? ""
+            info = event.info ?? info
+        }
+        let result = (await task.value).consume()
+        XCTAssertEqual(result.generatedTokens, [4])
+        XCTAssertEqual(reasoning, " more")
+        XCTAssertEqual(info?.stopReason, .steered)
+    }
+
+    func testThoughtWaitsForAReasoningDelimiterSplitAcrossTokens() async throws {
+        let control = SteeringControl()
+        let iterator = FinalizingIterator(
+            tokens: [4, 12, 13, 4],
+            onNext: { index in
+                if index == 1 { _ = try? control.enqueue("now", policy: .nextSafeBoundary) }
+            })
+        let configuration = ModelConfiguration(
+            id: "test", reasoningConfig: QwenReasoningProtocol.qwen3)
+        let (stream, task) = generateTaskRecordingTokens(
+            promptTokenCount: 2, modelConfiguration: configuration,
+            tokenizer: BoundaryTokenizer(), iterator: iterator,
+            reasoningPrimedInside: true, steering: control)
+        var reasoning = ""
+        for await event in stream { reasoning += event.reasoning ?? "" }
+        let result = (await task.value).consume()
+        XCTAssertEqual(result.generatedTokens, [4, 12, 13])
+        XCTAssertEqual(reasoning, " more")
     }
 
     func testInstructionDuringToolPayloadDoesNotTruncateCall() async throws {
@@ -138,6 +191,20 @@ final class SteeringTests: XCTestCase {
         XCTAssertEqual(result.generatedTokens, [1, 4, 4])
     }
 
+    func testInterruptedStepEndsAtTheNextSafePoint() async throws {
+        let control = SteeringControl()
+        try control.interrupt()
+        let (stream, task) = generateTaskRecordingTokens(
+            promptTokenCount: 2, modelConfiguration: ModelConfiguration(id: "test"),
+            tokenizer: BoundaryTokenizer(), iterator: FinalizingIterator(tokens: [1, 4, 4]),
+            steering: control)
+        var info: GenerateCompletionInfo?
+        for await event in stream { info = event.info ?? info }
+        let result = (await task.value).consume()
+        XCTAssertEqual(result.generatedTokens, [1, 4])
+        XCTAssertEqual(info?.stopReason, .interrupted)
+    }
+
     func testMailboxBoundsAndPromotion() throws {
         let control = SteeringControl()
         var ids: [UUID] = []
@@ -157,6 +224,24 @@ final class SteeringTests: XCTestCase {
         XCTAssertEqual(try control.take(closeIfEmpty: false).count, 1)
         XCTAssertTrue(try control.take(closeIfEmpty: true).isEmpty)
         XCTAssertThrowsError(try control.enqueue("closed", policy: .nextSafeBoundary))
+    }
+
+    func testInterruptEndsTheResponseAtItsNextSafePointAndRefusesInput() throws {
+        let control = SteeringControl()
+        let pending = try control.enqueue("queued", policy: .nextStepBoundary)
+        XCTAssertFalse(control.requestsEarlyBoundary)
+        try control.interrupt()
+        try control.interrupt()
+        XCTAssertTrue(control.requestsEarlyBoundary)
+        XCTAssertFalse(control.isOpen)
+        XCTAssertThrowsError(try control.enqueue("late", policy: .nextSafeBoundary)) {
+            XCTAssertEqual($0 as? SteeringError, .responseEnded)
+        }
+        XCTAssertTrue(try control.take(closeIfEmpty: true).isEmpty)
+        XCTAssertEqual(try control.closeAndTake().map(\.id), [pending])
+        XCTAssertThrowsError(try control.interrupt()) {
+            XCTAssertEqual($0 as? SteeringError, .responseEnded)
+        }
     }
 
     func testAcceptanceRacingCompletionIsNeverLost() async {
@@ -267,6 +352,22 @@ final class SteeringTests: XCTestCase {
             XCTAssertEqual($0 as? SteeringError, .responseEnded)
         }
         XCTAssertTrue(try live.take(closeIfEmpty: false).isEmpty)
+    }
+
+    func testInterruptTargetsTheRunningResponseAndEndsItsSteering() throws {
+        let session = SessionSteering()
+        XCTAssertThrowsError(try session.interrupt(nil)) {
+            XCTAssertEqual($0 as? SteeringError, .noActiveResponse)
+        }
+        let control = SteeringControl()
+        session.register(control)
+        session.start(control)
+        try session.interrupt(nil)
+        XCTAssertTrue(control.isInterrupted)
+        XCTAssertFalse(session.canSteer(nil))
+        XCTAssertThrowsError(try session.steer("late", policy: .nextSafeBoundary, response: nil)) {
+            XCTAssertEqual($0 as? SteeringError, .responseEnded)
+        }
     }
 
     func testNamedResponseIsNeverRetargeted() throws {

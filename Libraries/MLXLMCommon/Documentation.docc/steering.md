@@ -84,17 +84,19 @@ model step.
 
 ## Scheduling
 
-- ``SteeringPolicy/nextSafeBoundary`` is the default. Ordinary text stops at the
-  next supported complete text boundary. Partial Unicode, stop-string prefixes,
-  and incomplete tool payloads delay the handoff. The step reports
-  ``GenerateStopReason/steered``.
+- ``SteeringPolicy/nextSafeBoundary`` is the default. Decoding stops at the next
+  safe point, in the answer or inside a thought: after complete text that does
+  not end in whitespace, which chat templates commonly trim. Partial Unicode,
+  stop-string prefixes, partial reasoning delimiters, and incomplete tool payloads
+  delay the handoff. The step reports ``GenerateStopReason/steered``.
 - ``SteeringPolicy/nextStepBoundary`` lets the current model step finish
   naturally. Use it for custom reasoning or output grammars without declared
   protocol metadata.
 
-Prefill, dispatched tools, configured reasoning models, and framed Harmony/Onyx
-protocols finish their current step even with `.nextSafeBoundary`. Steering does
-not preempt GPU work or undo tool effects. Already emitted text is retained.
+Prefill and dispatched tools finish before an instruction applies, even with
+`.nextSafeBoundary`. Framed Harmony and Onyx protocols stop inside an analysis,
+private, or visible frame, never in a header or a tool frame. Steering does not
+preempt GPU work or undo tool effects. Already emitted text is retained.
 
 Instructions are applied in acceptance order. A pending batch is joined with
 blank lines into one user message to support alternating-role templates. A
@@ -104,6 +106,23 @@ most ``SteeringLimits/maxPendingInstructions`` instructions and
 
 Generation limits apply per model step, as they do for the tool loop. A response
 steered twice can generate up to three times `maxTokens`.
+
+## Interrupting a response
+
+Cancellation discards the turn: the prompt and the partial reply leave the
+transcript, and the next call prefills the conversation again. To stop a response
+and keep what it wrote, interrupt it instead:
+
+```swift
+try session.interrupt()
+```
+
+The response ends at its next safe point, as a steered step would, and its stream
+finishes normally. The step it ends reports ``GenerateStopReason/interrupted``,
+and instructions it did not apply are reported as failed. The transcript keeps the
+reply up to that point, so the next call continues the same cache. With
+`toolDispatch`, calls the model already made run first, and the step that
+answers them stops at its first safe point.
 
 ## Tools, cancellation, and cache reuse
 
@@ -121,8 +140,10 @@ Await ``ChatSession/synchronize()`` to join registered runners and GPU cleanup.
 Tools must cooperate with Swift task cancellation.
 
 The model stays loaded. The session reuses a verified cache prefix and prefills
-the changed suffix when the template and cache permit it. Speculative lookahead
-is finalized before reconciliation. Rewritten templates, unrewindable caches, and
+the changed suffix when the template and cache permit it. A thought that steering
+or an interrupt cuts short is recorded as the model wrote it, so a template that
+replays reasoning renders what the cache holds. Speculative lookahead is
+finalized before reconciliation. Rewritten templates, unrewindable caches, and
 models that carry per-call state (M-RoPE VLMs) require a rebuild instead.
 Inspect ``GenerateCompletionInfo/cachedPromptTokenCount`` for actual reuse.
 
@@ -134,5 +155,5 @@ boundary and reports ``SteeringError/emptyResponse``. Local models follow
 instructions through their normal chat templates and weights.
 
 Existing string consumers need no changes. Exhaustive switches over `Generation`
-and `GenerateStopReason` need the new `.steering` and
-`.steered` cases respectively.
+need the new `.steering` case, and those over `GenerateStopReason` need
+`.steered` and `.interrupted`.
