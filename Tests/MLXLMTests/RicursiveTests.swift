@@ -6,61 +6,60 @@ import XCTest
 
 @testable import MLXLLM
 
-/// Ricursive against a PyTorch oracle. The fixture (`Resources/ricursive_tiny`, made by
-/// `tools/ricursive_parity/make_tiny_fixture.py`) has random float32 weights, four sliding
-/// layers and one full layer, and an 8-token window shorter than its 24-token prompt.
+/// Ricursive against the PyTorch reference in `tools/ricursive_parity/ricursive_torch.py`.
+/// The tiny model has four sliding layers and one full layer, and an 8-token window shorter
+/// than its 24-token prompt. Its weights come from the closed-form formula in
+/// `tools/ricursive_parity/ricursive-reference.py`, which also writes the expected values in
+/// `RicursiveReferenceValues`.
 final class RicursiveTests: XCTestCase {
 
-    private struct Oracle: Decodable {
-        struct Case: Decodable {
-            let prefillStep: Int
-            let greedy: [Int]
-            let logits: [[Float]]
-
-            enum CodingKeys: String, CodingKey {
-                case greedy, logits
-                case prefillStep = "prefill_step"
-            }
-        }
-        let prompt: [Int]
-        let fullLogits: [[Float]]
-        let cases: [Case]
-
-        enum CodingKeys: String, CodingKey {
-            case prompt, cases
-            case fullLogits = "full_logits"
-        }
-    }
-
-    private var fixture: URL {
-        get throws {
-            try XCTUnwrap(Bundle.module.url(forResource: "ricursive_tiny", withExtension: nil))
-        }
-    }
-
     private func tinyConfiguration() throws -> RicursiveConfiguration {
-        let data = try Data(contentsOf: fixture.appendingPathComponent("config.json"))
-        let config = try JSONDecoder().decode(RicursiveConfiguration.self, from: data)
+        let config = try JSONDecoder().decode(
+            RicursiveConfiguration.self,
+            from: Data(RicursiveReferenceValues.configuration.utf8))
         try config.validateModelConfiguration()
         return config
     }
 
-    private func loadTiny() throws -> RicursiveModel {
+    /// Parameter `i` in sorted name order, element `j` in row-major order:
+    /// `((j * j * 7 + j * 13 + i * 31) % 97 - 48) / 256`, plus 1 for norm weights, and
+    /// divided by 32 instead for `value_res_lambda`. The same formula as the Python reference.
+    private func tinyWeights(_ model: RicursiveModel) -> [String: MLXArray] {
+        var weights = [String: MLXArray]()
+        for (i, entry) in model.parameters().flattened().sorted(by: { $0.0 < $1.0 }).enumerated() {
+            let (name, parameter) = entry
+            let lambda = name.hasSuffix("value_res_lambda")
+            let divisor: Float = lambda ? 32 : 256
+            let shift: Float = !lambda && name.hasSuffix("norm.weight") ? 1 : 0
+            let values = (0 ..< parameter.size).map {
+                Float(($0 * $0 * 7 + $0 * 13 + i * 31) % 97 - 48) / divisor + shift
+            }
+            weights[name] = MLXArray(values, parameter.shape)
+        }
+        return weights
+    }
+
+    private func makeTiny() throws -> RicursiveModel {
         let model = RicursiveModel(try tinyConfiguration())
-        try loadWeights(modelDirectory: fixture, model: model)
+        try model.update(
+            parameters: ModuleParameters.unflattened(tinyWeights(model)), verify: [.all])
         model.train(false)
+        eval(model)
         return model
     }
 
-    private func oracle() throws -> Oracle {
-        try JSONDecoder().decode(
-            Oracle.self, from: Data(contentsOf: fixture.appendingPathComponent("oracle.json")))
+    private func reference(_ values: [Float]) -> [[Float]] {
+        let vocabulary = 64
+        return stride(from: 0, to: values.count, by: vocabulary).map {
+            Array(values[$0 ..< $0 + vocabulary])
+        }
     }
 
     private func maxDifference(_ mine: [[Float]], _ theirs: [[Float]]) -> Float {
         XCTAssertEqual(mine.count, theirs.count)
         return zip(mine, theirs).map { a, b in
-            zip(a, b).map { abs($0 - $1) }.max() ?? 0
+            XCTAssertEqual(a.count, b.count)
+            return zip(a, b).map { abs($0 - $1) }.max() ?? 0
         }.max() ?? 0
     }
 
@@ -95,44 +94,45 @@ final class RicursiveTests: XCTestCase {
         return (tokens, logits)
     }
 
-    func testUncachedForwardMatchesOracle() throws {
+    func testUncachedForwardMatchesReference() throws {
         try Device.withDefaultDevice(.cpu) {
-            let model = try loadTiny()
-            let expected = try oracle()
-            let input = MLXArray(expected.prompt.map(Int32.init)).reshaped(1, expected.prompt.count)
-            let difference = maxDifference(rows(model(input, cache: nil)[0]), expected.fullLogits)
+            let model = try makeTiny()
+            let prompt = RicursiveReferenceValues.prompt
+            let input = MLXArray(prompt.map(Int32.init)).reshaped(1, prompt.count)
+            let difference = maxDifference(
+                rows(model(input, cache: nil)[0]), reference(RicursiveReferenceValues.fullLogits))
             print("ricursive parity uncached: max |dlogit| = \(difference)")
             XCTAssertLessThan(difference, 1e-3)
         }
     }
 
-    func testCachedGreedyDecodeMatchesOracleAtEveryChunking() throws {
+    func testCachedGreedyDecodeMatchesReferenceAtEveryChunking() throws {
         try Device.withDefaultDevice(.cpu) {
-            let model = try loadTiny()
-            let expected = try oracle()
-            XCTAssertGreaterThan(expected.prompt.count, model.configuration.slidingWindow)
-            for item in expected.cases {
+            let model = try makeTiny()
+            let prompt = RicursiveReferenceValues.prompt
+            let expected = reference(RicursiveReferenceValues.decodeLogits)
+            XCTAssertGreaterThan(prompt.count, model.configuration.slidingWindow)
+            for step in RicursiveReferenceValues.prefillSteps {
                 let (tokens, logits) = try decode(
-                    model, prompt: expected.prompt, step: item.prefillStep,
-                    count: item.greedy.count)
-                XCTAssertEqual(tokens, item.greedy, "prefill step \(item.prefillStep)")
-                let difference = maxDifference(logits, item.logits)
-                print("ricursive parity step \(item.prefillStep): max |dlogit| = \(difference)")
-                XCTAssertLessThan(difference, 1e-3, "prefill step \(item.prefillStep)")
+                    model, prompt: prompt, step: step, count: expected.count)
+                XCTAssertEqual(tokens, RicursiveReferenceValues.greedy, "prefill step \(step)")
+                let difference = maxDifference(logits, expected)
+                print("ricursive parity step \(step): max |dlogit| = \(difference)")
+                XCTAssertLessThan(difference, 1e-3, "prefill step \(step)")
             }
         }
     }
 
     func testPrepareLeavesTheLastTokenAndKeepsParity() throws {
         try Device.withDefaultDevice(.cpu) {
-            let model = try loadTiny()
-            let expected = try oracle()
+            let model = try makeTiny()
+            let prompt = RicursiveReferenceValues.prompt
             let cache = try model.newCache(parameters: nil)
-            let input = LMInput(tokens: MLXArray(expected.prompt.map(Int32.init)))
+            let input = LMInput(tokens: MLXArray(prompt.map(Int32.init)))
             // Chunks wider than the sliding window, and a prompt longer than one chunk, so
             // the default `LLMModel.prepare` chunks it and leaves the last token.
             let step = model.configuration.slidingWindow + 3
-            XCTAssertGreaterThan(expected.prompt.count, step)
+            XCTAssertGreaterThan(prompt.count, step)
             guard
                 case .tokens(let rest) = try model.prepare(
                     input, cache: cache, state: nil, prefill: PrefillParameters(stepSize: step))
@@ -143,7 +143,9 @@ final class RicursiveTests: XCTestCase {
             let logits = model(rest.tokens.reshaped(1, 1), cache: cache)[0, -1]
             eval(logits)
             let difference = maxDifference(
-                [logits.asArray(Float.self)], [expected.cases[0].logits[0]])
+                [logits.asArray(Float.self)],
+                [reference(RicursiveReferenceValues.decodeLogits)[0]])
+            print("ricursive parity prepare: max |dlogit| = \(difference)")
             XCTAssertLessThan(difference, 1e-3)
         }
     }
@@ -161,7 +163,7 @@ final class RicursiveTests: XCTestCase {
     func testRejectsInconsistentConfiguration() throws {
         func configuration(_ change: (inout [String: Any]) -> Void) throws -> RicursiveConfiguration
         {
-            let data = try Data(contentsOf: fixture.appendingPathComponent("config.json"))
+            let data = Data(RicursiveReferenceValues.configuration.utf8)
             var json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
             change(&json)
             return try JSONDecoder().decode(
@@ -182,7 +184,7 @@ final class RicursiveTests: XCTestCase {
 
     func testMixedPrecisionQuantizedCheckpointLoads() throws {
         try Device.withDefaultDevice(.cpu) {
-            let source = try loadTiny()
+            let source = try makeTiny()
             let quantization: (String, Module) -> (Int, Int, QuantizationMode)? = { path, _ in
                 path == "lm_head" || path.hasSuffix("embed_tokens")
                     || path.hasSuffix("g_proj") ? (32, 8, .affine) : (32, 4, .affine)
@@ -219,7 +221,9 @@ final class RicursiveTests: XCTestCase {
 
             let input = MLXArray((0 ..< 12).map { Int32($0) }).reshaped(1, 12)
             let (a, b) = (source(input, cache: nil), loaded(input, cache: nil))
-            XCTAssertLessThan(abs(a - b).max().item(Float.self), 1e-5)
+            let difference = abs(a - b).max().item(Float.self)
+            print("ricursive quantized reload: max |dlogit| = \(difference)")
+            XCTAssertLessThan(difference, 1e-5)
         }
     }
 
