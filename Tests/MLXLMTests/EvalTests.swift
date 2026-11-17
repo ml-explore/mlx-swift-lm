@@ -232,6 +232,15 @@ public class EvalTests: XCTestCase {
     }
 
     func testSpeculativeLogProbabilitiesMatchTheMainModelDecodingAlone() throws {
+        // Two decodes of the same model are compared value for value and by top-k order, which
+        // TF32 matmuls (neural accelerators) perturb by up to ~3e-3 and reorder near-ties. CPU
+        // pins IEEE FP32; see MatmulPrecision.
+        try Device.withDefaultDevice(.cpu) {
+            try speculativeLogProbabilitiesMatchTheMainModelDecodingAlone()
+        }
+    }
+
+    private func speculativeLogProbabilitiesMatchTheMainModelDecodingAlone() throws {
         let main = makeQualityGateLlamaModel()
         let stranger = makeQualityGateLlamaModel(seed: 19)
         let prompt = LMInput(tokens: MLXArray([1, 2, 3]))
