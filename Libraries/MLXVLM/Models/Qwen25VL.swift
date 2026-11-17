@@ -912,9 +912,8 @@ public struct Qwen25VLProcessor: UserInputProcessor {
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-        let mask = ones(like: promptArray).asType(.int8)
         return LMInput(
-            text: .init(tokens: promptArray, mask: mask),
+            text: .init(tokens: promptArray),
             image: processedImage,
             video: processedVideo)
     }
@@ -1293,6 +1292,19 @@ extension Qwen25VL: PreparedInputSplitting {
             imageTokenId: config.baseConfiguration.imageTokenId,
             videoTokenId: config.baseConfiguration.videoTokenId,
             mergeSize: config.visionConfiguration.spatialMergeSize)
+    }
+}
+
+extension Qwen25VL: ModelStateRewinding {
+
+    public func rewoundState(
+        _ state: LMOutput.State, keeping prefix: [Int], dropping dropped: [Int]
+    ) -> LMOutput.State? {
+        QwenVL.rewoundState(
+            state, keeping: prefix, dropping: dropped,
+            imageTokenId: config.baseConfiguration.imageTokenId,
+            videoTokenId: config.baseConfiguration.videoTokenId,
+            key: ropeDeltasKey)
     }
 }
 

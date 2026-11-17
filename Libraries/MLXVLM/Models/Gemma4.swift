@@ -2338,9 +2338,8 @@ public struct Gemma4Processor: UserInputProcessor {
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-        let mask = ones(like: promptArray).asType(.int8)
         return LMInput(
-            text: .init(tokens: promptArray, mask: mask), image: processedImage,
+            text: .init(tokens: promptArray), image: processedImage,
             video: processedVideo)
     }
 }
@@ -2870,8 +2869,7 @@ public struct Gemma4UnifiedProcessor: UserInputProcessor {
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-        let mask = ones(like: promptArray).asType(.int8)
-        return LMInput(text: .init(tokens: promptArray, mask: mask), image: processedImage)
+        return LMInput(text: .init(tokens: promptArray), image: processedImage)
     }
 }
 

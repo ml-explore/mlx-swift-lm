@@ -166,7 +166,7 @@ struct Gemma4VideoInputTests {
         return try JSONDecoder().decode(Gemma4Configuration.self, from: Data(json.utf8))
     }
 
-    private static func makeProcessorConfig() throws -> Gemma4ProcessorConfiguration {
+    static func makeProcessorConfig() throws -> Gemma4ProcessorConfiguration {
         let json = """
             {
               "processor_class": "Gemma4Processor",

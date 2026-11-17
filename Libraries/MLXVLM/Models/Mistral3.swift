@@ -1101,10 +1101,9 @@ public struct Mistral3VLMProcessor: UserInputProcessor {
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-        let mask = ones(like: promptArray)
 
         return LMInput(
-            text: .init(tokens: promptArray, mask: mask),
+            text: .init(tokens: promptArray),
             image: .init(pixels: preprocessResult.pixels, frames: preprocessResult.frames)
         )
     }
