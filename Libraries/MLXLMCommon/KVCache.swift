@@ -90,6 +90,10 @@ public protocol KVCache: Evaluatable {
     /// Unlike ``isTrimmable``, this can describe a bounded rewind into retained history.
     var maxTrimCount: Int { get }
 
+    /// State written each step that the next forward pass does not read, such as rewind history.
+    /// Generation evaluates it with each token so it does not grow as a lazy graph.
+    var unreadState: [MLXArray] { get }
+
     /// Predict whether this cache can still be trimmed after appending `positions`.
     ///
     /// - Parameter positions: The nonnegative number of sequence positions that
@@ -146,6 +150,8 @@ extension KVCache {
     }
 
     public var maxTrimCount: Int { isTrimmable ? offset : 0 }
+
+    public var unreadState: [MLXArray] { [] }
 
     public func prepare(lengths: [Int]?) {}
 
@@ -293,6 +299,8 @@ open class BaseKVCache: KVCache {
     open var isTrimmable: Bool { false }
 
     open var maxTrimCount: Int { isTrimmable ? offset : 0 }
+
+    open var unreadState: [MLXArray] { [] }
 
     open func isTrimmable(after positions: Int) -> Bool {
         isTrimmable
@@ -1979,6 +1987,11 @@ public final class RewindableConvolutionCache: MambaCache {
     }
 
     public override var isTrimmable: Bool { true }
+
+    /// Only the rewind history: the next forward pass reads the convolution state.
+    public override var unreadState: [MLXArray] {
+        self[1].map { [$0] } ?? []
+    }
 
     public override func isTrimmable(after positions: Int) -> Bool {
         positions >= 0 && positions <= rollbackCapacity
