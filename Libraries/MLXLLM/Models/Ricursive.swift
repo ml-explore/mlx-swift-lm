@@ -135,7 +135,7 @@ func ricursiveValueInput(_ x: MLXArray, residual: MLXArray, lambda: MLXArray) ->
 /// SiLU in float32, rounded once to the input's precision, as PyTorch's `F.silu` does on a
 /// reduced-precision tensor. MLXNN's `silu` on bfloat16 rounds the sigmoid before the product.
 func ricursiveSiLU(_ x: MLXArray) -> MLXArray {
-    silu(x.asType(.float32)).asType(x.dtype)
+    silu(x)
 }
 
 /// RoPE in float32 on `[B, heads, T, headDim]`. Positions cannot go through bfloat16,
