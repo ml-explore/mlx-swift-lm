@@ -63,14 +63,6 @@ public struct DeepseekV4Configuration: Codable, Sendable {
     var indexNHeads: Int
     var indexHeadDim: Int
     var indexTopk: Int
-    /// Opt-in hierarchical (HISA) indexer selection, an mlx-vlm approximation that neither the
-    /// checkpoint configuration nor DeepSeek's reference has: blocks of `indexBlock` pooled
-    /// entries, of which the best `indexKeep` (by their mean entry) are scored in full. Only
-    /// whole blocks are candidates, so the entries of a trailing partial block
-    /// (`poolCount % indexBlock`) are never selected on this path. The default 0 selects the
-    /// exact top-k over every visible entry, as the reference does.
-    var indexBlock: Int
-    var indexKeep: Int
     var tieWordEmbeddings: Bool
 
     enum CodingKeys: String, CodingKey {
@@ -106,8 +98,6 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         case indexNHeads = "index_n_heads"
         case indexHeadDim = "index_head_dim"
         case indexTopk = "index_topk"
-        case indexBlock = "index_block"
-        case indexKeep = "index_keep"
         case tieWordEmbeddings = "tie_word_embeddings"
     }
 
@@ -148,8 +138,6 @@ public struct DeepseekV4Configuration: Codable, Sendable {
         indexNHeads = try c.decodeIfPresent(Int.self, forKey: .indexNHeads) ?? 64
         indexHeadDim = try c.decodeIfPresent(Int.self, forKey: .indexHeadDim) ?? 128
         indexTopk = try c.decodeIfPresent(Int.self, forKey: .indexTopk) ?? 512
-        indexBlock = try c.decodeIfPresent(Int.self, forKey: .indexBlock) ?? 0
-        indexKeep = try c.decodeIfPresent(Int.self, forKey: .indexKeep) ?? 0
         tieWordEmbeddings =
             try c.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
 
@@ -192,7 +180,7 @@ extension DeepseekV4Configuration: ModelConfigurationValidating {
             throw fail("qk_rope_head_dim \(qkRopeHeadDim) exceeds head_dim or index_head_dim")
         }
         guard numExpertsPerTok > 0, numExpertsPerTok <= nRoutedExperts, hcMult > 0,
-            slidingWindow > 0, indexTopk > 0, indexBlock >= 0, indexKeep >= 0
+            slidingWindow > 0, indexTopk > 0
         else { throw fail("invalid expert, hc, window or indexer sizes") }
         guard !tieWordEmbeddings else {
             throw fail("tie_word_embeddings is not supported; the model has a separate head")
@@ -987,15 +975,12 @@ final class DeepseekV4Compressor: Module {
 }
 
 /// Lightning indexer: `sum_h relu(q_h . k) * scale * w_h(x) / sqrt(H)` over the ratio-4 index
-/// pool, then the exact top `index_topk` entries per query. With the opt-in `index_block > 0`,
-/// large enough pools use the two-stage (HISA) block filter instead.
+/// pool, then the exact top `index_topk` entries per query.
 final class DeepseekV4Indexer: Module {
     let heads: Int
     let headDim: Int
     let topK: Int
     let scale: Float
-    let block: Int
-    let keep: Int
 
     @ModuleInfo(key: "wq_b") var wqB: Linear
     @ModuleInfo(key: "weights_proj") var weightsProj: Linear
@@ -1006,8 +991,6 @@ final class DeepseekV4Indexer: Module {
         self.headDim = config.indexHeadDim
         self.topK = config.indexTopk
         self.scale = pow(Float(config.indexHeadDim), -0.5)
-        self.block = config.indexBlock
-        self.keep = config.indexKeep
         _wqB.wrappedValue = Linear(config.qLoraRank, heads * headDim, bias: false)
         _weightsProj.wrappedValue = Linear(config.hiddenSize, heads, bias: false)
         _compressor.wrappedValue = DeepseekV4Compressor(config, ratio: ratio, headDim: headDim)
@@ -1029,21 +1012,6 @@ final class DeepseekV4Indexer: Module {
         let k = min(topK, poolCount)
         let poolMask = cache.poolMask(queries: L, offset: offset)
         let projected = weightsProj(x)
-        let weights = projected.asType(.float32) * pow(Float(heads), -0.5)
-
-        if block > 0, poolCount >= block * keep, keep * block >= k {
-            if L == 1 {
-                return hisaDecode(q: q, pooled: pooled, weights: weights, k: k)
-            }
-            let visible: MLXArray
-            if let poolMask {
-                visible = broadcast(
-                    poolMask.asType(.int32).sum(axis: -1, keepDims: false)[.newAxis], to: [B, L])
-            } else {
-                visible = MLXArray.full([B, L], values: MLXArray(Int32(poolCount)))
-            }
-            return hisaPrefill(q: q, pooled: pooled, weights: weights, k: k, visible: visible)
-        }
 
         // Exact top-k as the reference, in query tiles that bound the `[B, H, tile, P]` scores.
         // The reference scores in the activation dtype (`weights_proj` is bfloat16).
@@ -1074,100 +1042,6 @@ final class DeepseekV4Indexer: Module {
 
     /// Queries per tile on the exact path; `nil` sizes tiles by `exactScoreBudget`.
     var exactQueryTile: Int?
-
-    /// One query per row, every pooled entry visible. Only whole blocks are candidates.
-    private func hisaDecode(q: MLXArray, pooled: MLXArray, weights: MLXArray, k: Int) -> MLXArray {
-        let (B, poolCount, D) = (pooled.dim(0), pooled.dim(1), pooled.dim(2))
-        let blocks = poolCount / block
-        let usable = blocks * block
-        let wq = expandedDimensions(weights.swappedAxes(-1, -2), axis: -1)  // [B, H, 1, 1]
-        let q32 = q.asType(.float32)
-
-        let rep = pooled[0..., ..<usable].reshaped(B, blocks, block, D).mean(axis: 2)
-        let coarse = maximum(
-            matmul(q32, expandedDimensions(rep, axis: 1).swappedAxes(-1, -2).asType(.float32)), 0)
-        let coarseScore = (coarse * scale * wq).sum(axis: 1)  // [B, 1, blocks]
-        let kept = min(keep, blocks)
-        let topBlocks = argPartition(-coarseScore, kth: kept - 1, axis: -1)[.ellipsis, ..<kept]
-            .asType(.int32)
-
-        let candidates = kept * block
-        let positions =
-            (expandedDimensions(topBlocks, axis: -1) * Int32(block)
-            + MLXArray.arange(block, dtype: .int32)).reshaped(B, 1, candidates)
-        let gatherIndex = broadcast(
-            expandedDimensions(positions.reshaped(B, candidates), axis: -1),
-            to: [B, candidates, D])
-        let candidateKeys = takeAlong(pooled, gatherIndex, axis: 1)
-        let fine = maximum(
-            matmul(
-                q32,
-                expandedDimensions(candidateKeys, axis: 1).swappedAxes(-1, -2).asType(.float32)),
-            0)
-        let fineScore = (fine * scale * wq).sum(axis: 1)  // [B, 1, candidates]
-        let selected = argPartition(-fineScore, kth: k - 1, axis: -1)[.ellipsis, ..<k]
-        return takeAlong(positions, selected, axis: -1)
-    }
-
-    /// Follows mlx-vlm's `hisa_select`: the fine stage runs in tiles of 512 queries, each
-    /// evaluated before the next, to bound memory.
-    private static let hisaQueryTile = 512
-
-    /// `visible[b, l]` pooled entries are causally visible to each query.
-    private func hisaPrefill(
-        q: MLXArray, pooled: MLXArray, weights: MLXArray, k: Int, visible: MLXArray
-    ) -> MLXArray {
-        let (B, L) = (q.dim(0), q.dim(2))
-        let (poolCount, D) = (pooled.dim(1), pooled.dim(2))
-        let blocks = poolCount / block
-        let usable = blocks * block
-        let q32 = q.asType(.float32)
-        let pooled32 = pooled.asType(.float32)
-        let masked = MLXArray(Float(-1e30))
-
-        let wk = weights * scale  // [B, L, H]
-        let wkHeads = expandedDimensions(wk.transposed(0, 2, 1), axis: -1)  // [B, H, L, 1]
-        let rep = pooled32[0..., ..<usable].reshaped(B, blocks, block, D).mean(axis: 2)
-        let coarse = maximum(matmul(q32, expandedDimensions(rep, axis: 1).swappedAxes(-1, -2)), 0)
-        var coarseScore = (coarse * wkHeads).sum(axis: 1)  // [B, L, blocks]
-        let blockStart = MLXArray.arange(blocks, dtype: .int32) * Int32(block)
-        coarseScore = MLX.where(
-            blockStart.reshaped(1, 1, blocks) .< expandedDimensions(visible, axis: -1),
-            coarseScore, masked)
-        let kept = min(keep, blocks)
-        let topBlocks = argPartition(-coarseScore, kth: kept - 1, axis: -1)[.ellipsis, ..<kept]
-            .asType(.int32)
-
-        let candidates = kept * block
-        let within = MLXArray.arange(block, dtype: .int32)
-        let tile = Self.hisaQueryTile
-        var parts = [MLXArray]()
-        for start in stride(from: 0, to: L, by: tile) {
-            let end = min(start + tile, L)
-            let n = end - start
-            let positions =
-                (expandedDimensions(topBlocks[0..., start ..< end], axis: -1)
-                * Int32(block) + within).reshaped(B, n, candidates)
-            let gatherIndex = broadcast(
-                expandedDimensions(positions.reshaped(B, n * candidates), axis: -1),
-                to: [B, n * candidates, D])
-            let candidateKeys = takeAlong(pooled32, gatherIndex, axis: 1)
-                .reshaped(B, n, candidates, D)
-            let qTile = q32[0..., 0..., start ..< end].transposed(0, 2, 1, 3)  // [B, n, H, D]
-            let fine = maximum(matmul(qTile, candidateKeys.swappedAxes(-1, -2)), 0)
-            var score = (fine * expandedDimensions(wk[0..., start ..< end], axis: -1)).sum(axis: 2)
-            score = MLX.where(
-                positions .< expandedDimensions(visible[0..., start ..< end], axis: -1), score,
-                masked)
-            if tile < L { eval(score) }
-            parts.append(score)
-        }
-        let fineScore = parts.count == 1 ? parts[0] : concatenated(parts, axis: 1)
-        let selected = argPartition(-fineScore, kth: k - 1, axis: -1)[.ellipsis, ..<k]
-        let positions = (expandedDimensions(topBlocks, axis: -1) * Int32(block) + within)
-            .reshaped(B, L, candidates)
-        return takeAlong(positions, selected, axis: -1)
-    }
 }
 
 // MARK: - Attention

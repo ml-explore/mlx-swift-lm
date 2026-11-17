@@ -783,9 +783,6 @@ final class DeepseekV4Tests: XCTestCase {
         XCTAssertEqual(config.compressRatios.filter { $0 == 4 }.count, 21)
         XCTAssertEqual(config.compressRatios.filter { $0 == 128 }.count, 20)
         XCTAssertEqual(config.compressRatios.last, 4)
-        // The checkpoint sets neither key: exact top-k, as the reference.
-        XCTAssertEqual(config.indexBlock, 0)
-        XCTAssertEqual(config.indexKeep, 0)
     }
 
     func testRejectsInconsistentConfiguration() throws {
