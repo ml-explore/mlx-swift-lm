@@ -114,7 +114,10 @@ final class PromptCheckpointNumericsTests: XCTestCase {
                     quantize(model: model, groupSize: 32, bits: 4)
                     model.apply { $0.dtype == .float32 ? $0.asType(.bfloat16) : $0 }
                 }
-                let tolerance: Double = compressed ? 0.02 : 1e-4
+                // TF32 matmuls (neural accelerators) move float32 logits by up to 2.9e-4 relative
+                // here, against 3e-7 with IEEE float32; see MatmulPrecision.
+                let tolerance: Double =
+                    compressed ? 0.02 : MatmulPrecision.tolerance(float32: 1e-4, reduced: 1e-3)
                 eval(model)
                 let prefix = tokens(79)
                 let live = try storage(model)
