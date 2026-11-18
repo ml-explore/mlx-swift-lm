@@ -446,6 +446,23 @@ public class DeepseekV3Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
+        // compressed-tensors int4: packed int32 words are MLX affine words, zero point 8.
+        var remapped = [String: MLXArray]()
+        for (key, value) in weights {
+            if key.hasSuffix("weight_shape") {
+                let base = String(key.dropLast("weight_shape".count))
+                guard let packed = weights[base + "weight_packed"],
+                    let scales = weights[base + "weight_scale"]
+                else { continue }
+                remapped[base + "weight"] = packed.view(dtype: .uint32)
+                remapped[base + "scales"] = scales
+                remapped[base + "biases"] = -8 * scales
+            } else if !(key.hasSuffix("weight_scale") || key.hasSuffix("weight_packed")) {
+                remapped[key] = value
+            }
+        }
+        let weights = remapped
+
         var newWeights = [String: MLXArray]()
 
         func dequant(weight: MLXArray, scaleInv: MLXArray) -> MLXArray {

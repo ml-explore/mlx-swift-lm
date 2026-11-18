@@ -141,4 +141,42 @@ final class DeepseekV3Tests: XCTestCase {
         XCTAssertEqual(stackedWeight.dtype, .bfloat16)
         XCTAssertTrue(arrayEqual(stackedWeight, stacked(expected)).item(Bool.self))
     }
+
+    /// compressed-tensors int4 maps to MLX affine words with a zero point of 8, as mlx-lm does.
+    func testSanitizeRemapsCompressedTensorsInt4() throws {
+        let model = DeepseekV3Model(try makeConfig())
+        let q = (MLXArray(0 ..< 256) * 7 % 16).asType(.uint32).reshaped(4, 64)
+        let shifts = MLXArray(stride(from: 0, to: 32, by: 4).map { UInt32($0) })
+        let packed = (q.reshaped(4, 8, 8) << shifts).sum(axis: -1)
+        let scales = MLXArray([0.5, 0.25, 1, 2, 4, 0.125, 1, 0.5] as [Float])
+            .reshaped(4, 2).asType(.bfloat16)
+
+        let dense = "model.layers.0.self_attn.o_proj."
+        var weights: [String: MLXArray] = [
+            dense + "weight_packed": packed.view(dtype: .int32),
+            dense + "weight_scale": scales,
+            dense + "weight_shape": MLXArray([4, 64] as [Int32]),
+        ]
+        for expert in 0 ..< 4 {
+            let base = "model.layers.1.mlp.experts.\(expert).up_proj."
+            weights[base + "weight_packed"] = packed.view(dtype: .int32)
+            weights[base + "weight_scale"] = scales
+            weights[base + "weight_shape"] = MLXArray([4, 64] as [Int32])
+        }
+        let sanitized = model.sanitize(weights: weights)
+
+        let switchMLP = "model.layers.1.mlp.switch_mlp.up_proj."
+        XCTAssertEqual(
+            Set(sanitized.keys),
+            Set(["weight", "scales", "biases"].flatMap { [dense + $0, switchMLP + $0] }))
+        let weight = try XCTUnwrap(sanitized[dense + "weight"])
+        XCTAssertEqual(weight.dtype, .uint32)
+        let decoded = dequantized(
+            weight, scales: sanitized[dense + "scales"]!, biases: sanitized[dense + "biases"],
+            groupSize: 32, bits: 4)
+        let expected = (q.asType(.float32) - 8) * repeated(scales, count: 32, axis: 1)
+        XCTAssertTrue(arrayEqual(decoded.asType(.float32), expected).item(Bool.self))
+        XCTAssertEqual(sanitized[switchMLP + "weight"]?.shape, [4, 4, 8])
+        XCTAssertEqual(sanitized[switchMLP + "biases"]?.shape, [4, 4, 2])
+    }
 }
