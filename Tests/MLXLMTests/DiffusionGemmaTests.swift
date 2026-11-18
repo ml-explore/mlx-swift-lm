@@ -1100,18 +1100,41 @@ struct DiffusionGemmaTests {
         #expect(!MLX.isNaN(logits).any().item(Bool.self))
     }
 
-    @Test("Diffusion rejects custom autoregressive processors before prefill")
-    func rejectsCustomLogitProcessors() throws {
-        let model = StableCanvasDiffusionModel()
-        #expect(throws: GenerateError.self) {
-            try BlockDiffusionTokenIterator(
-                input: LMInput(tokens: MLXArray([9])), model: model,
-                parameters: GenerateParameters(),
-                components: .init(logitProcessorFactory: {
-                    RepetitionContext(repetitionPenalty: 1.1, repetitionContextSize: 20)
-                }))
+    @Test("Diffusion applies a custom processor to every canvas position")
+    func appliesCustomLogitProcessorsToTheCanvas() throws {
+        let history = TokenHistory()
+        var iterator = try BlockDiffusionTokenIterator(
+            input: LMInput(tokens: MLXArray([9])), model: StableCanvasDiffusionModel(),
+            parameters: GenerateParameters(maxTokens: 3),
+            components: .init(logitProcessorFactory: {
+                TokenBan(token: 2, history: history)
+            }))
+
+        var tokens = [Int]()
+        while let token = iterator.next() {
+            tokens.append(token)
         }
-        #expect(model.prefillCalls == 0)
+
+        #expect(tokens == [1, 0, 3])
+        #expect(history.tokens == [9, 1, 0, 3])
+    }
+
+    @Test("Diffusion generates without the sequential parts of a processor chain")
+    func skipsSequentialLogitProcessors() throws {
+        #expect((ThinkingBudgetProcessor.self as Any) is any SequentialLogitProcessor.Type)
+        let components = GenerationComponents()
+            .appendingLogitProcessor { TokenBan(token: 2, history: TokenHistory()) }
+            .appendingLogitProcessor { SequentialTokenBan() }
+        var iterator = try BlockDiffusionTokenIterator(
+            input: LMInput(tokens: MLXArray([9])), model: StableCanvasDiffusionModel(),
+            parameters: GenerateParameters(maxTokens: 3), components: components)
+
+        var tokens = [Int]()
+        while let token = iterator.next() {
+            tokens.append(token)
+        }
+
+        #expect(tokens == [1, 0, 3])
     }
 
     private static func configuration() throws -> DiffusionGemmaConfiguration {
@@ -1312,6 +1335,45 @@ private final class PenaltySensitiveDiffusionModel: Module, BlockDiffusionLangua
     func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
         []
     }
+}
+
+private final class TokenHistory: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = [Int]()
+
+    var tokens: [Int] { lock.withLock { storage } }
+
+    func append(_ tokens: MLXArray) {
+        lock.withLock { storage += tokens.asArray(Int.self) }
+    }
+}
+
+private struct TokenBan: LogitProcessor {
+    let token: Int
+    let history: TokenHistory
+
+    mutating func prompt(_ prompt: MLXArray) {
+        history.append(prompt.flattened())
+    }
+
+    func process(logits: MLXArray) -> MLXArray {
+        let banned = MLXArray(0 ..< logits.dim(-1)) .== token
+        return MLX.where(banned, MLXArray(-Float.infinity), logits)
+    }
+
+    mutating func didSample(token: MLXArray) {
+        history.append(token)
+    }
+}
+
+private struct SequentialTokenBan: SequentialLogitProcessor {
+    mutating func prompt(_ prompt: MLXArray) {}
+
+    func process(logits: MLXArray) -> MLXArray {
+        MLXArray.full(logits.shape, values: MLXArray(-Float.infinity))
+    }
+
+    mutating func didSample(token: MLXArray) {}
 }
 
 private final class StableCanvasDiffusionModel: Module, BlockDiffusionLanguageModel {

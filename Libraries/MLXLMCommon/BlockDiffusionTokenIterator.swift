@@ -41,6 +41,7 @@ public struct BlockDiffusionTokenIterator: TokenIteratorProtocol {
     private var randomState: MLXRandom.RandomState
     private var committedPendingIndex = 0
     private var argmaxCanvasHistory: [MLXArray]?
+    private var processor: (any LogitProcessor)?
 
     public init(
         input: LMInput,
@@ -56,7 +57,7 @@ public struct BlockDiffusionTokenIterator: TokenIteratorProtocol {
             cacheStorage: KVCacheStorage(
                 cache ?? (try model.newCache(parameters: parameters)), plan: plan),
             parameters: parameters,
-            components: .init())
+            components: components)
     }
 
     package init(
@@ -106,6 +107,8 @@ public struct BlockDiffusionTokenIterator: TokenIteratorProtocol {
         self.randomState =
             parameters.seed.map(MLXRandom.RandomState.init(seed:))
             ?? MLXRandom.RandomState()
+        self.processor = components.logitProcessorFactory.flatMap { canvasProcessor($0()) }
+        processor?.prompt(input.text.tokens)
 
         self.promptPrefillTime = try measureBlockDiffusionPrefill {
             try model.prepareDiffusion(
@@ -121,10 +124,6 @@ public struct BlockDiffusionTokenIterator: TokenIteratorProtocol {
         model: any BlockDiffusionLanguageModel
     ) throws {
         try components.validate(parameters: parameters)
-        guard components.logitProcessorFactory == nil else {
-            throw GenerateError.invalidDiffusionConfiguration(
-                "Autoregressive logit processors cannot be applied to a denoising canvas.")
-        }
         guard model.diffusionCanvasLength > 0, model.diffusionVocabularySize > 0,
             model.diffusionMaxDenoisingSteps > 0, model.diffusionStabilityThreshold >= 0,
             model.diffusionTemperatureMin.isFinite, model.diffusionTemperatureMin > 0,
@@ -185,6 +184,12 @@ public struct BlockDiffusionTokenIterator: TokenIteratorProtocol {
     private func temperature(curStep: Int) -> Float {
         temperatureMin
             + ((temperatureMax - temperatureMin) * Float(curStep) / Float(maxDenoisingSteps))
+    }
+
+    /// `logits` after the custom processor, which reads each canvas position as one sampling row.
+    private func processedCanvasLogits(_ logits: MLXArray) -> MLXArray {
+        guard let processor else { return logits }
+        return processor.process(logits: logits.reshaped(-1, logits.dim(-1))).reshaped(logits.shape)
     }
 
     private func temperatureScaledLogits(_ logits: MLXArray, curStep: Int) -> MLXArray {
@@ -293,7 +298,8 @@ public struct BlockDiffusionTokenIterator: TokenIteratorProtocol {
                         selfConditioningEmbeddings: selfConditioningEmbeddings)
                 }
 
-            let processedLogits = temperatureScaledLogits(rawLogits, curStep: curStep)
+            let processedLogits = temperatureScaledLogits(
+                processedCanvasLogits(rawLogits), curStep: curStep)
             argmaxCanvas = argMax(processedLogits, axis: -1).asType(.int32)
 
             if curStep == 1 {
@@ -389,7 +395,12 @@ public struct BlockDiffusionTokenIterator: TokenIteratorProtocol {
         let token = pendingTokens[pendingIndex]
         pendingIndex += 1
         tokenCount += 1
+        processor?.didSample(token: MLXArray([Int32(token)]))
         return token
+    }
+
+    public mutating func recordEmittedToken(_ token: Int) {
+        processor?.didEmit(token: token)
     }
 
     /// The generation loop reports every pulled token it did not emit (a stop
@@ -409,6 +420,28 @@ extension BlockDiffusionTokenIterator: GenerationFinalizingTokenIterator {
     /// cache, keeping the shared processed-token timeline exact.
     mutating func finalizeGeneration() {
         commitPendingTokens(upTo: pendingIndex)
+        processor?.finalizeGeneration()
+    }
+}
+
+/// A ``LogitProcessor`` that steers generation one token at a time, so it cannot apply to a
+/// denoising canvas, whose positions are sampled together.
+package protocol SequentialLogitProcessor: LogitProcessor {}
+
+private let logger = MLXLogger(label: "block-diffusion")
+
+/// `processor` without its sequential parts, or `nil` when nothing else is left.
+private func canvasProcessor(_ processor: any LogitProcessor) -> (any LogitProcessor)? {
+    switch processor {
+    case let processor as any SequentialLogitProcessor:
+        logger.warning(
+            "A denoising canvas cannot apply \(type(of: processor)); generating without it.")
+        return nil
+    case let chain as ChainedLogitProcessor:
+        let processors = chain.processors.compactMap(canvasProcessor)
+        return processors.isEmpty ? nil : ChainedLogitProcessor(processors: processors)
+    default:
+        return processor
     }
 }
 
