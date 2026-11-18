@@ -69,8 +69,9 @@ strategy state, skip reason, allocated bytes, and the container-owned
 capacity-application counts, and the live-layer `memoryBytes`, are available on the
 same value.
 
-``KVCacheStatus/checkpoint`` reports the saved prefix length (`tokens`) and
-retained cache memory in bytes (`memory`). It is `nil` when no checkpoint is kept.
+``KVCacheStatus/checkpoint`` reports the longest saved prefix (`tokens`) and the
+cache memory retained by every checkpoint in bytes (`memory`). It is `nil` when no
+checkpoint is kept.
 The count covers cache tensors, including padding and lengths, rather than total
 checkpoint memory. Storage may be shared with the live cache or forks.
 
@@ -113,13 +114,19 @@ only the selected window when it crosses the ring boundary.
 ``KVCache/maxTrimCount``. Recurrent layers do not acquire rewind support from this
 option.
 
-For text-only conversations, the default balanced prefill also keeps one checkpoint
+For text-only conversations, the default balanced prefill also keeps a checkpoint
 before the assistant reply, including any reasoning block supplied by the template.
 If a later template drops that reply's reasoning, the session first tries an exact
 trim, then the saved checkpoint, then a full rebuild. Reuse requires an exact token
 prefix match; it preserves the computation for that prefix rather than changing the
 model's reasoning or attention window.
 Append-only turns keep the existing checkpoint without splitting prefill again.
+
+A reply to tool results keeps a second checkpoint, taken again at every tool step. A
+template can render the call in that reply differently from how the model wrote it,
+for example with its arguments in another order, so the next tool step resumes before
+the latest reply instead of before the first one. The session restores the longest
+checkpoint the new prompt starts with.
 
 The checkpoint copies only rotating and recurrent leaves, including inside composite
 caches. Global attention history is trimmed in place. Variance-normalized caches save

@@ -47,6 +47,31 @@ final class ChatSessionCheckpointTests: XCTestCase {
         }
     }
 
+    /// Renders the reply `word answer` as `answerword `, as a Qwen template renders a call's
+    /// arguments sorted by name: the next prompt rewrites the latest reply.
+    private struct ReorderingTemplate: ScriptedChatTemplate {
+        let base = ReasoningDroppingTemplate()
+        var specialTokens: [String] { base.specialTokens }
+        var corpus: [String] { base.corpus }
+        var endOfTurnToken: String? { base.endOfTurnToken }
+
+        func render(
+            messages: [[String: any Sendable]], tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [String] {
+            let reordered = messages.map { message -> [String: any Sendable] in
+                guard message["role"] as? String == "assistant",
+                    message["content"] as? String == "word answer"
+                else { return message }
+                var message = message
+                message["content"] = "answerword "
+                return message
+            }
+            return try base.render(
+                messages: reordered, tools: tools, additionalContext: additionalContext)
+        }
+    }
+
     /// Serves `base`'s attention caches beside recurrent state that sums every token it has
     /// seen, and records each forward with the sum it started from.
     private final class RecurrentStateModel: Module, LanguageModel {
@@ -103,7 +128,7 @@ final class ChatSessionCheckpointTests: XCTestCase {
         mutating func didSample(token: MLXArray) { emitted += 1 }
     }
 
-    private let tokenizer = ScriptedTokenizer(
+    private var tokenizer = ScriptedTokenizer(
         corpus: [], template: ReasoningDroppingTemplate())
     private let firstQuestion = String(repeating: "word ", count: 40)
 
@@ -361,6 +386,30 @@ final class ChatSessionCheckpointTests: XCTestCase {
         ])
         XCTAssertEqual(next.info.cachedPromptTokenCount, prefix)
         assertResumes(model, from: prefix, of: prompt)
+    }
+
+    func testToolStepResumesBeforeTheReplyItsTemplateRewrites() async throws {
+        tokenizer = ScriptedTokenizer(corpus: [], template: ReorderingTemplate())
+        let (session, model) = try makeSession(reply: "word answer")
+        _ = try await respond(session, to: firstQuestion)
+        let firstStep = try await respond(session, to: "result", role: .tool)
+        XCTAssertEqual(
+            firstStep.info.cachedPromptTokenCount, try render([("user", firstQuestion)]).count - 1)
+
+        model.clearForwards()
+        let secondStep = try await respond(session, to: "result", role: .tool)
+        let prefix =
+            try render([
+                ("user", firstQuestion), ("assistant", "word answer"), ("tool", "result"),
+            ]).count - 1
+        let prompt = try render([
+            ("user", firstQuestion), ("assistant", "word answer"), ("tool", "result"),
+            ("assistant", "word answer"), ("tool", "result"),
+        ])
+        XCTAssertEqual(secondStep.info.cachedPromptTokenCount, prefix)
+        assertResumes(model, from: prefix, of: prompt)
+        let status = try await session.cacheStatus()
+        XCTAssertEqual(status.checkpoint?.tokens, prompt.count - 1)
     }
 
     func testTileCompressionIsRealizedBeforeSavingTheFirstCheckpoint() async throws {

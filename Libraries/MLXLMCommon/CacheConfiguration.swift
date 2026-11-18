@@ -114,12 +114,12 @@ public struct KVCacheStatus: Sendable, Hashable {
         case ignored
     }
 
-    /// Status of a session's prompt recovery checkpoint.
+    /// Status of a session's prompt recovery checkpoints.
     public struct Checkpoint: Sendable, Hashable {
-        /// Number of prompt tokens represented by the checkpoint.
+        /// Number of prompt tokens represented by the longest checkpoint.
         /// Restoring it returns the cache to the end of this prefix.
         public let tokens: Int
-        /// Bytes of cache tensors retained by the checkpoint.
+        /// Bytes of cache tensors retained by every checkpoint.
         /// These tensors can share storage with a restored cache or forked session.
         public let memory: Int
 
@@ -137,7 +137,7 @@ public struct KVCacheStatus: Sendable, Hashable {
     public let layers: [KVCacheLayerStatus]
     /// Authoritative model-wide position for realized session storage.
     public let processedTokenCount: Int?
-    /// The prompt recovery checkpoint, or `nil` when none is retained.
+    /// The prompt recovery checkpoints, or `nil` when none is retained.
     public let checkpoint: Checkpoint?
     public let capacityDisposition: CapacityDisposition
     public let capacityAppliedLayerCount: Int
