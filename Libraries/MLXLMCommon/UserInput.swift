@@ -186,7 +186,7 @@ public struct UserInput: Sendable {
 
         /// Create an image from an `MLXArray`.
         ///
-        /// This evaluates `array` and stores a read-only ``MaterializedArray``
+        /// This evaluates `array` and stores a read-only `MaterializedArray`
         /// snapshot, so the input can be sent across concurrency boundaries.
         /// Do not call it inside a function transform such as `compile` or `grad`.
         public static func array(_ array: MLXArray, label: String? = nil) -> Self {
@@ -201,12 +201,12 @@ public struct UserInput: Sendable {
             Self(source: .array(array.materialized()))
         }
 
-        /// Create an image from an already evaluated ``MaterializedArray``.
+        /// Create an image from an already evaluated `MaterializedArray`.
         public static func array(_ array: MaterializedArray, label: String? = nil) -> Self {
             Self(source: .array(array), label: label)
         }
 
-        /// Makes `arrays.map(UserInput.Image.array)` compile for ``MaterializedArray``.
+        /// Makes `arrays.map(UserInput.Image.array)` compile for `MaterializedArray`.
         public static func array(_ array: MaterializedArray) -> Self {
             Self(source: .array(array))
         }
@@ -291,14 +291,14 @@ public struct UserInput: Sendable {
 
         /// Create audio from an `MLXArray`.
         ///
-        /// This evaluates `array` and stores a read-only ``MaterializedArray``
+        /// This evaluates `array` and stores a read-only `MaterializedArray`
         /// snapshot, so the input can be sent across concurrency boundaries.
         /// Do not call it inside a function transform such as `compile` or `grad`.
         public static func array(_ array: MLXArray) -> Self {
             Self(source: .array(array.materialized()))
         }
 
-        /// Create audio from an already evaluated ``MaterializedArray``.
+        /// Create audio from an already evaluated `MaterializedArray`.
         public static func array(_ array: MaterializedArray) -> Self {
             Self(source: .array(array))
         }
