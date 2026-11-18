@@ -2079,6 +2079,35 @@ extension Qwen35: SpeculativeCacheRewindModel {
     public var maximumNativeTargetCacheRewind: Int { 1 }
 }
 
+// `Qwen35MoE` subclasses `Qwen35` and inherits this conformance.
+extension Qwen35: PreparedInputSplitting {
+
+    /// Return the suffix of `input` from `prefixTokenCount`, with only the images whose
+    /// placeholders lie in it.
+    ///
+    /// The vision tower encodes each image on its own: attention stays inside each image's
+    /// `cuSeqlens` block, and position embeddings depend only on that image's grid. So
+    /// dropping the cached images leaves the features of the others unchanged.
+    ///
+    /// Prefill the suffix on the KV cache *and* the `LMOutput.State` the previous turn
+    /// returned. That state holds `qwen35.ropeDeltas`, which places the suffix after the
+    /// cached images. Without it, a warm cache makes `prepare` throw
+    /// `ContinuationStateError.missingState` and a decode step trap.
+    ///
+    /// Returns `nil` for video, audio, precomputed position ids, a boundary inside an image,
+    /// a payload that does not match the placeholders, or a suffix with no image.
+    public func splitPreparedInput(_ input: LMInput, droppingFirst prefixTokenCount: Int)
+        -> LMInput?
+    {
+        QwenVL.splitPreparedInput(
+            input,
+            droppingFirst: prefixTokenCount,
+            imageTokenId: config.imageTokenId,
+            videoTokenId: config.videoTokenId,
+            mergeSize: config.visionConfiguration.spatialMergeSize)
+    }
+}
+
 extension Array where Element == THW {
     fileprivate var nilIfEmpty: [THW]? { isEmpty ? nil : self }
 }

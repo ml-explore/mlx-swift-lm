@@ -1508,7 +1508,7 @@ public final class ChatSession {
                                 promptTokens: promptTokenIds,
                                 carriesNewMedia: containsNewMedia,
                                 carriesPreparedMedia: carriesPreparedMedia,
-                                carriesAttentionMask: input.text.mask != nil,
+                                carriesAttentionMask: input.text.carriesPaddingMask,
                                 carriesModelState: lmState != nil,
                                 isToolResultContinuation: isToolResultContinuation,
                                 previousGenerationUncommittedTokens:

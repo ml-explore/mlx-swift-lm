@@ -314,9 +314,10 @@ public struct QwenVL {
     /// Split a Qwen VL prepared input at `prefixTokenCount`, keeping only the media
     /// whose placeholder tokens fall in the suffix.
     ///
-    /// Shared by ``Qwen25VL`` and ``Qwen2VL``, whose prepared-input layout is the
-    /// same: `pixels` is the images' patch rows concatenated along axis 0 in prompt
-    /// order, and `frames` carries one `THW` per image, so image *i* owns
+    /// Used by ``Qwen25VL``, ``Qwen3VL`` and ``Qwen35``, and valid for ``Qwen2VL``.
+    /// Their prepared-input layout is the same: `pixels` is the images' patch rows
+    /// concatenated along axis 0 in prompt order, and `frames` carries one `THW` per
+    /// image, so image *i* owns
     /// `frames[i].product` rows and `frames[i].product / (mergeSize * mergeSize)`
     /// placeholder tokens (see ``patchify(images:mergeSize:patchSize:temporalPatchSize:)``
     /// and ``replacePaddingTokens(in:frames:paddingToken:mergeSize:tokenizer:)``).
