@@ -189,6 +189,9 @@ public struct UserInput: Sendable {
         /// This evaluates `array` and stores a read-only `MaterializedArray`
         /// snapshot, so the input can be sent across concurrency boundaries.
         /// Do not call it inside a function transform such as `compile` or `grad`.
+        @available(
+            *, deprecated, message: "Pass a MaterializedArray, e.g. .array(array.materialized())"
+        )
         public static func array(_ array: MLXArray, label: String? = nil) -> Self {
             Self(source: .array(array.materialized()), label: label)
         }
@@ -197,6 +200,9 @@ public struct UserInput: Sendable {
         /// cannot use the default `label`.
         ///
         /// Like the labeled overload, this evaluates `array`.
+        @available(
+            *, deprecated, message: "Pass a MaterializedArray, e.g. .array(array.materialized())"
+        )
         public static func array(_ array: MLXArray) -> Self {
             Self(source: .array(array.materialized()))
         }
@@ -294,6 +300,9 @@ public struct UserInput: Sendable {
         /// This evaluates `array` and stores a read-only `MaterializedArray`
         /// snapshot, so the input can be sent across concurrency boundaries.
         /// Do not call it inside a function transform such as `compile` or `grad`.
+        @available(
+            *, deprecated, message: "Pass a MaterializedArray, e.g. .array(array.materialized())"
+        )
         public static func array(_ array: MLXArray) -> Self {
             Self(source: .array(array.materialized()))
         }

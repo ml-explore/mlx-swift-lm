@@ -20,7 +20,7 @@ struct UserInputAudioTests {
 
     @Test("The array factory makes an array source")
     func arrayFactoryMakesAnArraySource() {
-        let audio = UserInput.Audio.array(MLXArray([0.25, -0.5, 1] as [Float]))
+        let audio = UserInput.Audio.array(MLXArray([0.25, -0.5, 1] as [Float]).materialized())
         guard case .array(let array) = audio.source else {
             Issue.record("expected an array source")
             return
