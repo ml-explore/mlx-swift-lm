@@ -196,7 +196,7 @@ public struct SpeculativeDecodingConfig: Sendable {
 ///   the session when that retained context is no longer needed.
 public final class ChatSession {
 
-    private struct Conversation {
+    private struct Conversation: Sendable {
         var messages: [Chat.Message]
         // Do not repeatedly rebuild the transcript after an MTP attempt fails.
         var allowsMTPRecovery = true
@@ -564,7 +564,7 @@ public final class ChatSession {
     public init(
         _ model: ModelContainer,
         instructions: String? = nil,
-        history: consuming [Chat.Message],
+        history: [Chat.Message],
         speculativeDecoding: SpeculativeDecodingConfig? = nil,
         generateParameters: GenerateParameters = .init(),
         components: GenerationComponents = .init(),
@@ -863,9 +863,9 @@ public final class ChatSession {
     nonisolated(nonsending) public func respond(
         to prompt: String,
         role: Chat.Message.Role = .user,
-        images: consuming [UserInput.Image],
-        videos: consuming [UserInput.Video],
-        audios: consuming [UserInput.Audio]
+        images: [UserInput.Image],
+        videos: [UserInput.Video],
+        audios: [UserInput.Audio]
     ) async throws -> String {
         var output = ""
         for try await chunk in streamResponse(
@@ -888,9 +888,9 @@ public final class ChatSession {
     nonisolated(nonsending) public func respond(
         to prompt: String,
         role: Chat.Message.Role = .user,
-        image: consuming UserInput.Image? = nil,
-        video: consuming UserInput.Video? = nil,
-        audio: consuming UserInput.Audio? = nil
+        image: UserInput.Image? = nil,
+        video: UserInput.Video? = nil,
+        audio: UserInput.Audio? = nil
     ) async throws -> String {
         try await respond(
             to: prompt,
@@ -914,7 +914,7 @@ public final class ChatSession {
     /// - Parameter messages: chat messages to append before generation
     /// - Returns: the model's response
     nonisolated(nonsending) public func respond(
-        to messages: consuming [Chat.Message]
+        to messages: [Chat.Message]
     ) async throws -> String {
         var output = ""
         for try await chunk in streamResponse(to: messages) {
@@ -937,9 +937,9 @@ public final class ChatSession {
     public func streamResponse(
         to prompt: String,
         role: Chat.Message.Role = .user,
-        images: consuming [UserInput.Image] = [],
-        videos: consuming [UserInput.Video] = [],
-        audios: consuming [UserInput.Audio] = []
+        images: [UserInput.Image] = [],
+        videos: [UserInput.Video] = [],
+        audios: [UserInput.Audio] = []
     ) -> AsyncThrowingStream<String, Error> {
         streamMap(
             to: prompt, role: role, images: images, videos: videos, audios: audios,
@@ -957,7 +957,7 @@ public final class ChatSession {
     /// - Throws: ``RejectedToolCallError`` if the model emits a rejected tool
     ///   call, or an error produced during generation.
     public func streamResponse(
-        to messages: consuming [Chat.Message]
+        to messages: [Chat.Message]
     ) -> AsyncThrowingStream<String, Error> {
         streamMap(messages: messages, failOnRejectedToolCall: true) { $0.chunk }
     }
@@ -978,9 +978,9 @@ public final class ChatSession {
     public func streamDetails(
         to prompt: String,
         role: Chat.Message.Role = .user,
-        images: consuming [UserInput.Image] = [],
-        videos: consuming [UserInput.Video] = [],
-        audios: consuming [UserInput.Audio] = [],
+        images: [UserInput.Image] = [],
+        videos: [UserInput.Video] = [],
+        audios: [UserInput.Audio] = [],
     ) -> AsyncThrowingStream<Generation, Error> {
         streamMap(to: prompt, role: role, images: images, videos: videos, audios: audios) {
             $0
@@ -999,7 +999,7 @@ public final class ChatSession {
     /// automatic tool dispatch is configured, the stream instead throws
     /// ``RejectedToolCallError`` before dispatching any call from that turn.
     public func streamDetails(
-        to messages: consuming [Chat.Message]
+        to messages: [Chat.Message]
     ) -> AsyncThrowingStream<Generation, Error> {
         streamMap(messages: messages) {
             $0
@@ -1014,9 +1014,9 @@ public final class ChatSession {
     public func observe<T: GenerationTransformer>(
         to prompt: String,
         role: Chat.Message.Role = .user,
-        images: consuming [UserInput.Image] = [],
-        videos: consuming [UserInput.Video] = [],
-        audios: consuming [UserInput.Audio] = [],
+        images: [UserInput.Image] = [],
+        videos: [UserInput.Video] = [],
+        audios: [UserInput.Audio] = [],
         using transformer: T
     ) -> AsyncThrowingStream<T.Handler.Output, Error> {
         streamMap(
@@ -1032,7 +1032,7 @@ public final class ChatSession {
     /// The transformer applies only to this request. The session retains its
     /// transcript and KV cache, including across automatic tool restarts.
     public func observe<T: GenerationTransformer>(
-        to messages: consuming [Chat.Message],
+        to messages: [Chat.Message],
         using transformer: T
     ) -> AsyncThrowingStream<T.Handler.Output, Error> {
         streamMap(messages: messages, transformer: transformer) { $0 }
@@ -1130,9 +1130,9 @@ public final class ChatSession {
     private func streamMap<R: Sendable>(
         to prompt: String,
         role: Chat.Message.Role,
-        images: consuming [UserInput.Image] = [],
-        videos: consuming [UserInput.Video] = [],
-        audios: consuming [UserInput.Audio] = [],
+        images: [UserInput.Image] = [],
+        videos: [UserInput.Video] = [],
+        audios: [UserInput.Audio] = [],
         failOnRejectedToolCall: Bool = false,
         transform: @Sendable @escaping (Generation) -> R?
     ) -> AsyncThrowingStream<R, Error> {
@@ -1146,7 +1146,7 @@ public final class ChatSession {
     }
 
     private func streamMap<R: Sendable>(
-        messages: consuming [Chat.Message],
+        messages: [Chat.Message],
         failOnRejectedToolCall: Bool = false,
         transform: @Sendable @escaping (Generation) -> R?
     ) -> AsyncThrowingStream<R, Error> {
@@ -1156,7 +1156,7 @@ public final class ChatSession {
     }
 
     private func streamMap<T: GenerationTransformer, R: Sendable>(
-        messages: consuming [Chat.Message],
+        messages: [Chat.Message],
         failOnRejectedToolCall: Bool = false,
         transformer: T,
         transform: @Sendable @escaping (T.Handler.Output) -> R?
@@ -1164,10 +1164,6 @@ public final class ChatSession {
         let (stream, continuation) = AsyncThrowingStream<R, Error>.makeStream()
         let steering = SteeringControl()
         steeringRequests.register(steering)
-
-        // images and videos are not Sendable (MLXArray) but they are consumed
-        // and are only being sent to the inner async
-        let inputMessages = SendableBox<[Chat.Message]>(messages)
 
         var parameters = generateParameters
         transformer.configure(&parameters)
@@ -1292,7 +1288,7 @@ public final class ChatSession {
                     defer {
                         if needsExecutionFence { executionStream.synchronize() }
                     }
-                    var pendingMessages = inputMessages.consume()
+                    var pendingMessages = messages
                     var applyingSteering: [SteeringControl.Request] = []
 
                     // Reports instructions this response accepted but will not apply.
@@ -2091,9 +2087,9 @@ public final class ChatSession {
     /// - Returns: a stream of string chunks from the model
     public func streamResponse(
         to prompt: String,
-        image: consuming UserInput.Image? = nil,
-        video: consuming UserInput.Video? = nil,
-        audio: consuming UserInput.Audio? = nil
+        image: UserInput.Image? = nil,
+        video: UserInput.Video? = nil,
+        audio: UserInput.Audio? = nil
     ) -> AsyncThrowingStream<String, Error> {
         streamResponse(
             to: prompt,
