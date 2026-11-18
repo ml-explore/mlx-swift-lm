@@ -73,6 +73,11 @@ class Gemma2Attention: Module {
         var scores = matmul(queries, keys.swappedAxes(-1, -2))
         scores = tanh(scores / logitSoftCap) * logitSoftCap
 
+        // A per-row `[B, 1, L, S]` mask needs the head-group axis of grouped-query scores.
+        var mask = mask
+        if repeats > 1, case .array(let array) = mask, array.ndim == 4 {
+            mask = .array(expandedDimensions(array, axis: -3))
+        }
         scores = applyAttentionMask(scores: scores, mask: mask)
         scores = softmax(scores, axis: -1, precise: true)
         var output = matmul(scores, values)
