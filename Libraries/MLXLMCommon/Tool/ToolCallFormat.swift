@@ -101,6 +101,9 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
     /// and `func\n{"k": "v"}` (detected only for a declared tool).
     case glm4
 
+    /// Spark 2.5 and 2.6 framed calls with arg_key/arg_value pairs.
+    case spark
+
     /// Gemma function call format.
     /// Example: `<start_function_call>call:name{key:value,k:<escape>str<escape>}<end_function_call>`
     case gemma
@@ -159,6 +162,8 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
             return Qwen35ToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
         case .glm4:
             return GLM4ToolCallParser()
+        case .spark:
+            return SparkToolCallParser()
         case .gemma:
             return GemmaFunctionParser(
                 startTag: "<start_function_call>", endTag: "<end_function_call>",
@@ -233,8 +238,8 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
                 tokenizer: tokenizer, tools: tools, stopStrings: stopStrings,
                 toolCallPolicy: toolCallPolicy)
 
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
-            .miniCPM5, .mistral, .llama3:
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .spark, .gemma, .gemma4, .kimiK2,
+            .minimaxM2, .miniCPM5, .mistral, .llama3:
             return nil
         }
     }
@@ -255,9 +260,8 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
             return HarmonyToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
         case .atem:
             return OnyxToolRestartRule(tokenizer: tokenizer).map { [$0] } ?? []
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
-            .miniCPM5, .mistral,
-            .llama3:
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .spark, .gemma, .gemma4, .kimiK2,
+            .minimaxM2, .miniCPM5, .mistral, .llama3:
             return []
         }
     }
@@ -277,8 +281,8 @@ public enum ToolCallFormat: String, Hashable, Sendable, Codable, CaseIterable {
                     count += message.tool?.calls?.count ?? 0
                 }
             }
-        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .gemma, .gemma4, .kimiK2, .minimaxM2,
-            .miniCPM5, .mistral, .llama3:
+        case .json, .lfm2, .xmlFunction, .qwen35, .glm4, .spark, .gemma, .gemma4, .kimiK2,
+            .minimaxM2, .miniCPM5, .mistral, .llama3:
             0
         }
     }
