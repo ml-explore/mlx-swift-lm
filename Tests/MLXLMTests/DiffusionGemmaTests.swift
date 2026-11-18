@@ -1119,6 +1119,60 @@ struct DiffusionGemmaTests {
         #expect(history.tokens == [9, 1, 0, 3])
     }
 
+    @Test("Diffusion stops early when a processor bans a token")
+    func stopsEarlyWithABannedToken() throws {
+        let model = StableCanvasDiffusionModel()
+        var iterator = try BlockDiffusionTokenIterator(
+            input: LMInput(tokens: MLXArray([9])), model: model,
+            parameters: GenerateParameters(maxTokens: 3),
+            components: .init(logitProcessorFactory: {
+                TokenBan(token: 4, history: TokenHistory())
+            }))
+
+        var tokens = [Int]()
+        while let token = iterator.next() {
+            tokens.append(token)
+        }
+
+        #expect(tokens == [1, 2, 3])
+        #expect(model.decoderCalls == 2)
+    }
+
+    @Test(
+        "DiffusionGemma self-conditioning gives a -inf logit zero weight", arguments: [false, true])
+    func selfConditioningGivesABannedTokenZeroWeight(quantized: Bool) throws {
+        let model = DiffusionGemmaLanguageCore(try Self.configuration())
+        if quantized {
+            quantize(model: model, groupSize: 32, bits: 4) { path, _ in
+                path == "model.decoder.embed_tokens"
+            }
+        }
+        #expect(model.diffusionPrefersLogitsSelfConditioning == quantized)
+
+        let cache = try model.newCache(parameters: nil)
+        let canvas = MLXArray([4, 5, 6, 7]).reshaped([1, 4])
+        let logits = MLXRandom.normal([1, 4, model.diffusionVocabularySize], key: MLXRandom.key(0))
+        let banned = MLXArray(0 ..< model.diffusionVocabularySize) .== 3
+        func canvasLogits(bannedLogit: Float) -> MLXArray {
+            let selfConditioning = MLX.where(banned, MLXArray(bannedLogit), logits)
+            if quantized {
+                return model.diffusionLogits(
+                    canvasTokens: canvas, cache: cache, selfConditioningLogits: selfConditioning)
+            }
+            return model.diffusionLogits(
+                canvasTokens: canvas, cache: cache,
+                selfConditioningEmbeddings: model.diffusionSelfConditioningEmbeddings(
+                    logits: selfConditioning, weight: model.diffusionSelfConditioningWeight()))
+        }
+
+        let infinite = canvasLogits(bannedLogit: -.infinity)
+        let finite = canvasLogits(bannedLogit: -1e4)
+        eval(infinite, finite)
+
+        #expect(MLX.isFinite(infinite).all().item(Bool.self))
+        #expect(abs(infinite - finite).max().item(Float.self) == 0)
+    }
+
     @Test("Diffusion generates without the sequential parts of a processor chain")
     func skipsSequentialLogitProcessors() throws {
         #expect((ThinkingBudgetProcessor.self as Any) is any SequentialLogitProcessor.Type)

@@ -107,7 +107,7 @@ public struct BlockDiffusionTokenIterator: TokenIteratorProtocol {
         self.randomState =
             parameters.seed.map(MLXRandom.RandomState.init(seed:))
             ?? MLXRandom.RandomState()
-        self.processor = components.logitProcessorFactory.flatMap { canvasProcessor($0()) }
+        self.processor = components.logitProcessorFactory?().canvasProcessor()
         processor?.prompt(input.text.tokens)
 
         self.promptPrefillTime = try measureBlockDiffusionPrefill {
@@ -206,10 +206,12 @@ public struct BlockDiffusionTokenIterator: TokenIteratorProtocol {
         }
     }
 
+    /// The entropy of each position. A token with zero probability, such as a `-inf` logit from a
+    /// custom processor, adds 0 (not `0 * -inf = NaN`), as in `torch.distributions.Categorical`.
     private func entropy(logits: MLXArray) -> MLXArray {
         let logprobs = logSoftmax(logits)
         let probs = exp(logprobs)
-        return -(probs * logprobs).sum(axis: -1)
+        return -MLX.where(probs .> 0, probs * logprobs, 0).sum(axis: -1)
     }
 
     private func acceptedTokenMask(entropy: MLXArray) -> MLXArray {
@@ -338,6 +340,8 @@ public struct BlockDiffusionTokenIterator: TokenIteratorProtocol {
                 }
             }
 
+            // As in Transformers, the next step conditions on the processed distribution. Its
+            // softmax gives a `-inf` logit zero weight.
             if prefersLogitsSelfConditioning {
                 selfConditioningLogits = processedLogits
                 asyncEval(currentCanvas, argmaxCanvas, processedLogits)
@@ -424,24 +428,17 @@ extension BlockDiffusionTokenIterator: GenerationFinalizingTokenIterator {
     }
 }
 
-/// A ``LogitProcessor`` that steers generation one token at a time, so it cannot apply to a
-/// denoising canvas, whose positions are sampled together.
-package protocol SequentialLogitProcessor: LogitProcessor {}
-
 private let logger = MLXLogger(label: "block-diffusion")
 
-/// `processor` without its sequential parts, or `nil` when nothing else is left.
-private func canvasProcessor(_ processor: any LogitProcessor) -> (any LogitProcessor)? {
-    switch processor {
-    case let processor as any SequentialLogitProcessor:
-        logger.warning(
-            "A denoising canvas cannot apply \(type(of: processor)); generating without it.")
-        return nil
-    case let chain as ChainedLogitProcessor:
-        let processors = chain.processors.compactMap(canvasProcessor)
-        return processors.isEmpty ? nil : ChainedLogitProcessor(processors: processors)
-    default:
-        return processor
+extension LogitProcessor {
+    /// This processor without its sequential parts, or `nil` when nothing else is left.
+    fileprivate func canvasProcessor() -> (any LogitProcessor)? {
+        removingAll { processor in
+            guard processor is any SequentialLogitProcessor else { return false }
+            logger.warning(
+                "A denoising canvas cannot apply \(type(of: processor)); generating without it.")
+            return true
+        }
     }
 }
 
