@@ -522,7 +522,10 @@ public struct DiffusionGemma4Processor: UserInputProcessor {
 
         let promptArray = MLXArray(expanded.tokens).expandedDimensions(axis: 0)
         let mask = ones(like: promptArray).asType(.int8)
-        let tokenTypes = MLXArray(expanded.tokenTypes, [1, expanded.tokenTypes.count])
+        // Text-only prompts get no token types, so the model can chunk prefill.
+        let tokenTypes: MLXArray? =
+            expanded.tokenTypes.contains { $0 != 0 }
+            ? MLXArray(expanded.tokenTypes, [1, expanded.tokenTypes.count]) : nil
 
         var imageInput: LMInput.ProcessedImage?
         if !images.isEmpty {

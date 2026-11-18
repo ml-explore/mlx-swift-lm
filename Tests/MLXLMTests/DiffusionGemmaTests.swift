@@ -464,6 +464,22 @@ struct DiffusionGemmaTests {
         #expect(input.image?.pixels.shape == [1, 3, 96, 192])
     }
 
+    @Test("DiffusionGemma VLM processor omits token types for text-only prompts")
+    func vlmProcessorOmitsTokenTypesForTextOnlyPrompts() async throws {
+        let config = try JSONDecoder().decode(
+            DiffusionGemma4ProcessorConfiguration.self,
+            from: Data(
+                #"{"processor_class":"DiffusionGemma4Processor","image_seq_length":8}"#.utf8))
+        let processor = DiffusionGemma4Processor(
+            config,
+            tokenizer: DiffusionGemmaPromptTokenizer(tokens: [7, 8, 9]))
+
+        let input = try await processor.prepare(input: UserInput(prompt: "hello"))
+
+        #expect(input.text.tokens.asArray(Int.self) == [7, 8, 9])
+        #expect(input.multimodalTokenTypes == nil)
+    }
+
     @Test("DiffusionGemma VLM processor expands video tokens and token types")
     func vlmProcessorExpandsVideoTokensAndTokenTypes() async throws {
         let config = try JSONDecoder().decode(
