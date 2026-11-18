@@ -399,4 +399,48 @@ final class DeepseekV41Tests: XCTestCase {
         legacy.apply(to: &quantized)
         XCTAssertTrue(quantized.allSatisfy { $0 is DeepseekV41LayerCache })
     }
+
+    /// A saved cache, with evicted window rows, open groups and empty slots, decodes on after
+    /// loading exactly as the cache it was saved from.
+    func testPromptCacheRoundTrip() throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = try referenceModel()
+            let tokens = Self.tokens
+            let cache = try model.newCache(parameters: nil)
+            _ = model(tokens[0..., ..<11], cache: cache)
+            let layers = cache.compactMap { $0 as? DeepseekV41LayerCache }
+            XCTAssertEqual(layers[0].metaState, ["4", "11", "10000"])
+            XCTAssertTrue(layers.contains { $0.compressKV != nil && $0.pendingKV != nil })
+
+            let url = FileManager.default.temporaryDirectory
+                .appending(component: "deepseek-v41-\(UUID().uuidString).safetensors")
+            defer { try? FileManager.default.removeItem(at: url) }
+            try savePromptCache(url: url, cache: cache, metadata: ["model": "deepseek_v41"])
+            let (restored, metadata) = try loadPromptCache(url: url)
+            XCTAssertEqual(metadata, ["model": "deepseek_v41"])
+            XCTAssertTrue(restored.allSatisfy { $0 is DeepseekV41LayerCache })
+            XCTAssertEqual(restored.map(\.metaState), cache.map(\.metaState))
+
+            let next = tokens[0..., 11 ..< 16]
+            let expected = model(next, cache: cache)
+            let actual = model(next, cache: restored)
+            XCTAssertTrue(arrayEqual(actual, expected).item(Bool.self))
+        }
+    }
+
+    func testPromptCacheRejectsCorruptMetadata() throws {
+        let state = [MLXArray.zeros([1, 2, 8])]
+        for metaState in [
+            ["4", "2"], ["4", "2", "11000"], ["0", "2", "10000"], ["4", "x", "10000"],
+        ] {
+            XCTAssertThrowsError(
+                try DeepseekV41LayerCache.restore(state: state, metaState: metaState),
+                "\(metaState)")
+        }
+        XCTAssertThrowsError(
+            try DeepseekV41LayerCache.restore(
+                state: [MLXArray.zeros([1, 5, 8])], metaState: ["4", "5", "10000"]))
+        XCTAssertNoThrow(
+            try DeepseekV41LayerCache.restore(state: state, metaState: ["4", "2", "10000"]))
+    }
 }

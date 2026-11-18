@@ -419,8 +419,14 @@ private func deepseekV41Append(_ cached: MLXArray?, _ new: MLXArray) -> MLXArray
 /// index keys, and the rows of the group that is still open.
 ///
 /// Evicted window rows and closed groups cannot be restored, so the cache cannot be trimmed.
-/// It cannot be saved to a prompt cache file either.
+/// It saves to a prompt cache file under its own class name, registered when the model is made.
 final class DeepseekV41LayerCache: BaseKVCache {
+    override class var serializedClassName: String? { "MLXLLM.DeepseekV41LayerCache" }
+
+    static let registration: Void = {
+        try! registerKVCacheType(DeepseekV41LayerCache.self)
+    }()
+
     let windowSize: Int
     var window: MLXArray?
     var compressKV: MLXArray?
@@ -442,15 +448,49 @@ final class DeepseekV41LayerCache: BaseKVCache {
         return window
     }
 
+    /// The window, compressed groups, index keys, open rows and open gates, in saved order.
+    private var slots: [MLXArray?] { [window, compressKV, indexK, pendingKV, pendingGate] }
+
     override func innerState() -> [MLXArray] {
-        [window, compressKV, indexK, pendingKV, pendingGate].compactMap { $0 }
+        slots.compactMap { $0 }
     }
 
     override var state: [MLXArray] {
         get { innerState() }
         set {
-            precondition(newValue.isEmpty, "DeepseekV41LayerCache cannot be restored")
+            precondition(newValue.isEmpty, "Use restore(state:metaState:) instead")
         }
+    }
+
+    /// The window size, the offset, and a `0`/`1` flag per slot for the arrays `state` holds.
+    override var metaState: [String] {
+        get { [String(windowSize), String(offset), slots.map { $0 == nil ? "0" : "1" }.joined()] }
+        set {
+            precondition(newValue == metaState, "Use restore(state:metaState:) instead")
+        }
+    }
+
+    override class func restore(state: [MLXArray], metaState: [String]) throws -> any KVCache {
+        guard metaState.count == 3, let windowSize = Int(metaState[0]), windowSize > 0,
+            let offset = Int(metaState[1]), offset >= 0, metaState[2].count == 5,
+            metaState[2].allSatisfy({ $0 == "0" || $0 == "1" }),
+            metaState[2].filter({ $0 == "1" }).count == state.count,
+            state.allSatisfy({ $0.ndim == 3 })
+        else {
+            throw DeepseekV41Weights.LoadError(
+                message: "Corrupt prompt cache: invalid DeepseekV41LayerCache state or metadata.")
+        }
+        var arrays = state.makeIterator()
+        let slots = metaState[2].map { $0 == "1" ? arrays.next() : nil }
+        guard (slots[0]?.dim(1) ?? 0) <= windowSize else {
+            throw DeepseekV41Weights.LoadError(
+                message: "Corrupt prompt cache: the window holds more rows than its size.")
+        }
+        let cache = DeepseekV41LayerCache(windowSize: windowSize)
+        (cache.window, cache.compressKV, cache.indexK, cache.pendingKV, cache.pendingGate) =
+            (slots[0], slots[1], slots[2], slots[3], slots[4])
+        cache.offset = offset
+        return cache
     }
 
     override func copy() -> any KVCache {
@@ -1026,8 +1066,9 @@ private final class DeepseekV41TextModel: Module {
 /// DeepSeek-V4.1 text model (`deepseek_v41`).
 ///
 /// Each layer keeps a `KVCache` of its own kind: the sliding window plus compressed history.
-/// It cannot be trimmed, quantized, capped with `maxKVSize`, or saved to a prompt cache file.
-/// Engram layers, multi-token prediction and the vision tower are not supported.
+/// It cannot be trimmed, quantized or capped with `maxKVSize`. Prompt cache files can be
+/// loaded once a model has been created. Engram layers, multi-token prediction and the vision
+/// tower are not supported.
 public final class DeepseekV41Model: Module, LLMModel {
     let args: DeepseekV41Configuration
 
@@ -1035,6 +1076,7 @@ public final class DeepseekV41Model: Module, LLMModel {
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 
     public init(_ args: DeepseekV41Configuration) {
+        _ = DeepseekV41LayerCache.registration
         self.args = args
         _model.wrappedValue = DeepseekV41TextModel(args)
         _lmHead.wrappedValue = Linear(args.hiddenSize, args.vocabSize, bias: false)
