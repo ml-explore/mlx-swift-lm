@@ -29,6 +29,7 @@ private let tinyOmniConfigJSON = """
         "model_type": "siglip2_vision_model", "hidden_size": 32, "intermediate_size": 64,
         "num_hidden_layers": 1, "num_attention_heads": 2, "num_patches": 16
       },
+      "audio_config": \(tinyAudioConfigJSON),
       "projector_hidden_size": 48,
       "head_layers": 2,
       "temperatures": {"choice:2": 1.5, "score": 2.0}
@@ -44,12 +45,28 @@ private func randomD1Omni() throws -> D1Omni {
     let model = D1Omni(try tinyConfiguration())
     var randomized = [String: MLXArray]()
     for (index, (key, value)) in model.parameters().flattened().enumerated() {
-        randomized[key] = MLXRandom.normal(value.shape, key: MLXRandom.key(UInt64(index))) * 0.5
+        let weights = MLXRandom.normal(value.shape, key: MLXRandom.key(UInt64(index))) * 0.5
+        // Batch-norm variances stay positive.
+        randomized[key] = key.hasSuffix("running_var") ? abs(weights) + 0.5 : weights
     }
     try model.update(parameters: ModuleParameters.unflattened(randomized), verify: [.all])
     eval(model)
     return model
 }
+
+/// The audio renames of mlx-vlm `d1_omni/audio.py`, checkpoint name first.
+private let audioRenames = [
+    ("encoder.pre_encode.conv.", "encoder.subsampling.layers."),
+    ("encoder.pre_encode.out.", "encoder.subsampling.linear."),
+    ("self_attn.linear_q.", "self_attn.q_proj."),
+    ("self_attn.linear_k.", "self_attn.k_proj."),
+    ("self_attn.linear_v.", "self_attn.v_proj."),
+    ("self_attn.linear_out.", "self_attn.o_proj."),
+    ("self_attn.linear_pos.", "self_attn.relative_k_proj."),
+    ("self_attn.pos_bias_u", "self_attn.bias_u"),
+    ("self_attn.pos_bias_v", "self_attn.bias_v"),
+    ("conv.batch_norm.", "conv.norm."),
+]
 
 /// Model parameters under the reference checkpoint's names and torch layouts, as mlx-vlm's
 /// `test_sanitize_converts_reference_checkpoint` builds them.
@@ -58,6 +75,17 @@ private func referenceCheckpoint(_ parameters: [String: MLXArray], headLayers: I
 {
     var source = [String: MLXArray]()
     for (key, value) in parameters {
+        if key.hasPrefix("audio.") {
+            let key = audioRenames.reduce(key) {
+                $0.replacingOccurrences(of: $1.1, with: $1.0)
+            }
+            switch value.ndim {
+            case 4: source[key] = value.transposed(0, 3, 1, 2)
+            case 3: source[key] = value.transposed(0, 2, 1)
+            default: source[key] = value
+            }
+            continue
+        }
         let value = key.hasSuffix(".conv.conv.weight") ? value.transposed(0, 2, 1) : value
         let key =
             key
@@ -86,12 +114,31 @@ private func randomPixels(width: Int, height: Int, seed: UInt64) -> RGB8Image {
     return RGB8Image(width: width, height: height, bytes: bytes)
 }
 
+/// 12000 samples of int16 noise, as Python's `rng.normal(0, 0.1, 12000) * 32768`.
+private func noisePCM() -> [Int16] {
+    (MLXRandom.normal([12000], key: MLXRandom.key(5)) * (0.1 * 32768)).asType(.int16)
+        .asArray(Int16.self)
+}
+
 private func kind(_ answer: DecisionAnswer) -> DecisionQuestionKind {
     switch answer.value {
     case .choice: .choice
     case .score: .score
     case .bool: .bool
     }
+}
+
+/// A 16-bit PCM WAV file of interleaved samples.
+func wavData(_ samples: [Int16], channels: Int = 1, sampleRate: Int = 16000) -> Data {
+    func le<T: FixedWidthInteger>(_ value: T) -> [UInt8] {
+        withUnsafeBytes(of: value.littleEndian) { Array($0) }
+    }
+    let payload = samples.flatMap { le($0) }
+    var data = Data("RIFF".utf8) + le(UInt32(36 + payload.count)) + Data("WAVEfmt ".utf8)
+    data += le(UInt32(16)) + le(UInt16(1)) + le(UInt16(channels)) + le(UInt32(sampleRate))
+    data += le(UInt32(sampleRate * 2 * channels)) + le(UInt16(2 * channels)) + le(UInt16(16))
+    data += Data("data".utf8) + le(UInt32(payload.count)) + payload
+    return data
 }
 
 /// `image` encoded losslessly as `type`, with an EXIF orientation when one is given.
@@ -132,7 +179,7 @@ private actor CharTokenizerLoader: TokenizerLoader {
     }
 }
 
-private func temporaryDirectory() throws -> URL {
+func temporaryDirectory() throws -> URL {
     let directory = FileManager.default.temporaryDirectory
         .appending(component: "d1-omni-tests-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -284,9 +331,11 @@ struct D1OmniTests {
         #expect(tiny.temperatures == ["choice:2": 1.5, "score": 2.0])
         #expect(tiny.maxLength == 16384)
         #expect(tiny.imageTextLength == 896)
+        #expect(tiny.audioTextLength == 15360)
         #expect(tiny.bosTokenId == 1)
         #expect(tiny.visionConfiguration.hiddenSize == 32)
         #expect(tiny.visionConfiguration.patchSize == 16)
+        #expect(tiny.audioConfiguration.residualWidth == 8)
 
         // The released checkpoint: int(2 * 6656 / 3) = 4437, rounded up to 4608.
         let real = try JSONDecoder().decode(
@@ -304,6 +353,7 @@ struct D1OmniTests {
                 """#.utf8))
         #expect(defaults.textConfiguration.layerTypes == ["conv", "conv"])
         #expect(defaults.textConfiguration.hiddenSize == 1024)
+        #expect(defaults.audioConfiguration == D1OmniAudioConfiguration())
         #expect(defaults.headLayers == 2)
 
         Device.withDefaultDevice(.cpu) {
@@ -317,16 +367,19 @@ struct D1OmniTests {
             #expect(shapes["head.scorer.layers.3.weight"] == [1, 64])
             #expect(shapes["head.type_emb.weight"] == [3, 64])
             #expect(model.decisionCapabilities.maximumScoreLevels == 10)
-            #expect(model.decisionCapabilities.media == [.images])
+            #expect(model.decisionCapabilities.media == [.images, .audio])
             // The tower, then 2x2 unshuffled patches through the projector into the trunk width.
             #expect(shapes["vision.tower.embeddings.patch_embedding.weight"] == [32, 768])
             #expect(shapes["vision.tower.embeddings.position_embedding.weight"] == [16, 32])
             #expect(shapes["vision.tower.post_layernorm.weight"] == [32])
             #expect(shapes["vision.projector.linear_1.weight"] == [48, 128])
             #expect(shapes["vision.projector.linear_2.weight"] == [64, 48])
+            #expect(shapes["audio.encoder.subsampling.layers.0.weight"] == [4, 3, 3, 1])
+            #expect(shapes["audio.adapter.linear_1.weight"] == [64, 16])
+            #expect(shapes["audio.residual.down.weight"] == [8, 64])
             let roots = Set(shapes.keys.map { $0.split(separator: ".")[0] })
-            #expect(roots == ["encoder", "head", "vision"])
-            #expect(model.excludedCheckpointNamespaces == ["audio"])
+            #expect(roots == ["encoder", "head", "vision", "audio"])
+            #expect(!model.audio.training)
         }
     }
 
@@ -571,6 +624,24 @@ struct D1OmniTests {
             #expect(D1OmniPrompt.renderOptions(question, noulDefault: noulDefault) == expected)
         }
 
+        // After an audio prefix: numbered choices and bare yes/no bools.
+        let spoken: [(DecisionQuestion, [String])] = [
+            (.bool("", whenTrue: "very"), ["false: no", "true: yes"]),
+            (
+                .choice(
+                    "",
+                    options: [
+                        "a", .init("b", description: ""), .init("c", description: "sea"),
+                        .init("d", description: "[1]"),
+                    ]),
+                ["option_000: a", "option_001: b", "option_002: sea", "option_003: [1]"]
+            ),
+            (.score("", levels: ["low", "high"]), ["level 0: low", "level 1: high"]),
+        ]
+        for (question, expected) in spoken {
+            #expect(D1OmniPrompt.renderOptions(question, audio: true) == expected)
+        }
+
         let letters = "abcdefghijkl".map { DecisionOption(String($0)) }
         let buckets: [(DecisionQuestion, String)] = [
             (noul, "noul:2"),
@@ -585,9 +656,12 @@ struct D1OmniTests {
         #expect(D1OmniPrompt.questionType(noul) == 2)
         #expect(D1OmniPrompt.optionCount(noul) == 2)
 
-        #expect(D1OmniPrompt.stateText(nil) == "")
-        #expect(D1OmniPrompt.stateText("x") == "x")
-        #expect(D1OmniPrompt.stateText(.json(["k": [1, 2]])) == #"{"k": [1, 2]}"#)
+        #expect(D1OmniPrompt.stateText(nil, audio: false) == "")
+        #expect(D1OmniPrompt.stateText(nil, audio: true) == "{}")
+        #expect(D1OmniPrompt.stateText("x", audio: true) == "x")
+        #expect(
+            D1OmniPrompt.stateText(.json(["k": [1, 2]]), audio: false)
+                == #"{"k": [1, 2]}"#)
     }
 
     // MARK: Weights
@@ -610,12 +684,23 @@ struct D1OmniTests {
                 "encoder.layers.0.conv.conv.weight", "head.head.layers.0.self_attn.in_proj_weight",
                 "head.head.layers.0.self_attn.out_proj.bias", "head.scorer.3.weight",
                 "vision.tower.vision_model.post_layernorm.weight",
+                "audio.encoder.pre_encode.conv.3.weight", "audio.encoder.pre_encode.out.weight",
+                "audio.encoder.layers.0.self_attn.linear_pos.weight",
+                "audio.encoder.layers.0.self_attn.pos_bias_u",
+                "audio.encoder.layers.0.conv.depthwise_conv.weight",
+                "audio.encoder.layers.0.conv.batch_norm.running_var", "audio.residual.down.weight",
             ] {
                 #expect(source[key] != nil, "\(key)")
             }
             #expect(source["encoder.layers.0.conv.conv.weight"]?.shape == [64, 1, 3])
             #expect(source["head.head.layers.0.self_attn.in_proj_weight"]?.shape == [192, 64])
+            #expect(source["audio.encoder.pre_encode.conv.0.weight"]?.shape == [4, 1, 3, 3])
+            #expect(
+                source["audio.encoder.layers.0.conv.pointwise_conv1.weight"]?.shape == [32, 16, 1])
+            #expect(
+                source["audio.encoder.layers.0.conv.depthwise_conv.weight"]?.shape == [16, 1, 3])
             source["vision.tower.vision_model.embeddings.position_ids"] = MLXArray(0 ..< 16)
+            source["audio.encoder.layers.0.conv.batch_norm.num_batches_tracked"] = MLXArray(3)
 
             func check(_ converted: [String: MLXArray]) {
                 #expect(Set(converted.keys) == Set(expected.keys))
@@ -857,7 +942,7 @@ struct D1OmniTests {
         named("e", .choice(String(repeating: "long ", count: 30), options: ["x", "y"])),
     ]
 
-    /// Two image requests (70 prefix rows each), each with `mixedQuestions`.
+    /// An image request (70 prefix rows) and an audio request (10), each with `mixedQuestions`.
     private static func mediaRequests() -> [DecisionRequest] {
         [
             DecisionRequest(
@@ -865,7 +950,7 @@ struct D1OmniTests {
                 images: [randomPixels(width: 64, height: 48, seed: 0).userImage]),
             DecisionRequest(
                 state: .json(["k": [1, 2]]), questions: mixedQuestions,
-                images: [randomPixels(width: 48, height: 64, seed: 1).userImage]),
+                audio: .array(MLXArray(noisePCM()))),
         ]
     }
 
@@ -878,7 +963,7 @@ struct D1OmniTests {
         return norm
     }
 
-    @Test("Several questions about one image run its prefix through the trunk once")
+    @Test("Several questions about one image or clip run its prefix through the trunk once")
     func sharedPrefixRunsOnce() async throws {
         try await Device.withDefaultDevice(.cpu) {
             let model = try randomD1Omni()
@@ -968,9 +1053,9 @@ struct D1OmniTests {
         }
 
         // One row, rows without a prefix and rows after different prefixes share nothing.
-        let (image, other) = (perRequest[0].rows, perRequest[1].rows)
+        let (image, audio) = (perRequest[0].rows, perRequest[1].rows)
         #expect(model.sharedPrefixCache([image[0]]) == nil)
-        #expect(model.sharedPrefixCache(image + other) == nil)
+        #expect(model.sharedPrefixCache(image + audio) == nil)
         let text = try model.rows(
             state: "hi", questions: Self.mixedQuestions, prefix: nil, media: nil,
             tokenizer: CharTokenizer(),
@@ -990,7 +1075,7 @@ struct D1OmniTests {
         #expect(maxAbsDiff(logits, expected) <= 1e-2)
     }
 
-    @Test("Rows after a shared image prefix match rows that each carry it")
+    @Test("Rows after a shared image or audio prefix match rows that each carry it")
     func sharedPrefixMatchesPrefixedRows() async throws {
         try await Device.withDefaultDevice(.cpu) { () async throws in
             try await expectSharedPrefixMatchesPrefixedRows()
@@ -1201,7 +1286,7 @@ struct D1OmniTests {
 
             // A request gives the same prefix.
             let (fromRequest, media) = try await model.mediaPrefix(
-                images: sizes.indices.map { image($0).userImage })
+                images: sizes.indices.map { image($0).userImage }, audio: nil)
             #expect(media == .images)
             #expect(arrayEqual(try #require(fromRequest), before).item(Bool.self))
         }
@@ -1386,18 +1471,178 @@ struct D1OmniTests {
     }
     #endif
 
+    // MARK: Audio
+
+    @Test("Audio questions batch like single rows, read 10 prefix rows each, and skip calibration")
+    func audioDecisionsBatchingAndUsage() async throws {
+        try await Device.withDefaultDevice(.cpu) {
+            let model = try randomD1Omni()
+            let pcm = noisePCM()
+            let pixels = randomPixels(width: 64, height: 48, seed: 0)
+            let q1 = named("a", .bool("Loud?", whenTrue: "very"))
+            let q2 = named("b", .choice("Pick one", options: ["a", "b", "c"]))
+            let q3 = named("c", .score("Rate", levels: ["low", "high"]))
+            let requests = [
+                DecisionRequest(
+                    state: .text(String(repeating: "x", count: 300)), questions: [q1, q2]),
+                DecisionRequest(questions: [q1, q2, q3], audio: .array(MLXArray(pcm))),
+                DecisionRequest(
+                    state: .json(["k": [1, 2]]), questions: [q2],
+                    audio: .array(MLXArray(pcm[..<9000].map { Float($0) / 32768 }))),
+                DecisionRequest(questions: [q3], images: [pixels.userImage]),
+                DecisionRequest(state: "hi", questions: [q3]),
+            ]
+            let perRequest = try await requestRows(model, requests)
+            let rows = perRequest.flatMap(\.rows)
+            let batched = try model.run(rows, tokenBudget: 65536)
+            let alone = try perRequest.flatMap { try model.run($0.rows, tokenBudget: 65536) }
+            let single = try model.run(rows, tokenBudget: 1)
+            #expect(maxAbsDiff(batched, alone) <= 1e-5)
+            #expect(maxAbsDiff(batched, single) <= 1e-5)
+
+            // A missing state reads as {}, options are written as the audio questions were
+            // trained, and every question reads the 10-frame audio prefix.
+            let tokenizer = CharTokenizer()
+            let tokens = try D1OmniPrompt.Tokens(tokenizer, fallbackBOS: 1)
+            let texts = try [q1, q2, q3].map {
+                try D1OmniPrompt.encode(
+                    tokenizer: tokenizer, tokens: tokens, stateIds: chars("{}"),
+                    question: $0.question, maxLength: 15360, audio: true
+                ).ids
+            }
+            #expect(model.audio(try d1OmniWaveform(MLXArray(pcm))).shape == [1, 10, 64])
+            #expect(perRequest[1].rows.map(\.ids) == texts)
+            #expect(perRequest[1].inputTokens == 3 * 10 + texts.map(\.count).reduce(0, +))
+            let explicit = try await requestRows(
+                model,
+                [
+                    DecisionRequest(
+                        state: .json([:]), questions: [q1, q2, q3],
+                        audio: .array(MLXArray(pcm)))
+                ])
+            let explicitProbabilities = try model.run(explicit[0].rows, tokenBudget: 65536)
+            #expect(maxAbsDiff(explicitProbabilities, Array(alone[2 ..< 5])) <= 1e-6)
+
+            // Audio answers are not calibrated.
+            model.configuration.temperatures = [:]
+            let uncalibrated = try model.run(Array(rows[2 ..< 6]), tokenBudget: 65536)
+            #expect(maxAbsDiff(uncalibrated, Array(batched[2 ..< 6])) <= 1e-5)
+        }
+    }
+
+    @Test("int16 PCM, float samples and 16 kHz mono and stereo WAV files give the same answers")
+    func audioInputsAgree() async throws {
+        try await Device.withDefaultDevice(.cpu) {
+            let model = try randomD1Omni()
+            let pcm = noisePCM()
+            let container = DecisionModelContainer(model: model, tokenizer: CharTokenizer())
+                .decisionContainer(modelID: "d1-omni-test")
+            let questions: KeyValuePairs<String, DecisionQuestion> = [
+                "a": .bool("Loud?", whenTrue: "very"),
+                "b": .choice("Pick one", options: ["a", "b", "c"]),
+                "c": .score("Rate", levels: ["low", "high"]),
+            ]
+            let directory = try temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let file = directory.appending(component: "clip.wav")
+            try wavData(pcm).write(to: file)
+            // The channels sum to twice `pcm`. AVFoundation mixes them as (L + R) / sqrt(2), not
+            // averaged as in Python; the front end's per-bin normalisation removes the gain.
+            let stereoFile = directory.appending(component: "stereo.wav")
+            let offsets = pcm.indices.map { Int16($0 % 17 - 8) * 500 }
+            try wavData(zip(pcm, offsets).flatMap { [$0 + $1, $0 - $1] }, channels: 2)
+                .write(to: stereoFile)
+
+            let reference = try await container.predict(
+                state: nil, questions: questions, audio: .array(MLXArray(pcm)))
+            #expect(reference.answers.map(kind) == [.bool, .choice, .score])
+            let floats = try await container.predict(
+                state: nil, questions: questions,
+                audio: .array(MLXArray(pcm.map { Float($0) / 32768 })))
+            let wav = try await container.predict(
+                state: nil, questions: questions, audio: .url(file))
+            let stereo = try await container.predict(
+                state: nil, questions: questions, audio: .url(stereoFile))
+            // Tests running alongside can change kernel scheduling, so allow float noise.
+            let probabilities = { (response: DecisionResponse) in
+                response.answers.map(\.probabilities)
+            }
+            for (response, tolerance) in [(floats, 1e-5), (wav, 1e-5), (stereo, 1e-4)] {
+                #expect(response.answers.map(\.name) == reference.answers.map(\.name))
+                #expect(response.answers.map(kind) == reference.answers.map(kind))
+                #expect(
+                    maxAbsDiff(probabilities(response), probabilities(reference))
+                        <= tolerance)
+                #expect(response.inputTokens == reference.inputTokens)
+            }
+        }
+    }
+
+    @Test("NaN clips throw, and short and float64 clips answer, on the default device")
+    func audioEdgeCases() async throws {
+        let model = try Device.withDefaultDevice(.cpu) { try randomD1Omni() }
+        let container = DecisionModelContainer(model: model, tokenizer: CharTokenizer())
+            .decisionContainer(modelID: "d1-omni-test")
+        let questions: KeyValuePairs<String, DecisionQuestion> = ["a": .bool("Loud?")]
+        func probabilities(_ audio: sending UserInput.Audio) async throws -> [[Double]] {
+            try await container.predict(questions: questions, audio: audio).answers
+                .map(\.probabilities)
+        }
+        // NaN samples throw before the model runs, not as invalidProbabilities.
+        await #expect(throws: DecisionError.invalidAudio("the clip has NaN or infinite samples")) {
+            try await container.predict(
+                questions: questions, audio: .array(MLXArray([0, Float.nan])))
+        }
+
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // AVFoundation cannot read a file of one or two frames.
+        let file = directory.appending(component: "short.wav")
+        try wavData([Int16](repeating: 8192, count: 16)).write(to: file)
+        let shortFile = try await probabilities(.url(file))
+        let padded = try await probabilities(.array(MLXArray([Float](repeating: 0.25, count: 16))))
+        #expect(maxAbsDiff(shortFile, padded) <= 1e-5)
+        let oneFrame = try await probabilities(.array(MLXArray([Float(0.25)])))
+        #expect(oneFrame.count == 1)
+
+        // The GPU has no float64, so the samples are cast on the CPU.
+        let samples = noisePCM().map { Float($0) / 32768 }
+        let single = try await probabilities(.array(MLXArray(samples)))
+        let double = try await probabilities(.array(MLXArray(samples.map(Double.init))))
+        #expect(maxAbsDiff(double, single) <= 1e-5)
+    }
+
     @Test("Bad media throws the reference's errors")
     func mediaErrors() async throws {
         let model = try Device.withDefaultDevice(.cpu) { try randomD1Omni() }
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let empty = directory.appending(component: "empty.wav")
+        try wavData([]).write(to: empty)
+        let garbage = directory.appending(component: "bad.wav")
+        try Data(String(repeating: "not audio", count: 10).utf8).write(to: garbage)
 
-        func error(images: [UserInput.Image]) async -> DecisionError? {
-            let request = DecisionRequest(questions: [named("q", .bool("q"))], images: images)
+        func error(images: [UserInput.Image] = [], audio: UserInput.Audio? = nil) async
+            -> DecisionError?
+        {
+            let request = DecisionRequest(
+                questions: [named("q", .bool("q"))], images: images, audio: audio)
             do {
                 _ = try await model.decisionProbabilities(
                     request, tokenizer: CharTokenizer(), options: .init())
                 return nil
             } catch {
                 return error as? DecisionError
+            }
+        }
+        let image = UserInput.Image.array(zeros([8, 8, 3], dtype: .uint8))
+        let both = await error(images: [image], audio: .array(zeros([16000], dtype: .int16)))
+        #expect(both == .imagesWithAudio)
+        for url in [empty, garbage, directory.appending(component: "no.wav")] {
+            let failure = await error(audio: .url(url))
+            if case .invalidAudio = failure {
+            } else {
+                Issue.record("\(url.lastPathComponent): \(String(describing: failure))")
             }
         }
         let failure = await error(images: [.array(zeros([0, 8, 3], dtype: .uint8))])
@@ -1409,15 +1654,12 @@ struct D1OmniTests {
 
     // MARK: Loading
 
-    @Test("The factory loads a reference-layout checkpoint without its audio tensors")
+    @Test("The factory loads a reference-layout checkpoint and answers like the model in memory")
     func factoryLoadsTinyCheckpoint() async throws {
         try await Device.withDefaultDevice(.cpu) {
             let model = try randomD1Omni()
             var weights = referenceCheckpoint(
                 Dictionary(uniqueKeysWithValues: model.parameters().flattened()), headLayers: 2)
-            // The released checkpoint also holds the audio encoder.
-            weights["audio.encoder.pre_encode.conv.0.weight"] = MLXArray.zeros([4, 1, 3, 3])
-            weights["audio.residual.down.weight"] = MLXArray.zeros([8, 64])
             weights["audio.encoder.layers.0.conv.batch_norm.num_batches_tracked"] = MLXArray(
                 Int32(3))
             weights["vision.tower.vision_model.embeddings.position_ids"] = MLXArray(
@@ -1434,8 +1676,8 @@ struct D1OmniTests {
             #expect(await loader.directories == [directory])
             #expect(container.modelID == ResolvedModelConfiguration(directory: directory).name)
             #expect(container.capabilities == model.decisionCapabilities)
-            #expect(container.capabilities.media == [.images])
 
+            let pcm = noisePCM()
             let pixels = randomPixels(width: 64, height: 48, seed: 0)
             let questions: KeyValuePairs<String, DecisionQuestion> = [
                 "done": .bool("Finished?"),
@@ -1443,12 +1685,16 @@ struct D1OmniTests {
                 "quality": .score("Rate", levels: ["low", "mid", "high"]),
             ]
             func request(_ index: Int) -> DecisionRequest {
-                index == 0
-                    ? DecisionRequest(state: "A B", questions: questions)
-                    : DecisionRequest(
-                        state: nil, questions: questions, images: [pixels.userImage])
+                switch index {
+                case 0: DecisionRequest(state: "A B", questions: questions)
+                case 1:
+                    DecisionRequest(state: nil, questions: questions, images: [pixels.userImage])
+                default:
+                    DecisionRequest(
+                        state: "call", questions: questions, audio: .array(MLXArray(pcm)))
+                }
             }
-            for index in 0 ..< 2 {
+            for index in 0 ..< 3 {
                 let expected = try await model.decisionProbabilities(
                     request(index), tokenizer: CharTokenizer(), options: .init())
                 let response = try await container.predict(request(index), options: .init())
@@ -1468,7 +1714,8 @@ struct D1OmniTests {
         let tokens = try D1OmniPrompt.Tokens(tokenizer, fallbackBOS: 1)
         var result: [(rows: [D1OmniRow], inputTokens: Int)] = []
         for request in requests {
-            let (prefix, media) = try await model.mediaPrefix(images: request.images)
+            let (prefix, media) = try await model.mediaPrefix(
+                images: request.images, audio: request.audio)
             result.append(
                 try model.rows(
                     state: request.state, questions: request.questions, prefix: prefix,
@@ -1480,7 +1727,7 @@ struct D1OmniTests {
 
 // MARK: - Real weights
 
-/// Parity with mlx-vlm on the released checkpoint: text and image requests in float32,
+/// Parity with mlx-vlm on the released checkpoint: text, image and audio requests in float32,
 /// float16 and bfloat16. Needs `MLX_D1_OMNI_MODEL` and `MLX_D1_FIXTURES` (see README.md).
 /// Python's token ids, keyed by Python's texts, stand in for the tokenizer.
 @Suite(
@@ -1541,10 +1788,16 @@ struct D1OmniParityTests {
                 case prefixTolerance = "prefix_tolerance"
             }
 
-            func request() throws -> DecisionRequest {
-                DecisionRequest(
+            func request(_ tensors: [String: MLXArray]) throws -> DecisionRequest {
+                var audio: UserInput.Audio?
+                if let name = self.audio {
+                    audio = .url(try D1Fixtures.url(name))
+                } else if let key = audioSamples {
+                    audio = .array(try #require(tensors[key]))
+                }
+                return DecisionRequest(
                     state: D1Fixtures.state(state), questions: questions.map(\.named),
-                    images: try images.map { .url(try D1Fixtures.url($0)) })
+                    images: try images.map { .url(try D1Fixtures.url($0)) }, audio: audio)
             }
         }
 
@@ -1565,7 +1818,7 @@ struct D1OmniParityTests {
 
     /// The checkpoint is loaded as `DecisionModelFactory` loads it.
     @Test(
-        "Text and image requests match mlx-vlm",
+        "Text, image and audio requests match mlx-vlm",
         arguments: ["float32", "float16", "bfloat16"])
     func mediaCases(dtype: String) async throws {
         let (fixture, tensors) = try MediaFixture.load(dtype)
@@ -1587,9 +1840,8 @@ struct D1OmniParityTests {
         }
 
         try #require(!fixture.cases.isEmpty)
-        // Fixtures from the audio version of tools/d1_fixtures.py also hold audio cases.
-        for item in fixture.cases where item.audio == nil && item.audioSamples == nil {
-            let request = try item.request()
+        for item in fixture.cases {
+            let request = try item.request(tensors)
             let output = try await model.decisionProbabilities(
                 request, tokenizer: fixture.tokenizer, options: .init())
             let difference = maxAbsDiff(output.probabilities, item.probabilities)
@@ -1599,7 +1851,7 @@ struct D1OmniParityTests {
             var prefixReport = ""
             if let key = item.prefix {
                 let prefix = try #require(
-                    try await model.mediaPrefix(images: request.images)
+                    try await model.mediaPrefix(images: request.images, audio: request.audio)
                         .prefix
                 ).asType(.float32)
                 let reference = try #require(tensors[key])

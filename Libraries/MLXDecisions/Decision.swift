@@ -19,6 +19,8 @@ public enum DecisionQuestionKind: String, Sendable, Hashable {
 public enum DecisionMediaKind: String, Sendable, Hashable {
     /// One or more still images.
     case images
+    /// One audio clip.
+    case audio
 }
 
 /// One option of a choice question.
@@ -216,7 +218,7 @@ public struct DecisionRequest {
         }
     }
 
-    /// The state to decide about. Optional when images carry the whole state.
+    /// The state to decide about. Optional when images or audio carry the whole state.
     ///
     /// A JSON `null` counts as no state, as Python's `None` does.
     public var state: DecisionState?
@@ -228,27 +230,35 @@ public struct DecisionRequest {
     /// throw ``DecisionError/invalidImage(_:)``, because the library does not download media.
     public var images: [UserInput.Image]
 
+    /// One audio clip: a file URL or an array of samples. Other URLs throw
+    /// ``DecisionError/invalidAudio(_:)``.
+    public var audio: UserInput.Audio?
+
     /// Create a request from ordered named questions.
     public init(
         state: DecisionState? = nil,
         questions: [NamedQuestion],
-        images: [UserInput.Image] = []
+        images: [UserInput.Image] = [],
+        audio: UserInput.Audio? = nil
     ) {
         self.state = state
         self.questions = questions
         self.images = images
+        self.audio = audio
     }
 
     /// Create a request from a dictionary literal of named questions, keeping its order.
     init(
         state: DecisionState? = nil,
         questions: KeyValuePairs<String, DecisionQuestion>,
-        images: [UserInput.Image] = []
+        images: [UserInput.Image] = [],
+        audio: UserInput.Audio? = nil
     ) {
         self.init(
             state: state,
             questions: questions.map { NamedQuestion(name: $0.key, question: $0.value) },
-            images: images)
+            images: images,
+            audio: audio)
     }
 }
 
@@ -363,8 +373,10 @@ public enum DecisionError: LocalizedError, Sendable, Equatable {
     case emptyLabel(name: String)
     /// Two options of a choice question share a label.
     case duplicateLabel(name: String, label: String)
-    /// The request has no state or images.
+    /// The request has no state, images, or audio.
     case missingState
+    /// The request carries both images and audio, which the model cannot read together.
+    case imagesWithAudio
     /// The media take too many of the model's positions.
     case mediaTooLong(positions: Int, maximum: Int)
     /// The options of a question do not fit in the model's context.
@@ -377,6 +389,8 @@ public enum DecisionError: LocalizedError, Sendable, Equatable {
     case imagePlaceholderInText(String)
     /// An image could not be read, or its URL is neither a file nor a `data:` URL.
     case invalidImage(String)
+    /// An audio clip could not be read, has NaN or infinite samples, or its URL is not a file URL.
+    case invalidAudio(String)
     /// An execution option is out of range.
     case invalidExecutionOption(name: String, value: Int)
     /// The model returned malformed probabilities.
@@ -389,6 +403,8 @@ public enum DecisionError: LocalizedError, Sendable, Equatable {
             message
         case .unsupportedMedia(.images):
             "This model does not support image input"
+        case .unsupportedMedia(.audio):
+            "This model does not support audio input"
         case .noQuestions:
             "At least one named question is required"
         case .duplicateQuestionName(let name):
@@ -404,7 +420,9 @@ public enum DecisionError: LocalizedError, Sendable, Equatable {
         case .duplicateLabel(let name, let label):
             "Decision labels must be unique: \(label) (question \(name))"
         case .missingState:
-            "A state is required unless images are given"
+            "A state is required unless images or audio are given"
+        case .imagesWithAudio:
+            "A request carries images or audio, not both"
         case .mediaTooLong(let positions, let maximum):
             "The media take \(positions) of the \(maximum) positions; send fewer images"
         case .optionsDoNotFit(let name):
@@ -417,6 +435,8 @@ public enum DecisionError: LocalizedError, Sendable, Equatable {
             "The state or a question contains \(placeholder), which the model reads as an image"
         case .invalidImage(let message):
             "Failed to load image: \(message)"
+        case .invalidAudio(let message):
+            "Failed to load audio: \(message)"
         case .invalidExecutionOption(let name, let value):
             "\(name) must be positive, got \(value)"
         case .invalidProbabilities(let message):

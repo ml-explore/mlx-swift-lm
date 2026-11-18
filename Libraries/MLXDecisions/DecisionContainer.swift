@@ -66,9 +66,11 @@ public final class DecisionContainer: Sendable {
         state: DecisionState? = nil,
         questions: KeyValuePairs<String, DecisionQuestion>,
         images: consuming sending [UserInput.Image] = [],
+        audio: consuming sending UserInput.Audio? = nil,
         options: DecisionExecutionOptions = .init()
     ) async throws -> DecisionResponse {
-        let request = DecisionRequest(state: state, questions: questions, images: images)
+        let request = DecisionRequest(
+            state: state, questions: questions, images: images, audio: audio)
         return try await predict(request, options: options)
     }
 }
@@ -90,6 +92,9 @@ func validateDecisionRequest(
     if !request.images.isEmpty, !capabilities.media.contains(.images) {
         throw DecisionError.unsupportedMedia(.images)
     }
+    if request.audio != nil, !capabilities.media.contains(.audio) {
+        throw DecisionError.unsupportedMedia(.audio)
+    }
     guard !request.questions.isEmpty else {
         throw DecisionError.noQuestions
     }
@@ -97,7 +102,7 @@ func validateDecisionRequest(
     for named in request.questions where !names.insert(named.name).inserted {
         throw DecisionError.duplicateQuestionName(named.name)
     }
-    if request.state == nil, request.images.isEmpty {
+    if request.state == nil, request.images.isEmpty, request.audio == nil {
         throw DecisionError.missingState
     }
     for named in request.questions {
@@ -141,6 +146,10 @@ func validateDecisionRequest(
                 "\(url.absoluteString): only file and data: URLs are read; download remote files first"
             )
         }
+    }
+    if case .url(let url)? = request.audio?.source, !url.isFileURL {
+        throw DecisionError.invalidAudio(
+            "\(url.absoluteString): only file URLs are read; download remote files first")
     }
 }
 

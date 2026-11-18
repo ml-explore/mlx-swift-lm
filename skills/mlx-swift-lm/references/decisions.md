@@ -3,8 +3,8 @@
 ## Overview
 
 A decision model answers typed questions about a state in one forward pass. It returns the
-probability of each answer option and generates no tokens. The state can be text, JSON, or
-images, depending on the model. Everything is in the `MLXDecisions` library
+probability of each answer option and generates no tokens. The state can be text, JSON,
+images, or audio, depending on the model. Everything is in the `MLXDecisions` library
 product. The DocC page `Libraries/MLXDecisions/Documentation.docc/Documentation.md` is the
 full reference, with the precision notes.
 
@@ -18,7 +18,7 @@ full reference, with the precision notes.
 | `DecisionOption` | Choice option: label plus optional description |
 | `DecisionState` | `.text(String)` or `.json(DecisionJSON)`; a string literal is text |
 | `DecisionJSON` | JSON whose objects keep member order |
-| `DecisionRequest` | State, named questions, images |
+| `DecisionRequest` | State, named questions, images, audio |
 | `DecisionExecutionOptions` | `tokenBudget` (default 16,384) |
 | `DecisionResponse` | `answers` in request order, `inputTokens`, `modelID`, `response["name"]` |
 | `DecisionAnswer` | `value`, `probabilities` in option order, `confidence` |
@@ -31,8 +31,8 @@ full reference, with the precision notes.
 |------------|--------|------|
 | `LiquidAI/d1-3B` (bfloat16) | text, JSON, images | 6.2 GB |
 | `LiquidAI/d1-3B-MLX-4bit` | text, JSON, images | 2.4 GB |
-| `LiquidAI/d1-omni-600M` (float32) | text, JSON, images | 2.3 GB |
-| `LiquidAI/d1-omni-600M-MLX-8bit` | text, JSON, images | 0.7 GB |
+| `LiquidAI/d1-omni-600M` (float32) | text, JSON, images or audio | 2.3 GB |
+| `LiquidAI/d1-omni-600M-MLX-8bit` | text, JSON, images or audio | 0.7 GB |
 
 - On an iPhone, use `LiquidAI/d1-3B-MLX-4bit`: the bfloat16 d1-3B does not fit in an app's
   memory. d1-omni-600M runs in float32 or 8-bit.
@@ -57,6 +57,7 @@ let decider = try await DecisionModelFactory.shared.loadContainer(
     using: #huggingFaceTokenizerLoader(),
     id: "LiquidAI/d1-3B"
 )
+let readsAudio = decider.capabilities.media.contains(.audio)  // false for d1-3B
 ```
 
 `loadContainer(from: directoryURL, using:)` loads a model directory that is already on disk.
@@ -88,7 +89,7 @@ if case .choice(let team) = response["team"]?.value {
 - Answers keep the order of the `questions:` literal. Names must be unique.
 - Choice needs at least 2 options with unique, non-empty labels. Score takes 2 to 10 levels,
   lowest first.
-- To build questions at run time, pass `DecisionRequest(state:questions:images:)` with an
+- To build questions at run time, pass `DecisionRequest(state:questions:images:audio:)` with an
   array of `DecisionRequest.NamedQuestion` to `predict(_:options:)`.
 
 | Kind | `value` | `probabilities` |
@@ -100,15 +101,17 @@ if case .choice(let team) = response["team"]?.value {
 `confidence` is the largest probability. `inputTokens` counts input positions as the model's
 reference counts them.
 
-## States and Images
+## States, Images and Audio
 
 - JSON states keep member order, which changes answers:
-  `.json(["order": 1042, "message": "The mug arrived broken."])`. A request needs a state or
-  images.
+  `.json(["order": 1042, "message": "The mug arrived broken."])`. A request needs a state,
+  images, or audio.
 - Images: file or `data:` URLs, `CIImage`, or `MLXArray`. Files are turned upright by their
   EXIF orientation.
+- Audio (d1-omni only): a file URL or an `MLXArray` of 16 kHz mono samples. One clip, and not
+  together with images. Only the first 30 seconds are used.
 - The library does not download media. Download remote files first: other URLs throw
-  `invalidImage`.
+  `invalidImage` or `invalidAudio`.
 
 ## Memory and Token Budget
 
@@ -123,8 +126,8 @@ reference counts them.
 
 - `predict` throws `DecisionError`. The container checks the request before the model runs,
   for example `duplicateQuestionName`, `tooFewCriteria`, `missingState`, `unsupportedMedia`,
-  or `invalidImage` for a remote URL. The models throw `mediaTooLong`, `optionsDoNotFit`, and
-  `invalidImage` for images they cannot read.
+  or `invalidImage` for a remote URL. The models throw `imagesWithAudio`, `mediaTooLong`,
+  `optionsDoNotFit`, and `invalidImage` or `invalidAudio` for media they cannot read.
 - Loading a checkpoint that is not a decision model throws `DecisionError.unsupportedModel`.
 - `DecisionContainer` is `Sendable`. Share one container across tasks; requests run one at a
   time. `DecisionRequest` is not `Sendable`, and `predict` consumes it.
@@ -141,3 +144,5 @@ Answers can differ from the Python models. See the DocC page for details.
   changes a few answers. Use 1.4.0 or later.
 - Images with a color profile other than sRGB are converted to sRGB; Python reads their stored
   values. JPEG decodes a few levels away from Python.
+- Audio files at other rates or in stereo are converted by AVFoundation, not as mlx-vlm does.
+  For exact parity, pass the 16 kHz mono samples as an `MLXArray`.

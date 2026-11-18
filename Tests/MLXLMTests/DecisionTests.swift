@@ -22,6 +22,10 @@ private func testImage() -> UserInput.Image {
     .url(URL(fileURLWithPath: "/nonexistent/cat.png"))
 }
 
+private func testAudio() -> UserInput.Audio {
+    .url(URL(fileURLWithPath: "/nonexistent/clip.wav"))
+}
+
 private func validate(
     _ request: DecisionRequest,
     tokenBudget: Int = DecisionExecutionOptions().tokenBudget,
@@ -58,6 +62,9 @@ struct DecisionValidationTests {
         try validate(DecisionRequest(state: "s", questions: ["team": team, "refund": refund]))
         // Media can carry the whole state.
         try validate(DecisionRequest(questions: ["refund": refund], images: [testImage()]))
+        try validate(
+            DecisionRequest(questions: ["refund": refund], audio: testAudio()),
+            capabilities: DecisionCapabilities(questionKinds: [.bool], media: [.audio]))
         // Labels are not trimmed, so a space is a valid label.
         try validate(
             DecisionRequest(state: "s", questions: ["q": .choice("q", options: [" ", "  "])]))
@@ -163,9 +170,12 @@ struct DecisionValidationTests {
     }
 
     @Test func onlyLocalMediaURLsAreRead() throws {
+        let both = DecisionCapabilities(
+            questionKinds: [.bool], media: [.images, .audio], maximumScoreLevels: 10)
         let questions = named([("r", refund)])
         let pixel = try #require(URL(string: "data:image/png;base64,iVBORw0KGgo="))
         try validate(DecisionRequest(questions: questions, images: [testImage(), .url(pixel)]))
+        try validate(DecisionRequest(questions: questions, audio: testAudio()), capabilities: both)
 
         for text in ["https://example.com/cat.png", "http://example.com/cat", "ftp://h/cat.png"] {
             let image = UserInput.Image.url(try #require(URL(string: text)))
@@ -174,6 +184,15 @@ struct DecisionValidationTests {
                     "\(text): only file and data: URLs are read; download remote files first")
             ) {
                 try validate(DecisionRequest(questions: questions, images: [testImage(), image]))
+            }
+        }
+        for text in ["https://example.com/clip.wav", "data:audio/wav;base64,UklGRg=="] {
+            let clip = UserInput.Audio.url(try #require(URL(string: text)))
+            #expect(
+                throws: DecisionError.invalidAudio(
+                    "\(text): only file URLs are read; download remote files first")
+            ) {
+                try validate(DecisionRequest(questions: questions, audio: clip), capabilities: both)
             }
         }
 
@@ -204,8 +223,8 @@ struct DecisionValidationTests {
                 .invalidExecutionOption(name: "tokenBudget", value: 0),
                 {
                     try validate(
-                        DecisionRequest(questions: [], images: [testImage()]), tokenBudget: 0,
-                        capabilities: none)
+                        DecisionRequest(questions: [], images: [testImage()], audio: testAudio()),
+                        tokenBudget: 0, capabilities: none)
                 }
             ),
             (
@@ -218,8 +237,13 @@ struct DecisionValidationTests {
                 .unsupportedMedia(.images),
                 {
                     try validate(
-                        DecisionRequest(questions: [], images: [testImage()]), capabilities: none)
+                        DecisionRequest(questions: [], images: [testImage()], audio: testAudio()),
+                        capabilities: none)
                 }
+            ),
+            (
+                .unsupportedMedia(.audio),
+                { try validate(DecisionRequest(questions: [], audio: testAudio())) }
             ),
             (.noQuestions, { try validate(DecisionRequest(questions: []), capabilities: none) }),
             (
@@ -254,6 +278,9 @@ struct DecisionValidationTests {
             DecisionError.unsupportedMedia(.images).errorDescription
                 == "This model does not support image input")
         #expect(
+            DecisionError.unsupportedMedia(.audio).errorDescription
+                == "This model does not support audio input")
+        #expect(
             DecisionError.noQuestions.errorDescription == "At least one named question is required")
         #expect(
             DecisionError.unsupportedQuestionKind(name: "q", kind: .score).errorDescription?
@@ -264,6 +291,9 @@ struct DecisionValidationTests {
         #expect(
             DecisionError.emptyLabel(name: "q").errorDescription?
                 .hasPrefix("Decision labels must be nonempty strings") == true)
+        #expect(
+            DecisionError.imagesWithAudio.errorDescription
+                == "A request carries images or audio, not both")
         #expect(
             DecisionError.invalidExecutionOption(name: "tokenBudget", value: 0).errorDescription
                 == "tokenBudget must be positive, got 0")
@@ -358,6 +388,7 @@ private struct OperationCall: Sendable, Equatable {
     var names: [String]
     var state: DecisionState?
     var imageCount: Int
+    var hasAudio: Bool
     var tokenBudget: Int
 }
 
@@ -377,7 +408,8 @@ private func recordingContainer(
         await log.record(
             OperationCall(
                 names: request.questions.map(\.name), state: request.state,
-                imageCount: request.images.count, tokenBudget: options.tokenBudget))
+                imageCount: request.images.count, hasAudio: request.audio != nil,
+                tokenBudget: options.tokenBudget))
         return DecisionProbabilities(probabilities: probabilities, inputTokens: inputTokens)
     }
 }
@@ -402,7 +434,7 @@ struct DecisionContainerTests {
             await log.calls == [
                 OperationCall(
                     names: ["refund", "team"], state: .text("I was charged twice"), imageCount: 1,
-                    tokenBudget: 64)
+                    hasAudio: false, tokenBudget: 64)
             ])
         #expect(response.modelID == "test/decider")
         #expect(response.inputTokens == 100)
@@ -417,6 +449,10 @@ struct DecisionContainerTests {
         let container = recordingContainer(log)
         await #expect(throws: DecisionError.missingState) {
             try await container.predict(state: nil, questions: ["refund": refund])
+        }
+        await #expect(throws: DecisionError.unsupportedMedia(.audio)) {
+            try await container.predict(
+                state: "s", questions: ["refund": refund], audio: testAudio())
         }
         let url = try #require(URL(string: "https://example.com/cat.png"))
         await #expect(

@@ -84,15 +84,21 @@ struct D1OmniConfiguration: Codable, Sendable {
         }
     }
 
+    /// The FastConformer audio encoder.
+    typealias AudioConfiguration = D1OmniAudioConfiguration
+
     var textConfiguration = TextConfiguration()
     /// The SigLIP2 NaFlex image tower, as mlx-vlm reads it with LFM2-VL's `VisionConfig`.
     var visionConfiguration: LFM2VLConfiguration.VisionConfiguration
+    var audioConfiguration = AudioConfiguration()
     var projectorHiddenSize = 2048
     var headLayers = 2
     /// Positions of a text-only row, and of a media prefix plus its text.
     var maxLength = 16384
     /// Text positions after images.
     var imageTextLength = 896
+    /// Text positions after audio.
+    var audioTextLength = 15360
     /// Calibration temperatures keyed `"type:bucket"` or `"type"`.
     var temperatures: [String: Double] = [:]
     var bosTokenId = 1
@@ -100,10 +106,12 @@ struct D1OmniConfiguration: Codable, Sendable {
     enum CodingKeys: String, CodingKey {
         case textConfiguration = "text_config"
         case visionConfiguration = "vision_config"
+        case audioConfiguration = "audio_config"
         case projectorHiddenSize = "projector_hidden_size"
         case headLayers = "head_layers"
         case maxLength = "max_length"
         case imageTextLength = "image_text_length"
+        case audioTextLength = "audio_text_length"
         case temperatures
         case bosTokenId = "bos_token_id"
     }
@@ -115,12 +123,17 @@ struct D1OmniConfiguration: Codable, Sendable {
         textConfiguration =
             try c.decodeIfPresent(TextConfiguration.self, forKey: .textConfiguration)
             ?? textConfiguration
+        audioConfiguration =
+            try c.decodeIfPresent(AudioConfiguration.self, forKey: .audioConfiguration)
+            ?? audioConfiguration
         projectorHiddenSize =
             try c.decodeIfPresent(Int.self, forKey: .projectorHiddenSize) ?? projectorHiddenSize
         headLayers = try c.decodeIfPresent(Int.self, forKey: .headLayers) ?? headLayers
         maxLength = try c.decodeIfPresent(Int.self, forKey: .maxLength) ?? maxLength
         imageTextLength =
             try c.decodeIfPresent(Int.self, forKey: .imageTextLength) ?? imageTextLength
+        audioTextLength =
+            try c.decodeIfPresent(Int.self, forKey: .audioTextLength) ?? audioTextLength
         temperatures =
             try c.decodeIfPresent([String: Double].self, forKey: .temperatures) ?? temperatures
         bosTokenId = try c.decodeIfPresent(Int.self, forKey: .bosTokenId) ?? bosTokenId
@@ -495,7 +508,7 @@ enum D1OmniPrompt {
     /// Descriptions of a bool question's answers.
     typealias BoolCriteria = (whenTrue: String?, whenFalse: String?)
 
-    /// How image bool questions were trained.
+    /// How image and audio bool questions were trained.
     static let yesNo: BoolCriteria = (whenTrue: "yes", whenFalse: "no")
 
     /// The delimiter and marker ids.
@@ -572,24 +585,32 @@ enum D1OmniPrompt {
         return String(out)
     }
 
-    /// The state as the model reads it. A missing state is empty.
-    static func stateText(_ state: DecisionState?) -> String {
-        state?.serialized(indent: nil) ?? ""
+    /// The state as the model reads it. A missing state is empty, or `{}` after audio.
+    static func stateText(_ state: DecisionState?, audio: Bool) -> String {
+        guard let state else { return audio ? "{}" : "" }
+        return state.serialized(indent: nil)
     }
 
-    /// Option texts in the model's order; bool reads `[false, true]`.
+    /// Option texts in the model's order; bool reads `[false, true]`. After audio they are
+    /// written as the audio questions were trained.
     static func renderOptions(
-        _ question: DecisionQuestion, noulDefault: BoolCriteria? = nil
+        _ question: DecisionQuestion, noulDefault: BoolCriteria? = nil, audio: Bool = false
     ) -> [String] {
         switch question.criteria {
         case .choice(let options):
-            return options.map { option in
+            return options.enumerated().map { index, option in
                 let description = option.description.flatMap { $0.isEmpty ? nil : $0 }
+                if audio {
+                    return "option_\(String(format: "%03d", index)): \(description ?? option.label)"
+                }
                 return description.map { "\(option.label): \($0)" } ?? option.label
             }
         case .score(let levels):
             return levels.enumerated().map { "level \($0.offset): \($0.element)" }
         case .bool(let whenTrue, let whenFalse):
+            if audio {
+                return ["false: no", "true: yes"]
+            }
             // Python `criteria or noul_default or {}`: one given side disables the default.
             let criteria: BoolCriteria =
                 whenTrue == nil && whenFalse == nil
@@ -650,10 +671,11 @@ enum D1OmniPrompt {
     /// the state is cut on the right to the room left.
     static func encode(
         tokenizer: any Tokenizer, tokens: Tokens, stateIds: [Int], question: DecisionQuestion,
-        maxLength: Int, noulDefault: BoolCriteria? = nil, name: String = ""
+        maxLength: Int, noulDefault: BoolCriteria? = nil, audio: Bool = false,
+        name: String = ""
     ) throws -> (ids: [Int], markers: [Int]) {
         func encoded(_ text: String) -> [Int] { Self.encoded(text, tokenizer: tokenizer) }
-        let options = renderOptions(question, noulDefault: noulDefault)
+        let options = renderOptions(question, noulDefault: noulDefault, audio: audio)
         let count = options.count
         let budget = max(96, min(count * 24 + 32, maxLength / 2))
         let perOptionTokens = max(2, (budget - 3 * count) / count)
@@ -713,13 +735,14 @@ struct D1OmniRow {
 }
 
 /// LiquidAI d1-omni-600M: a bidirectional LFM2 trunk and a decision head that scores option
-/// markers, with an optional image prefix.
+/// markers, with optional image or audio prefixes.
 final class D1Omni: Module, DecisionModel {
     var configuration: D1OmniConfiguration
 
     @ModuleInfo var encoder: D1OmniTrunk
     @ModuleInfo var head: D1OmniDecisionHead
     @ModuleInfo var vision: D1OmniVision
+    @ModuleInfo var audio: D1OmniAudio
 
     init(_ configuration: D1OmniConfiguration) {
         self.configuration = configuration
@@ -729,6 +752,8 @@ final class D1Omni: Module, DecisionModel {
         _vision.wrappedValue = D1OmniVision(
             configuration.visionConfiguration,
             projectorHiddenSize: configuration.projectorHiddenSize, outputDimensions: width)
+        _audio.wrappedValue = D1OmniAudio(
+            configuration.audioConfiguration, outputDimensions: width)
     }
 
     /// A model for a checkpoint's `config.json`, before its weights are loaded.
@@ -739,11 +764,9 @@ final class D1Omni: Module, DecisionModel {
 
     var decisionCapabilities: DecisionCapabilities {
         DecisionCapabilities(
-            questionKinds: [.choice, .score, .bool], media: [.images], maximumScoreLevels: 10)
+            questionKinds: [.choice, .score, .bool], media: [.images, .audio],
+            maximumScoreLevels: 10)
     }
-
-    /// The checkpoint's audio encoder. This model reads no audio, so it is not loaded.
-    var excludedCheckpointNamespaces: [String] { ["audio"] }
 
     /// Option logits `[B, K]` for right-padded rows of media embeddings then text.
     func callAsFunction(
@@ -770,8 +793,11 @@ final class D1Omni: Module, DecisionModel {
         _ request: consuming DecisionRequest, tokenizer: any Tokenizer,
         options: DecisionExecutionOptions
     ) async throws -> DecisionProbabilities {
+        if !request.images.isEmpty, request.audio != nil {
+            throw DecisionError.imagesWithAudio
+        }
         let tokens = try D1OmniPrompt.Tokens(tokenizer, fallbackBOS: configuration.bosTokenId)
-        let (prefix, media) = try await mediaPrefix(images: request.images)
+        let (prefix, media) = try await mediaPrefix(images: request.images, audio: request.audio)
         let (rows, inputTokens) = try rows(
             state: request.state, questions: request.questions, prefix: prefix, media: media,
             tokenizer: tokenizer, tokens: tokens)
@@ -779,16 +805,22 @@ final class D1Omni: Module, DecisionModel {
         return DecisionProbabilities(probabilities: probabilities, inputTokens: inputTokens)
     }
 
-    /// The prefix `[P, D]` every question of a request reads: all images in order, or none for
-    /// text.
+    /// The prefix `[P, D]` every question of a request reads: all images in order, or the
+    /// audio clip, or none for text.
     func mediaPrefix(
-        images: [UserInput.Image]
+        images: [UserInput.Image], audio: UserInput.Audio?
     ) async throws -> (prefix: MLXArray?, media: DecisionMediaKind?) {
         if !images.isEmpty {
             let prefix = try decisionImageErrors {
                 try vision(images) { try OrientedImage($0) }
             }
             return (prefix, .images)
+        }
+        if let audio {
+            let prefix = self.audio(try await d1OmniWaveform(audio))[0]
+            // FFT graphs must be evaluated before an async return can switch threads.
+            try MLX.checkedEval(prefix)
+            return (prefix, .audio)
         }
         return (nil, nil)
     }
@@ -800,7 +832,12 @@ final class D1Omni: Module, DecisionModel {
         media: DecisionMediaKind?, tokenizer: any Tokenizer, tokens: D1OmniPrompt.Tokens
     ) throws -> (rows: [D1OmniRow], inputTokens: Int) {
         let prefixLength = prefix?.dim(0) ?? 0
-        var maxLength = media == .images ? configuration.imageTextLength : configuration.maxLength
+        var maxLength =
+            switch media {
+            case nil: configuration.maxLength
+            case .images: configuration.imageTextLength
+            case .audio: configuration.audioTextLength
+            }
         maxLength = min(maxLength, configuration.maxLength - prefixLength)
         guard maxLength >= 64 else {
             throw DecisionError.mediaTooLong(
@@ -808,13 +845,13 @@ final class D1Omni: Module, DecisionModel {
         }
         // No row reads more than `maxLength` state tokens.
         let stateIds = D1OmniPrompt.encoded(
-            D1OmniPrompt.stateText(state), limit: maxLength,
+            D1OmniPrompt.stateText(state, audio: media == .audio), limit: maxLength,
             tokenizer: tokenizer)
         let rows = try questions.map { named in
             let (ids, markers) = try D1OmniPrompt.encode(
                 tokenizer: tokenizer, tokens: tokens, stateIds: stateIds, question: named.question,
                 maxLength: maxLength, noulDefault: media == nil ? nil : D1OmniPrompt.yesNo,
-                name: named.name)
+                audio: media == .audio, name: named.name)
             return D1OmniRow(
                 prefix: prefix, ids: ids, markers: markers, question: named.question,
                 calibrate: media == nil)
@@ -920,8 +957,12 @@ final class D1Omni: Module, DecisionModel {
     /// Python `Model.sanitize`: accepts the torch checkpoint and MLX names, and is idempotent.
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var result = [String: MLXArray]()
-        for (key, value) in weights {
+        for (key, value) in d1OmniSanitizeAudio(weights) {
             if key.hasSuffix("num_batches_tracked") || key.hasSuffix("position_ids") {
+                continue
+            }
+            if key.hasPrefix("audio.") {
+                result[key] = value
                 continue
             }
             var key = key.replacingOccurrences(

@@ -29,7 +29,7 @@ mlx-swift-lm is a Swift package for running Large Language Models (LLMs) and Vis
 - Tool calling / function calling with models
 - LoRA adapter training and fine-tuning
 - Text embeddings for RAG/semantic search
-- Typed decisions (choice, score, yes/no) about text, JSON, or images with decision models
+- Typed decisions (choice, score, yes/no) about text, JSON, images, or audio with decision models
 - Porting model architectures from Python MLX-LM to Swift
 
 ### Architecture Overview

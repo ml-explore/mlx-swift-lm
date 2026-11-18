@@ -968,6 +968,14 @@ public enum DecisionIntegrationTests {
         return .url(directory.appending(component: "cats.jpg"))
     }
 
+    /// The speech clip of the d1-omni README: 10.4 s of 16 kHz mono FLAC.
+    private static func speechClip() async throws -> UserInput.Audio {
+        let directory = try await downloadDataset(
+            repo: "Narsil/asr_dummy", revision: "8d141c84e3f84c54cd7bbaa851d24edd0f559734",
+            matching: ["1.flac"])
+        return .url(directory.appending(component: "1.flac"))
+    }
+
     /// d1-3B answers the README's support ticket and the two cats photo like the reference.
     ///
     /// The tolerance covers tokenizer differences, bfloat16 and JPEG decoding; see README.md.
@@ -1031,8 +1039,9 @@ public enum DecisionIntegrationTests {
         try check(reply.contains("Paris"), "Expected 'Paris' in d1-3B's reply, got: \(reply)")
     }
 
-    /// d1-omni-600M answers the README's support ticket and the two cats photo like mlx-vlm. The
-    /// image tolerance covers Core Image decoding JPEG a few levels away from libjpeg-turbo.
+    /// d1-omni-600M answers the README's support ticket, the two cats photo and the speech
+    /// clip like mlx-vlm. The image tolerance covers Core Image decoding JPEG a few levels away
+    /// from libjpeg-turbo.
     public static func d1Omni(
         downloader: any Downloader,
         tokenizerLoader: any TokenizerLoader
@@ -1040,7 +1049,8 @@ public enum DecisionIntegrationTests {
         let decider = try await DecisionModelFactory.shared.loadContainer(
             from: downloader, using: tokenizerLoader, configuration: d1OmniConfiguration,
             progressHandler: logProgress(d1OmniConfiguration.name))
-        try check(decider.capabilities.media == [.images], "d1-omni must read images")
+        try check(
+            decider.capabilities.media == [.images, .audio], "d1-omni must read images and audio")
 
         let text = try await decider.predict(
             state: ticket,
@@ -1076,6 +1086,13 @@ public enum DecisionIntegrationTests {
                     0.055_680_528_283_119_2, 0.933_421_969_413_757_3, 0.010_897_504_165_768_623,
                 ]
             ])
+
+        let speech = try await decider.predict(
+            state: nil, questions: ["speaking": .bool("Is anyone speaking in this clip?")],
+            audio: try await speechClip())
+        try checkAnswers(
+            speech, label: "d1-omni audio", tolerance: 1e-4, inputTokens: 155,
+            expected: ["speaking": [0.991_984_426_975_250_2]])
     }
 
     /// Check each answer's probabilities, P(true) for a bool, and that the most probable

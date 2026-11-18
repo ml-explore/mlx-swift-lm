@@ -10,11 +10,11 @@ need Pillow, numpy and huggingface_hub.
 
     python tools/d1_fixtures.py write --out <dir> [--only ...]
         Writes the directory the gated real-weight suites read from MLX_D1_FIXTURES. The
-        input cats.jpg is downloaded at a pinned revision unless <dir> already holds it, and
-        the PNG inputs are derived from it. The checkpoints are LiquidAI/d1-3B and
-        LiquidAI/d1-omni-600M at the revisions below, from the Hugging Face cache or
-        downloaded. `--only d1-3b` or `--only omni` writes the files of one model, so each
-        can run in its own environment.
+        inputs (cats.jpg, jfk.wav) are downloaded at pinned revisions unless <dir> already
+        holds them, and the PNG inputs are derived from cats.jpg. The checkpoints are
+        LiquidAI/d1-3B and LiquidAI/d1-omni-600M at the revisions below, from the Hugging
+        Face cache or downloaded. `--only d1-3b` or `--only omni` writes the files of one
+        model, so each can run in its own environment.
 
     python tools/d1_fixtures.py readme
         Prints the bfloat16 probabilities `DecisionIntegrationTests` expects for the
@@ -23,12 +23,17 @@ need Pillow, numpy and huggingface_hub.
     python tools/d1_fixtures.py vectors
         Prints the Pillow resize values of `D1Tests`. Needs only Pillow and numpy.
 
+    python tools/d1_fixtures.py tiny-audio
+        Prints the tiny audio model golden values in `D1OmniAudioTests` (no checkpoint).
+
 Files written by `write`, besides the inputs:
 - d1-3B-float32.json: d1-3B text and image cases (`D1ParityTests`).
 - d1-omni-600M-<dtype>-media.{json,safetensors} for float32, float16 and bfloat16: d1-omni
-  text and image cases (`D1OmniParityTests`).
+  text, image and audio cases (`D1OmniParityTests`).
 - d1-omni-600M-float32-tower.safetensors: SigLIP2 tower inputs and output on cats.jpg
   (`Siglip2NaFlexParityTests`).
+- d1-omni-600M-float32-audio.safetensors: audio prefixes of clips cut from jfk.wav
+  (`D1OmniAudioParityTests`).
 
 Case files name their inputs by file name, relative to the fixture directory. Questions
 are lists Swift decodes in order. Probabilities are the reference's, unrounded, in its
@@ -46,6 +51,7 @@ import importlib
 import json
 import shutil
 import urllib.request
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -53,13 +59,20 @@ import numpy as np
 D1_3B = ("LiquidAI/d1-3B", "051bcc464b01b9f92942b364d9586b0ef5912432")
 D1_OMNI = ("LiquidAI/d1-omni-600M", "02b55d7076f15129e59ab3f94783f32c4b088674")
 
-# The two cats photo of the model READMEs (COCO val2017 39769).
+# The two cats photo of the model READMEs (COCO val2017 39769) and the JFK speech clip.
 CATS_JPG = (
     (
         "https://huggingface.co/datasets/hf-internal-testing/fixtures_image_utils/resolve/"
         "4539dd3e9faa39d54e606b4c875f85c7561f5423/cats.jpg"
     ),
     "dea9e7ef97386345f7cff32f9055da4982da5471c48d575146c796ab4563b04e",
+)
+JFK_WAV = (
+    (
+        "https://raw.githubusercontent.com/ggml-org/whisper.cpp/"
+        "b0a11594aec50892a02cd8d129eee2dfe93a8bb8/samples/jfk.wav"
+    ),
+    "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
 )
 # PNG inputs: cats.jpg resized with PIL bicubic to each size.
 RESIZED = [(400, 600), (1024, 768), (1600, 1200), (720, 1600), (3024, 4032)]
@@ -109,6 +122,23 @@ TEXT_OMNI = {
     },
     "urgency": URGENCY,
 }
+AUDIO = {
+    "speaking": {"type": "noul", "instructions": "Is anyone speaking in this clip?"},
+    "speaker": {
+        "type": "choice",
+        "instructions": "Who is speaking?",
+        "criteria": dict.fromkeys(["man", "woman", "child"]),
+    },
+    "topic": {
+        "type": "choice",
+        "instructions": "What is the speech about?",
+        "criteria": {
+            "politics": "Government, country, citizens",
+            "sports": "Games and athletes",
+            "cooking": "Food and recipes",
+        },
+    },
+}
 
 # d1-3B probability tolerances: exact pixels, and JPEG, which Core Image decodes a few
 # levels away from libjpeg-turbo.
@@ -143,6 +173,12 @@ def ordered(questions):
     return out
 
 
+def read_wav(path):
+    with wave.open(str(path), "rb") as f:
+        assert (f.getframerate(), f.getnchannels(), f.getsampwidth()) == (16000, 1, 2)
+        return np.frombuffer(f.readframes(f.getnframes()), np.int16)
+
+
 def snapshot(repo):
     from huggingface_hub import snapshot_download
 
@@ -173,6 +209,7 @@ def inputs(out):
     from PIL import Image
 
     fetch(out, "cats.jpg", CATS_JPG)
+    fetch(out, "jfk.wav", JFK_WAV)
     cats = Image.open(out / "cats.jpg").convert("RGB")
     # cats.jpg as PIL decodes it, for exact pixels at the JPEG's own size.
     cats.save(out / "cats_640x480.png")
@@ -388,7 +425,7 @@ class RecordingTokenizer:
 
 
 def omni_media(out, path, dtype):
-    """Text and image requests, with their image prefixes."""
+    """Text, image and audio requests, with their media prefixes."""
     import mlx.core as mx
     from mlx_vlm import load
     from mlx_vlm.models.d1_omni.d1_omni import _image
@@ -398,28 +435,38 @@ def omni_media(out, path, dtype):
         model.set_dtype(getattr(mx, dtype))
     tokenizer = RecordingTokenizer(getattr(processor, "tokenizer", processor))
 
-    tensors = {}
+    tensors = {"audio-array.samples": mx.array(read_wav(out / "jfk.wav")[16000:96000])}
     cases = [
-        ("text", TICKET, TEXT_OMNI, []),
-        ("jpeg", None, IMAGE, ["cats.jpg"]),
-        ("png-400x600", None, IMAGE, ["cats_400x600.png"]),
-        ("png-1024x768", None, IMAGE, ["cats_1024x768.png"]),
-        ("png-720x1600", ROOM, IMAGE, ["cats_720x1600.png"]),
+        ("text", TICKET, TEXT_OMNI, [], None),
+        ("jpeg", None, IMAGE, ["cats.jpg"], None),
+        ("png-400x600", None, IMAGE, ["cats_400x600.png"], None),
+        ("png-1024x768", None, IMAGE, ["cats_1024x768.png"], None),
+        ("png-720x1600", ROOM, IMAGE, ["cats_720x1600.png"], None),
         (
             "png-two",
             # Keys sorted: Swift tests read states as JSONValue, which keeps no order.
             {"photos": 2, "room": "living room"},
             {"cats": CATS, "animal": ANIMAL},
             ["cats_400x600.png", "cats_1024x768.png"],
+            None,
         ),
+        ("audio", None, AUDIO, [], "jfk.wav"),
+        ("audio-array", {"channel": "phone"}, AUDIO, [], "audio-array.samples"),
     ]
     results = []
-    for tag, state, questions, names in cases:
+    for tag, state, questions, names, audio in cases:
         images = [str(out / name) for name in names]
-        request = (state, list(questions.values()), images or None, None)
+        if audio in tensors:
+            clip, audio_name, samples = np.array(tensors[audio]), None, audio
+        else:
+            clip = None if audio is None else str(out / audio)
+            audio_name, samples = audio, None
+        request = (state, list(questions.values()), images or None, clip)
         [(probabilities, tokens)] = model.probabilities(tokenizer, [request])
         if images:
             tensors[f"{tag}.prefix"] = model.vision([_image(p) for p in images])
+        elif clip is not None:
+            tensors[f"{tag}.prefix"] = model.audio(clip)[0]
         tolerance, prefix_tolerance = OMNI_TOLERANCES[dtype][
             "jpeg" if tag == "jpeg" else "exact"
         ]
@@ -429,6 +476,8 @@ def omni_media(out, path, dtype):
                 "state": state,
                 "questions": ordered(questions),
                 "images": names,
+                "audio": audio_name,
+                "audio_samples": samples,
                 "probabilities": probabilities,
                 "input_tokens": tokens,
                 "prefix": f"{tag}.prefix" if f"{tag}.prefix" in tensors else None,
@@ -485,6 +534,54 @@ def omni_tower(out, path):
     mx.save_safetensors(str(out / "d1-omni-600M-float32-tower.safetensors"), tensors)
 
 
+def audio_clips(jfk):
+    """Clips around the front end's edges: 0.5 s padding, 30 s cut, int16 input."""
+    pcm16 = read_wav(jfk)
+    speech = pcm16.astype(np.float32) / np.float32(32768)
+    long = np.tile(speech, 3)
+    t = np.arange(250000) / 16000
+    rng = np.random.default_rng(1)
+    return {
+        "jfk11s": speech,
+        "jfk30s": long[:480000],
+        "jfk1p04s": speech[:16640],
+        "jfk0p3s": speech[:4800],
+        "jfk479999": long[:479999],
+        "int16jfk50000": pcm16[5000:55000].copy(),
+        "sweep250000": (0.3 * np.sin(2 * np.pi * (50 + 3000 * t / t[-1]) * t)).astype(
+            np.float32
+        ),
+        "noise8001": rng.normal(0, 0.2, 8001).astype(np.float32),
+    }
+
+
+def omni_audio(out, path):
+    """Each clip `name` as `name.input`, with mlx-vlm's `name.mel` (T, 128),
+    `name.mel_valid`, `name.enc` (T_enc, 512), `name.enc_valid` and `name.prefix` (P, 1024)."""
+    import mlx.core as mx
+    from mlx_vlm import load
+    from mlx_vlm.models.d1_omni.audio import waveform
+
+    model, _ = load(path)
+    audio = model.audio
+    tensors = {}
+    for name, x in audio_clips(out / "jfk.wav").items():
+        # Audio.__call__, keeping the intermediates.
+        mel, mask, _ = audio.frontend([waveform(x)])
+        enc, valid = audio.encoder(mel.astype(audio.adapter.norm.weight.dtype), mask)
+        length = int(valid.sum())
+        prefix = audio.residual(audio.adapter(enc[:, :length]))
+        tensors[f"{name}.input"] = mx.array(x)
+        tensors[f"{name}.mel"] = mel[0]
+        tensors[f"{name}.mel_valid"] = mx.array(int(mask.sum()), dtype=mx.int32)
+        tensors[f"{name}.enc"] = enc[0]
+        tensors[f"{name}.enc_valid"] = mx.array(length, dtype=mx.int32)
+        tensors[f"{name}.prefix"] = prefix[0]
+        mx.eval(tensors)
+        print("audio", name, tuple(prefix[0].shape), flush=True)
+    mx.save_safetensors(str(out / "d1-omni-600M-float32-audio.safetensors"), tensors)
+
+
 def write(args):
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -494,6 +591,7 @@ def write(args):
     if "omni" in args.only:
         path = snapshot(D1_OMNI)
         omni_tower(out, path)
+        omni_audio(out, path)
         for dtype in ("float32", "float16", "bfloat16"):
             omni_media(out, path, dtype)
 
@@ -544,6 +642,70 @@ def vectors(args):
         print(f"(({w}, {h}), ({ow}, {oh}), {sum(flat)}, {flat[:6]}, {flat[-3:]}),")
 
 
+# MARK: - Tiny audio model
+
+# `audio_config` of the tiny d1_omni case in mlx_vlm/tests/extraction_cases.json.
+TINY_AUDIO_CONFIG = {
+    "feat_in": 16,
+    "n_layers": 1,
+    "d_model": 16,
+    "subsampling_conv_channels": 4,
+    "ff_expansion_factor": 2,
+    "n_heads": 2,
+    "conv_kernel_size": 3,
+    "residual_width": 8,
+}
+
+
+def hashed(count: int, seed: int) -> np.ndarray:
+    """32-bit integer hash of 0..<count; `hashed` in D1OmniAudioTests.swift."""
+    mask = np.uint64(0xFFFFFFFF)
+    h = np.arange(count, dtype=np.uint64) * np.uint64(0x9E3779B1)
+    h = (h + np.uint64(seed) * np.uint64(0x85EBCA77)) & mask
+    h ^= h >> np.uint64(16)
+    h = (h * np.uint64(0x7FEB352D)) & mask
+    h ^= h >> np.uint64(15)
+    h = (h * np.uint64(0x846CA68B)) & mask
+    h ^= h >> np.uint64(16)
+    return h
+
+
+def uniform(count: int, seed: int) -> np.ndarray:
+    """Values in [-0.5, 0.5), exact in float32."""
+    bits = (hashed(count, seed) >> np.uint64(8)).astype(np.float32)
+    return bits / np.float32(2**24) - np.float32(0.5)
+
+
+def pcm(count: int, seed: int) -> np.ndarray:
+    """int16 noise in [-8192, 8191]."""
+    return (hashed(count, seed) >> np.uint64(16)).astype(np.uint16).view(np.int16) >> 2
+
+
+def tiny_audio(_args):
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+    from mlx_vlm.models.d1_omni.audio import Audio
+    from mlx_vlm.models.d1_omni.config import AudioConfig
+
+    mx.set_default_device(mx.cpu)
+    model = Audio(AudioConfig(**TINY_AUDIO_CONFIG), 64)
+    weights = []
+    parameters = sorted(tree_flatten(model.parameters()), key=lambda item: item[0])
+    for index, (key, value) in enumerate(parameters):
+        w = uniform(value.size, index).reshape(value.shape)
+        weights.append(
+            (key, mx.array(np.abs(w) + 0.5 if key.endswith("running_var") else w))
+        )
+    model.load_weights(weights, strict=True)
+    model.eval()
+    print(f"// {len(weights)} parameters")
+    for count in (12000, 12800):
+        prefix = np.array(model(mx.array(pcm(count, count)))[0])
+        print(f"// {count} samples: prefix {prefix.shape}, prefix[:, ::16]")
+        for row in prefix[:, ::16]:
+            print(", ".join(f"{v:.6g}" for v in row) + ",")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -563,6 +725,9 @@ def main():
     commands.add_parser("vectors", help="print the Pillow resize values").set_defaults(
         handler=vectors
     )
+    commands.add_parser(
+        "tiny-audio", help="print the tiny audio golden values"
+    ).set_defaults(handler=tiny_audio)
     args = parser.parse_args()
     args.handler(args)
 

@@ -50,9 +50,10 @@ TEST_RUNNER_MLX_RUN_DECISION_INTEGRATION=1 xcodebuild test \
 ```
 
 They load both models through `DecisionModelFactory` and check the README examples (a
-support ticket and the two cats photo) against reference probabilities on the same pinned
-checkpoints: d1-3B's PyTorch reference and mlx-vlm for d1-omni. The photo comes from a pinned
-Hugging Face dataset. Each checkpoint runs in the precision it ships in:
+support ticket, the two cats photo, and for d1-omni a speech clip) against reference
+probabilities on the same pinned checkpoints: d1-3B's PyTorch reference and mlx-vlm for
+d1-omni. The photo and the clip come from pinned Hugging Face datasets. Each checkpoint runs
+in the precision it ships in:
 
 - d1-omni-600M (float32) must match to 1e-4, and to 0.02 for the photo, because Core Image
   decodes JPEG a few levels away from libjpeg-turbo.

@@ -5,7 +5,7 @@ Load decision models that answer typed questions about a state in one forward pa
 ## Overview
 
 A decision model reads a state and a set of named questions. It returns the probability of
-each answer option without generating tokens. The state can be text, JSON, or images,
+each answer option without generating tokens. The state can be text, JSON, images, or audio,
 depending on the model.
 
 ``DecisionModelFactory`` reads the checkpoint's `config.json` and picks the matching
@@ -80,7 +80,9 @@ Each question has a name, unique within the request. There are three kinds of qu
   means.
 
 d1-3B reads each option's description, or the label with `_` read as a space when there is
-no description. d1-omni reads `label: description`, or the label alone.
+no description. d1-omni reads `label: description`, or the label alone. After audio, as in
+its training, d1-omni numbers the options and reads each description, or the label when
+there is none. It also ignores `whenTrue` and `whenFalse` after audio.
 
 To build questions at run time, create a ``DecisionRequest`` from an array of named questions:
 
@@ -117,7 +119,7 @@ order the model should read them.
 Numbers are written as their case says: `.double(25.0)` as `25.0` and `.int(25)` as `25`.
 A JSON `null` counts as no state, and a JSON string is read as text.
 
-A request needs a state or images. With images, the state is optional.
+A request needs a state, images, or audio. With images or audio, the state is optional.
 
 ## Images
 
@@ -147,6 +149,24 @@ Precision). d1-3B first scales each image down to at most 1024 × 1024 pixels in
 with Pillow's bicubic filter, as its reference does. Large images are then split into
 512-pixel tiles plus a thumbnail, as transformers' LFM2-VL processor does.
 
+## Audio
+
+d1-omni-600M reads one audio clip:
+
+```swift
+let response = try await decider.predict(
+    questions: ["speaking": .bool("Is anyone speaking in this clip?")],
+    audio: .url(URL(filePath: "clip.wav"))
+)
+```
+
+A clip is either an audio file at a file URL, or an `MLXArray` of 16 kHz mono samples. Other
+URLs throw `invalidAudio`. Files are decoded to 16 kHz mono by `UserInput.Audio.asMLXArray`,
+which uses AVFoundation. In arrays, `int16` samples are scaled by 1/32768, and other types,
+`float64` included, are read as floats. Samples that are NaN or infinite throw `invalidAudio`.
+Clips are cut to 30 seconds and padded with silence to 0.5 seconds. A request carries images
+or audio, not both.
+
 ## Answers
 
 Answers come back in request order. `response["name"]` finds one by its question name.
@@ -159,8 +179,8 @@ Answers come back in request order. `response["name"]` finds one by its question
 
 `confidence` is the probability of the most probable option. Probabilities are not rounded.
 `response.inputTokens` counts input positions as the model's reference counts them. d1-3B
-counts the shared state and images once. d1-omni counts the image prefix again for each
-question, although it reads a shared prefix once.
+counts the shared state and images once. d1-omni counts the image or audio prefix again for
+each question, although it reads a shared prefix once.
 
 ## Token Budget
 
@@ -195,13 +215,14 @@ d1-3B reads the state and images once, then continues each question from that ca
 When they hold over 2,048 tokens, or more than the budget when it is lower, it reads them in
 chunks, which bounds the memory they take.
 
-When several d1-omni questions follow the same images, it reads that image prefix once per
-request, then the text of each question. The half-as-long rule then compares text lengths,
-but the budget still counts the prefix in every question.
+When several d1-omni questions follow the same image or audio, it reads that media prefix
+once per request, then the text of each question. The half-as-long rule then compares text
+lengths, but the budget still counts the prefix in every question.
 
-d1-omni also limits the text of each question: at most 896 tokens after images, and never
-more than 16,384 minus the image prefix. It shortens long instructions and options, and cuts
-a long state on the right. This happens without an error. d1-3B does not cut the text.
+d1-omni also limits the text of each question: at most 896 tokens after images, 15,360 after
+audio, and never more than 16,384 minus the media prefix. It shortens long instructions and
+options, and cuts a long state on the right. This happens without an error. d1-3B does not
+cut the text.
 
 Requests from several tasks run one at a time. Cancelling a task stops its request between
 batches and throws `CancellationError`.
@@ -210,19 +231,21 @@ batches and throws `CancellationError`.
 
 `predict` throws `DecisionError`. The container checks these before the model runs:
 
-- `unsupportedMedia`: the model does not read images.
+- `unsupportedMedia`: the model does not read images, or audio.
 - `noQuestions`, `duplicateQuestionName`.
 - `unsupportedQuestionKind`, `tooFewCriteria`, `tooManyScoreLevels` (both models accept at
   most 10 levels), `emptyLabel`, `duplicateLabel`.
-- `missingState`: there is no state or image.
+- `missingState`: there is no state, image, or audio.
 - `invalidExecutionOption`: the token budget is not positive.
-- `invalidImage`: an image URL is not a file or `data:` URL.
+- `invalidImage`, `invalidAudio`: an image URL is not a file or `data:` URL, or an audio URL
+  is not a file URL.
 
 The models throw these:
 
+- `imagesWithAudio`: d1-omni reads images or audio, not both.
 - `mediaTooLong`: the images leave too little room for the text.
 - `optionsDoNotFit`: the options of a question do not fit in the context.
-- `invalidImage`: an image cannot be read or used.
+- `invalidImage`, `invalidAudio`: an image or clip cannot be read or used.
 - `imagePlaceholderInText`: with images, d1-3B reads the text `<image>` in the state, or in
   the only question, as an image.
 - `noSingleTokenAlias`, `missingToken`: the tokenizer lacks a token the model needs, such as
@@ -238,7 +261,7 @@ decision model.
 | Checkpoint | `config.json` | Inputs | Weights |
 |---|---|---|---|
 | [LiquidAI/d1-3B](https://huggingface.co/LiquidAI/d1-3B) | `model_type` `lfm2_vl` with an `auto_map.AutoModel` that ends in `D1Model` | text, JSON, images | bfloat16 |
-| [LiquidAI/d1-omni-600M](https://huggingface.co/LiquidAI/d1-omni-600M) | `model_type` `d1_omni` | text, JSON, images | float32 |
+| [LiquidAI/d1-omni-600M](https://huggingface.co/LiquidAI/d1-omni-600M) | `model_type` `d1_omni` | text, JSON, images or audio | float32 |
 
 Both models answer choice, score, and bool questions. The factory selects a model by
 `config.json`, not by repository name, so conversions made with `mlx_vlm.convert` load the
@@ -280,6 +303,14 @@ The models run in the precision of the checkpoint's weights.
   `tokenizers`, for example a word followed by a blank line, which every d1-3B choice and
   score prompt contains. This can change answers. Use 1.4.0 or later, which has the fixes
   (huggingface/swift-transformers#397 and #398).
+- 16 kHz mono PCM files decode to the samples mlx-vlm reads. Files at other rates are
+  resampled by AVFoundation, not scipy, and stereo is mixed by AVFoundation, not averaged.
+  On 44.1 and 48 kHz speech this moved probabilities by about 0.005 (median) and at most 0.11,
+  about as much as saving the same speech at another rate moves mlx-vlm's own answers. For
+  exact parity, pass the 16 kHz mono samples that mlx-vlm reads as an `MLXArray`.
+- The d1-omni-600M log-mel front end is numerically unstable on digital silence (all-zero
+  samples), so answers about such clips are not reliable. Speech recorded at 8 kHz, such as
+  phone calls, is ill-conditioned: tiny changes to the samples move its answers.
 
 ## Topics
 
