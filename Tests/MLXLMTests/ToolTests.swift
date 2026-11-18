@@ -1276,6 +1276,35 @@ struct ToolTests {
         #expect(parser.parse(content: content, tools: Self.qwen35Tools) == nil)
     }
 
+    @Test(
+        "A well-formed call to an undeclared tool is rejected as undeclared, with its name",
+        arguments: [
+            (
+                ToolCallFormat.qwen35,
+                "<tool_call>\n<function=erase_everything>\n<parameter=path>\n/\n</parameter>\n</function>\n</tool_call>"
+            ),
+            (
+                .qwen35,
+                #"<tool_call>{"name":"erase_everything","arguments":{"path":"/"}}</tool_call>"#
+            ),
+            (
+                .glm4,
+                "<tool_call>erase_everything<arg_key>path</arg_key><arg_value>/</arg_value></tool_call>"
+            ),
+        ])
+    func undeclaredToolIsReportedByName(format: ToolCallFormat, content: String) throws {
+        let processor = ToolCallProcessor(format: format, tools: Self.qwen35Tools)
+
+        _ = processor.processChunk(content)
+        processor.processEOS()
+
+        #expect(processor.toolCalls.isEmpty)
+        let rejection = try #require(processor.rejectedToolCalls.first)
+        #expect(processor.rejectedToolCalls.count == 1)
+        #expect(rejection.reason == .undeclaredTool)
+        #expect(rejection.toolName == "erase_everything")
+    }
+
     @Test("Qwen3.5 fallback rejects malformed and mixed-dialect payloads")
     func testQwen35JSONFallbackRejectsMalformedPayloads() {
         let parser = Qwen35ToolCallParser(startTag: "<tool_call>", endTag: "</tool_call>")
