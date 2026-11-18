@@ -69,6 +69,10 @@ LLMRegistry.deepseek_r1_4bit      // mlx-community/DeepSeek-R1-4bit
 
 // model_type: "deepseek_v4"
 // DeepSeek-V4-Flash; load an MLX conversion by id or path
+
+// model_type: "deepseek_v41" (also "deepseek_v41_text")
+// DeepSeek-V4.1; loads an MLX conversion or DeepSeek's fp8/fp4 release by id or path.
+// Engram layers are not supported.
 ```
 
 ### GLM

@@ -83,6 +83,8 @@ public enum LLMTypeRegistry {
         "deepseek_v2": create(DeepseekV2Configuration.self, DeepseekV2Model.init),
         "deepseek_v3": create(DeepseekV3Configuration.self, DeepseekV3Model.init),
         "deepseek_v4": create(DeepseekV4Configuration.self, DeepseekV4Model.init),
+        "deepseek_v41": create(DeepseekV41Configuration.self, DeepseekV41Model.init),
+        "deepseek_v41_text": create(DeepseekV41Configuration.self, DeepseekV41Model.init),
         "granite": create(GraniteConfiguration.self, GraniteModel.init),
         "helium": create(HeliumConfiguration.self, HeliumModel.init),
         "granitemoehybrid": create(
