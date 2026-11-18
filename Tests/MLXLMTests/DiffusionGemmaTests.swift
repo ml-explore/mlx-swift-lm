@@ -236,12 +236,53 @@ struct DiffusionGemmaTests {
         #expect(cache.allSatisfy { $0.offset == 2 })
     }
 
-    @Test("DiffusionGemma VLM uses Gemma 4 tool-call conventions")
-    func vlmUsesGemma4ToolCallConventions() throws {
+    @Test("DiffusionGemma VLM uses Gemma 4 chat conventions")
+    func vlmUsesGemma4ChatConventions() throws {
         let config = try JSONDecoder().decode(
             DiffusionGemmaVLMConfiguration.self, from: Data(Self.vlmConfigurationJSON.utf8))
+        let model = DiffusionGemma(config)
 
-        #expect(DiffusionGemma(config).toolCallFormat == .gemma4)
+        #expect(model.toolCallFormat == .gemma4)
+        #expect(model.reasoningConfig == .gemma4)
+    }
+
+    @Test(
+        "DiffusionGemma encodes a prompt with media in chunks that keep each visual block whole",
+        arguments: [3, 5])
+    func chunkedMediaPromptMatchesOnePass(windowSize: Int) throws {
+        let model = DiffusionGemmaLanguageCore(try Self.configuration())
+        eval(model)
+        let embeddings = MLXRandom.normal([1, 12, 32], key: MLXRandom.key(0))
+        let tokenTypes = MLXArray([0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0] as [Int32], [1, 12])
+
+        func fullAttentionKeyValues(windowSize: Int?) throws -> (MLXArray, MLXArray) {
+            let cache = try model.newCache(parameters: nil)
+            try model.prepareDiffusion(
+                inputEmbeddings: embeddings, attentionMask: nil,
+                multimodalTokenTypes: tokenTypes, cache: cache, windowSize: windowSize)
+            return try #require(cache[1].currentKeyValues())
+        }
+
+        let onePass = try fullAttentionKeyValues(windowSize: nil)
+        let chunked = try fullAttentionKeyValues(windowSize: windowSize)
+
+        #expect(allClose(chunked.0, onePass.0, atol: 1e-5).item(Bool.self))
+        #expect(allClose(chunked.1, onePass.1, atol: 1e-5).item(Bool.self))
+    }
+
+    @Test("DiffusionGemma VLM processor leaves a text prompt without mask or token types")
+    func vlmProcessorLeavesTextPromptUnmasked() async throws {
+        let config = try JSONDecoder().decode(
+            DiffusionGemma4ProcessorConfiguration.self,
+            from: Data(#"{"processor_class":"DiffusionGemma4Processor"}"#.utf8))
+        let processor = DiffusionGemma4Processor(
+            config, tokenizer: DiffusionGemmaPromptTokenizer(tokens: [7, 9]))
+
+        let input = try await processor.prepare(input: UserInput(prompt: "hello"))
+
+        #expect(input.text.tokens.asArray(Int.self) == [7, 9])
+        #expect(input.text.mask == nil)
+        #expect(input.multimodalTokenTypes == nil)
     }
 
     @Test("DiffusionGemma reads live K/V independently of serialized cache layout")
