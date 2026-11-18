@@ -443,15 +443,55 @@ public func loadWeights(
 }
 
 /// Quantize the layers `checkpoint` has scales for, then update `module` with strict validation.
+///
+/// A layer the per-layer map names keeps that setting. Any other layer takes the group size,
+/// bits and mode its weights were saved with, as mlx-lm's `infer_quant_config` does, and the
+/// default when its shapes do not decide them.
 func applyCheckpoint(_ checkpoint: ModelCheckpoint, to module: Module) throws {
     let weights = checkpoint.weights
     if let perLayerQuantization = checkpoint.perLayerQuantization {
-        quantize(model: module) { path, _ in
-            guard weights["\(path).scales"] != nil else { return nil }
+        quantize(model: module) { path, layer in
+            guard let scales = weights["\(path).scales"] else { return nil }
+            if perLayerQuantization.perLayerQuantization[path] == nil,
+                let weight = weights["\(path).weight"],
+                let inferred = inferQuantization(of: layer, weight: weight, scales: scales)
+            {
+                return inferred.asTuple
+            }
             return perLayerQuantization.quantization(layer: path)?.asTuple
         }
     }
     try module.update(parameters: ModuleParameters.unflattened(weights), verify: [.all])
+}
+
+/// The group size, bits and mode `weight` and `scales` were packed with, read from the width
+/// of the still unquantized `module`, or `nil` when the shapes do not decide them.
+///
+/// Ported from `infer_quant_config` in mlx-lm `utils.py`.
+func inferQuantization(of module: Module, weight: MLXArray, scales: MLXArray)
+    -> BaseConfiguration.Quantization?
+{
+    guard module is Quantizable,
+        let moduleWeight = module.parameters().flattened().first(where: { $0.0 == "weight" })?.1,
+        moduleWeight.ndim >= 1, weight.ndim >= 1, scales.ndim >= 1, scales.dim(-1) > 0
+    else { return nil }
+    let inputDims = moduleWeight.dim(-1)
+    guard inputDims > 0, inputDims % scales.dim(-1) == 0, weight.dim(-1) * 32 % inputDims == 0
+    else { return nil }
+    let groupSize = inputDims / scales.dim(-1)
+    let bits = weight.dim(-1) * 32 / inputDims
+    // Only affine keeps the scales in the weight dtype. Each of the other modes allows
+    // exactly one (bits, group size) pair.
+    guard scales.dtype == .uint8 else {
+        guard [2, 3, 4, 5, 6, 8].contains(bits) else { return nil }
+        return .init(groupSize: groupSize, bits: bits, mode: .affine)
+    }
+    switch (bits, groupSize) {
+    case (4, 16): return .init(groupSize: groupSize, bits: bits, mode: .nvfp4)
+    case (4, 32): return .init(groupSize: groupSize, bits: bits, mode: .mxfp4)
+    case (8, 32): return .init(groupSize: groupSize, bits: bits, mode: .mxfp8)
+    default: return nil
+    }
 }
 
 /// Async variant of

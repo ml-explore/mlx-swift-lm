@@ -104,4 +104,59 @@ public class BaseConfigurationTests: XCTestCase {
         XCTAssertEqual(config.effectiveEOSTokenIds, [248046])
     }
 
+    /// Upstream `quantization_config` formats map as mlx-lm's `load_model` maps them.
+    func testUpstreamQuantizationConfig() throws {
+        func quantization(_ config: String, nested: Bool = false) throws
+            -> BaseConfiguration.Quantization?
+        {
+            let entry = #""quantization_config": \#(config)"#
+            let json =
+                nested
+                ? #"{"model_type": "Test", "text_config": {\#(entry)}}"#
+                : #"{"model_type": "Test", \#(entry)}"#
+            return try JSONDecoder().decode(BaseConfiguration.self, from: Data(json.utf8))
+                .perLayerQuantization?.quantization
+        }
+
+        let mxfp8 = BaseConfiguration.Quantization(groupSize: 32, bits: 8, mode: .mxfp8)
+        let ue8m0 = #"{"quant_method": "fp8", "scale_fmt": "ue8m0", "weight_block_size": [32, 32]}"#
+        XCTAssertEqual(try quantization(ue8m0), mxfp8)
+        XCTAssertEqual(try quantization(ue8m0, nested: true), mxfp8)
+        XCTAssertEqual(try quantization(#"{"quant_method": "mxfp8"}"#), mxfp8)
+        XCTAssertEqual(
+            try quantization(#"{"quant_method": "mxfp4"}"#),
+            .init(groupSize: 32, bits: 4, mode: .mxfp4))
+        XCTAssertEqual(
+            try quantization(
+                #"{"quant_method": "compressed-tensors", "format": "pack-quantized"}"#),
+            .init(groupSize: 32, bits: 4, mode: .affine))
+        XCTAssertEqual(
+            try quantization(
+                #"{"quant_method": "compressed-tensors", "format": "nvfp4-pack-quantized"}"#),
+            .init(groupSize: 16, bits: 4, mode: .nvfp4))
+
+        // Block fp8 dequantizes in sanitize, and unknown or malformed formats are not mapped.
+        XCTAssertNil(
+            try quantization(#"{"quant_method": "fp8", "weight_block_size": [128, 128]}"#))
+        XCTAssertNil(
+            try quantization(
+                #"{"quant_method": "compressed-tensors", "format": "float-quantized"}"#))
+        XCTAssertNil(try quantization(#"{"quant_method": "paroquant", "bits": 4}"#))
+        XCTAssertNil(try quantization(#"{"quant_method": 7}"#))
+    }
+
+    /// An MLX `quantization` entry wins over the upstream `quantization_config`.
+    func testQuantizationWinsOverUpstreamConfig() throws {
+        let json = """
+            {
+                "model_type": "Test",
+                "quantization": {"group_size": 64, "bits": 4},
+                "quantization_config": {"quant_method": "mxfp8"}
+            }
+            """
+        let config = try JSONDecoder().decode(BaseConfiguration.self, from: Data(json.utf8))
+        XCTAssertEqual(
+            config.perLayerQuantization?.quantization(layer: "x"), .init(groupSize: 64, bits: 4))
+    }
+
 }

@@ -1063,35 +1063,10 @@ public final class DeepseekV41Model: Module, LLMModel {
         return model.makeCache()
     }
 
-    /// Rename the checkpoint keys and keep the fp8/fp4 weights packed.
+    /// Rename the checkpoint keys and keep the fp8/fp4 weights packed. The loader gives each
+    /// packed layer the group size, bits and mode its weights were stored with.
     public func sanitize(weights: [String: MLXArray]) throws -> [String: MLXArray] {
         try DeepseekV41Weights.sanitize(weights, args: args)
-    }
-
-    /// Sanitize, then give each packed layer the group size, bits and mode its weights were
-    /// stored with, as mlx-lm's `infer_quant_config` does. A layer the config names keeps the
-    /// config's setting.
-    public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
-        var checkpoint = checkpoint
-        checkpoint.weights = try sanitize(weights: checkpoint.weights)
-        let modules = Dictionary(uniqueKeysWithValues: leafModules().flattened())
-        var quantization =
-            checkpoint.perLayerQuantization ?? .init(quantization: nil, perLayerQuantization: [:])
-        var inferred = false
-        for (key, scales) in checkpoint.weights where key.hasSuffix(".scales") {
-            let path = String(key.dropLast(".scales".count))
-            guard quantization.perLayerQuantization[path] == nil,
-                let module = modules[path], let weight = checkpoint.weights["\(path).weight"]
-            else { continue }
-            quantization.perLayerQuantization[path] = .quantize(
-                try DeepseekV41Weights.inferQuantization(
-                    path: path, module: module, weight: weight, scales: scales))
-            inferred = true
-        }
-        if inferred {
-            checkpoint.perLayerQuantization = quantization
-        }
-        return checkpoint
     }
 
     public var loraLayers: [Module] { model.layers }
@@ -1247,38 +1222,5 @@ enum DeepseekV41Weights {
             clean["\(name).weight"] = value
         }
         return clean
-    }
-
-    /// Recover the group size, bits and mode a saved weight was packed with, from the
-    /// unquantized module's input width.
-    static func inferQuantization(
-        path: String, module: Module, weight: MLXArray, scales: MLXArray
-    ) throws -> BaseConfiguration.Quantization {
-        guard module is Quantizable,
-            let moduleWeight = module.parameters().flattened().first(where: { $0.0 == "weight" })
-        else {
-            throw LoadError(message: "\(path) has scales but cannot be quantized")
-        }
-        let inputDims = moduleWeight.1.dim(-1)
-        let groupSize = inputDims / scales.dim(-1)
-        let bits = weight.dim(-1) * 32 / inputDims
-        // Only affine keeps the scales in the weight dtype. Each of the other modes allows
-        // exactly one (bits, group size) pair.
-        let mode: QuantizationMode
-        if scales.dtype != .uint8 {
-            mode = .affine
-        } else {
-            switch (bits, groupSize) {
-            case (4, 16): mode = .nvfp4
-            case (4, 32): mode = .mxfp4
-            case (8, 32): mode = .mxfp8
-            default:
-                throw LoadError(
-                    message:
-                        "Cannot infer the quantization mode of \(path): \(bits) bits with group "
-                        + "size \(groupSize).")
-            }
-        }
-        return .init(groupSize: groupSize, bits: bits, mode: mode)
     }
 }

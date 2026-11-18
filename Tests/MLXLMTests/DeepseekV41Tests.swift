@@ -2,11 +2,11 @@
 
 import Foundation
 import MLX
-import MLXLMCommon
 import MLXNN
 import XCTest
 
 @testable import MLXLLM
+@testable import MLXLMCommon
 
 /// DeepSeek-V4.1 against mlx-lm's `deepseek_v41.py`. Reference values come from
 /// `tools/deepseek-v41-reference.py`, which builds the same tiny model with the same
@@ -85,6 +85,48 @@ final class DeepseekV41Tests: XCTestCase {
             (name, Self.deterministicWeight(name, value.shape))
         }
         try model.update(parameters: ModuleParameters.unflattened(weights), verify: [.all])
+        eval(model)
+        return model
+    }
+
+    /// The reference weights packed like DeepSeek's checkpoint, mxfp8 projections and mxfp4
+    /// experts, loaded through the shared loader under the checkpoint's `quantization_config`.
+    /// The config names `layers.0.self_attn.kv_proj` as unquantized.
+    private func packedModel() throws -> DeepseekV41Model {
+        let model = DeepseekV41Model(try configuration())
+        let modules = Dictionary(uniqueKeysWithValues: model.leafModules().flattened())
+        var weights = [String: MLXArray]()
+        for (name, value) in model.parameters().flattened() {
+            weights[name] = Self.deterministicWeight(name, value.shape)
+        }
+        for (path, module) in modules where module is Linear || module is SwitchLinear {
+            guard !path.hasSuffix("lm_head") else { continue }
+            let experts = path.contains(".switch_mlp.")
+            let (wq, scales, _) = quantized(
+                weights["\(path).weight"]!, groupSize: 32, bits: experts ? 4 : 8,
+                mode: experts ? .mxfp4 : .mxfp8)
+            weights["\(path).weight"] = wq
+            weights["\(path).scales"] = scales
+        }
+        weights["model.layers.0.self_attn.kv_proj.scales"] = nil
+        weights["model.layers.0.self_attn.kv_proj.weight"] = Self.deterministicWeight(
+            "model.layers.0.self_attn.kv_proj.weight", [32, 64])
+
+        let base = try JSONDecoder().decode(
+            BaseConfiguration.self,
+            from: Data(
+                #"""
+                {"model_type": "deepseek_v41", "quantization_config": {"quant_method": "fp8",
+                 "scale_fmt": "ue8m0", "weight_block_size": [32, 32]}}
+                """#.utf8))
+        var settings = try XCTUnwrap(base.perLayerQuantization)
+        XCTAssertEqual(settings.quantization?.mode, .mxfp8)
+        settings.perLayerQuantization["model.layers.0.self_attn.kv_proj"] = .skip
+
+        try applyCheckpoint(
+            model.prepareCheckpoint(
+                ModelCheckpoint(weights: weights, perLayerQuantization: settings)),
+            to: model)
         eval(model)
         return model
     }
@@ -269,51 +311,26 @@ final class DeepseekV41Tests: XCTestCase {
         XCTAssertEqual(Set(try model.sanitize(weights: weights).keys), Set(weights.keys))
     }
 
-    /// Packed mxfp8 projections and mxfp4 experts load under a config with no quantization,
-    /// as DeepSeek's checkpoint has, and a layer the config names keeps its setting.
-    func testPrepareCheckpointInfersQuantization() throws {
-        let model = DeepseekV41Model(try configuration())
-        let modules = Dictionary(uniqueKeysWithValues: model.leafModules().flattened())
-        var weights = [String: MLXArray]()
-        for (name, value) in model.parameters().flattened() {
-            weights[name] = Self.deterministicWeight(name, value.shape)
-        }
-        for (path, module) in modules where module is Linear || module is SwitchLinear {
-            guard !path.hasSuffix("lm_head") else { continue }
-            let experts = path.contains(".switch_mlp.")
-            let (wq, scales, _) = quantized(
-                weights["\(path).weight"]!, groupSize: 32, bits: experts ? 4 : 8,
-                mode: experts ? .mxfp4 : .mxfp8)
-            weights["\(path).weight"] = wq
-            weights["\(path).scales"] = scales
-        }
-        let named = BaseConfiguration.PerLayerQuantization(
-            quantization: nil,
-            perLayerQuantization: ["model.layers.0.self_attn.kv_proj": .skip])
-        weights["model.layers.0.self_attn.kv_proj.scales"] = nil
-        weights["model.layers.0.self_attn.kv_proj.weight"] = Self.deterministicWeight(
-            "model.layers.0.self_attn.kv_proj.weight", [32, 64])
+    /// DeepSeek's checkpoint loads its mxfp8 projections and mxfp4 experts packed: the
+    /// `quantization_config` gives the mxfp8 default, the loader infers the experts' mode, and a
+    /// layer the config names keeps its setting.
+    func testLoaderInfersQuantization() throws {
+        let model = try packedModel()
+        let loaded = Dictionary(uniqueKeysWithValues: model.leafModules().flattened())
+        let experts = try XCTUnwrap(
+            loaded["model.layers.0.mlp.experts.switch_mlp.up_proj"] as? QuantizedSwitchLinear)
+        XCTAssertEqual(experts.mode, .mxfp4)
+        XCTAssertEqual(experts.bits, 4)
+        let output = try XCTUnwrap(loaded["model.layers.3.self_attn.o_a_proj"] as? Quantized)
+        XCTAssertEqual(output.mode, .mxfp8)
+        XCTAssertEqual(output.bits, 8)
+        XCTAssertFalse(loaded["model.layers.0.self_attn.kv_proj"] is Quantized)
 
-        let checkpoint = try model.prepareCheckpoint(
-            ModelCheckpoint(weights: weights, perLayerQuantization: named))
-        let settings = try XCTUnwrap(checkpoint.perLayerQuantization)
-        XCTAssertEqual(
-            settings.quantization(layer: "model.layers.0.mlp.experts.switch_mlp.up_proj")?.mode,
-            .mxfp4)
-        XCTAssertEqual(
-            settings.quantization(layer: "model.layers.3.self_attn.o_a_proj")?.mode, .mxfp8)
-        XCTAssertEqual(settings.quantization(layer: "model.layers.3.self_attn.o_a_proj")?.bits, 8)
-        XCTAssertNil(settings.quantization(layer: "model.layers.0.self_attn.kv_proj"))
-
-        quantize(model: model) { path, _ in
-            checkpoint.weights["\(path).scales"] != nil
-                ? settings.quantization(layer: path)?.asTuple : nil
+        try Device.withDefaultDevice(.cpu) {
+            let logits = model(Self.tokens, cache: try model.newCache(parameters: nil))
+            XCTAssertEqual(logits.shape, [2, 16, 128])
+            XCTAssertTrue(all(isFinite(logits)).item(Bool.self))
         }
-        try model.update(
-            parameters: ModuleParameters.unflattened(checkpoint.weights), verify: [.all])
-        let logits = model(Self.tokens, cache: try model.newCache(parameters: nil))
-        XCTAssertEqual(logits.shape, [2, 16, 128])
-        XCTAssertTrue(all(isFinite(logits)).item(Bool.self))
     }
 
     // MARK: - Configuration, registry and cache
