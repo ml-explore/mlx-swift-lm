@@ -41,7 +41,7 @@ final class CachedForwardSmokeTests: XCTestCase {
                     list[1].offset, tokenCount,
                     "layer \(i) KV sub-cache advanced by \(list[1].offset) for \(tokenCount) tokens",
                     file: file, line: line)
-            case is MambaCache:
+            case is ArraysCache:
                 XCTAssertFalse(
                     layerCache.innerState().isEmpty,
                     "layer \(i) SSM cache was never written", file: file, line: line)
@@ -171,6 +171,14 @@ final class CachedForwardSmokeTests: XCTestCase {
             }
             """)
         try assertCacheAdvancesOnce(Qwen3NextModel(config), expectedLayers: 4)
+    }
+
+    // MARK: - Qwen4Exp (QSA attention + indexer key cache + PLE recurrent slots)
+
+    func testQwen4ExpForwardPassUpdatesCacheExactlyOnce() throws {
+        let config = try config(
+            Qwen4ExpConfiguration.self, Qwen4ExpReferenceValues.configuration)
+        try assertCacheAdvancesOnce(Qwen4ExpModel(config), expectedLayers: 4)
     }
 
     // MARK: - GPTOSS (sliding-window rotating cache + attention sinks + MoE)
