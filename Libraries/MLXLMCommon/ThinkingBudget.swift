@@ -487,6 +487,9 @@ extension ThinkingBudgetProcessor: GenerationReasoningTokenCounting {
     package var generationReasoningTokenCount: Int? { emittedReasoningTokenCount }
 }
 
+/// A budget counts and forces reasoning tokens one at a time.
+extension ThinkingBudgetProcessor: SequentialLogitProcessor {}
+
 extension GenerationComponents {
     /// Return a copy that enforces a reasoning-token budget for every generation.
     ///

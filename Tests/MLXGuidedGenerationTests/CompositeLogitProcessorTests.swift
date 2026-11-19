@@ -139,4 +139,21 @@ struct CompositeLogitProcessorTests {
         #expect(origResult.asArray(Float.self) == [1.0])
         #expect(clonedResult.asArray(Float.self) == [1.0])
     }
+
+    @Test
+    func removingAllRemovesMatchingNestedProcessors() {
+        let composite = CompositeLogitProcessor([
+            AddConstantProcessor(constant: 1.0),
+            CompositeLogitProcessor([
+                ScaleProcessor(scale: 2.0),
+                AddConstantProcessor(constant: 3.0),
+            ]),
+        ])
+
+        let remaining = composite.removingAll { $0 is ScaleProcessor }
+        let values = remaining?.process(logits: MLXArray([0.0] as [Float])).asArray(Float.self)
+
+        #expect(values == [4.0])
+        #expect(composite.removingAll { _ in true } == nil)
+    }
 }

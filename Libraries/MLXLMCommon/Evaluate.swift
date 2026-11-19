@@ -48,6 +48,13 @@ public protocol LogitProcessor {
     /// Called after the generation stream has emitted its last token.
     mutating func finalizeGeneration()
 
+    /// Returns this processor without the processors that `shouldBeRemoved` selects, or `nil`
+    /// when no processor is left.
+    ///
+    /// A processor that contains other processors applies `shouldBeRemoved` to each of them.
+    /// Other processors apply it to themselves.
+    func removingAll(where shouldBeRemoved: (any LogitProcessor) -> Bool) -> (any LogitProcessor)?
+
     /// Returns an independent copy of this processor.
     ///
     /// Value types (structs) obtain an independent copy via standard value semantics
@@ -64,7 +71,19 @@ extension LogitProcessor {
     public mutating func didEmit(token: Int) {}
 
     public mutating func finalizeGeneration() {}
+
+    public func removingAll(
+        where shouldBeRemoved: (any LogitProcessor) -> Bool
+    ) -> (any LogitProcessor)? {
+        shouldBeRemoved(self) ? nil : self
+    }
 }
+
+/// A ``LogitProcessor`` that steers generation one token at a time.
+///
+/// Block-diffusion generation samples all the positions of a canvas together, so it
+/// generates without these processors.
+public protocol SequentialLogitProcessor: LogitProcessor {}
 
 extension LogitProcessor where Self: AnyObject {
     public func copy() -> Self {
@@ -821,6 +840,13 @@ public struct ChainedLogitProcessor: LogitProcessor {
         for index in processors.indices {
             processors[index].finalizeGeneration()
         }
+    }
+
+    public func removingAll(
+        where shouldBeRemoved: (any LogitProcessor) -> Bool
+    ) -> (any LogitProcessor)? {
+        let processors = processors.compactMap { $0.removingAll(where: shouldBeRemoved) }
+        return processors.isEmpty ? nil : Self(processors: processors)
     }
 }
 
