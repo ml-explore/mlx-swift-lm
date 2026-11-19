@@ -196,6 +196,88 @@ struct XMLFunctionParserStrictnessTests {
                 == .object(["archived": .bool(false), "limit": .int(1)]))
     }
 
+    // MARK: - A parameter left open before the next one
+
+    /// Qwen 3.5 emits this shape: it omits `</parameter>` before the next
+    /// parameter. Before, the first value took in every later parameter, and
+    /// the call ran with silently wrong arguments.
+    private static let openBeforeNextParameter = """
+        <tool_call>
+        <function=read_url>
+        <parameter=max_chars>
+        7700
+        <parameter=start_offset>
+        7700
+        <parameter=url>
+        https://example.com/spec
+        </parameter>
+        </function>
+        </tool_call>
+        """
+
+    private static let readURLTool: [[String: any Sendable]] = [
+        [
+            "function": [
+                "name": "read_url",
+                "parameters": [
+                    "properties": [
+                        "url": ["type": "string"],
+                        "max_chars": ["type": "integer"],
+                        "start_offset": ["type": "integer"],
+                    ]
+                ],
+            ] as [String: any Sendable]
+        ]
+    ]
+
+    @Test("A parameter opened on a new line closes the value left open before it")
+    func parameterOnANewLineClosesTheOpenValue() throws {
+        let call = try #require(
+            parser.parse(content: Self.openBeforeNextParameter, tools: Self.readURLTool))
+
+        #expect(
+            call.function.arguments == [
+                "max_chars": .int(7700),
+                "start_offset": .int(7700),
+                "url": .string("https://example.com/spec"),
+            ])
+    }
+
+    @Test("Qwen 3.5 streaming keeps every argument at every chunk boundary")
+    func qwen35StreamingKeepsEveryArgument() throws {
+        let processor = ToolCallProcessor(format: .qwen35, tools: Self.readURLTool)
+
+        for character in Self.openBeforeNextParameter {
+            _ = processor.processChunk(String(character))
+        }
+        processor.processEOS()
+
+        let call = try #require(processor.toolCalls.first)
+        #expect(processor.toolCalls.count == 1)
+        #expect(processor.rejectedToolCalls.isEmpty)
+        #expect(call.function.arguments["url"] == .string("https://example.com/spec"))
+        #expect(call.function.arguments["start_offset"] == .int(7700))
+    }
+
+    @Test("A parameter marker inside a line stays part of the value")
+    func inlineParameterMarkerIsData() throws {
+        let call = try #require(
+            parser.parse(
+                content: """
+                    <function=note>
+                    <parameter=text>
+                    write <parameter=name> to open a parameter
+                    </parameter>
+                    </function>
+                    """,
+                tools: nil))
+
+        #expect(
+            call.function.arguments == [
+                "text": .string("write <parameter=name> to open a parameter")
+            ])
+    }
+
     // MARK: - End-to-end through ToolCallProcessor
 
     @Test("Native XML rejects an unclosed parameter at EOS")
