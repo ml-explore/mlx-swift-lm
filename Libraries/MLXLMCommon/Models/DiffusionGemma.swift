@@ -1011,25 +1011,54 @@ public final class DiffusionGemmaLanguageCore: Module, BlockDiffusionLanguageMod
             compactedTokenTypes = multimodalTokenTypes
         }
 
-        if compactedTokenTypes == nil {
-            let chunkSize = Swift.max(1, windowSize ?? 512)
-            if compactedEmbeddings.dim(1) > chunkSize {
-                var start = 0
-                while start < compactedEmbeddings.dim(1) {
-                    let end = Swift.min(start + chunkSize, compactedEmbeddings.dim(1))
-                    encodeEmbeddingsIntoCache(
-                        compactedEmbeddings[0..., start ..< end, 0...],
-                        multimodalTokenTypes: nil,
-                        cache: cache)
-                    start = end
-                }
-                return
-            }
+        // Chunk a prompt with media too: one pass over a long prompt selects attention
+        // kernels that a chunked prefill never reaches.
+        let tokenTypes: [Int32]? = compactedTokenTypes.map {
+            $0.ndim == 2 ? $0[0, 0...].asArray(Int32.self) : $0.asArray(Int32.self)
         }
-        encodeEmbeddingsIntoCache(
-            compactedEmbeddings,
-            multimodalTokenTypes: compactedTokenTypes,
-            cache: cache)
+        for chunk in Self.encoderChunks(
+            length: compactedEmbeddings.dim(1),
+            size: Swift.max(1, windowSize ?? 512),
+            tokenTypes: tokenTypes)
+        {
+            // A chunk without visual positions takes the causal mask, as a text prompt does.
+            let readsMedia = tokenTypes?[chunk].contains { $0 != 0 } == true
+            encodeEmbeddingsIntoCache(
+                compactedEmbeddings[0..., chunk, 0...],
+                multimodalTokenTypes: readsMedia ? compactedTokenTypes?[.ellipsis, chunk] : nil,
+                cache: cache)
+        }
+    }
+
+    /// The ranges of a prompt to encode in turn, each at most `size` positions long.
+    ///
+    /// A chunk never cuts a visual block, because its positions attend to each other in both
+    /// directions. A cut inside a block moves back to the start of the block, or past its end
+    /// when the block starts the chunk.
+    private static func encoderChunks(length: Int, size: Int, tokenTypes: [Int32]?)
+        -> [Range<Int>]
+    {
+        var chunks = [Range<Int>]()
+        var start = 0
+        while start < length {
+            var end = Swift.min(start + size, length)
+            if let tokenTypes, end < length, tokenTypes[end] != 0,
+                tokenTypes[end] == tokenTypes[end - 1]
+            {
+                var blockStart = end - 1
+                while blockStart > start, tokenTypes[blockStart - 1] == tokenTypes[end] {
+                    blockStart -= 1
+                }
+                if blockStart > start {
+                    end = blockStart
+                } else {
+                    while end < length, tokenTypes[end] == tokenTypes[end - 1] { end += 1 }
+                }
+            }
+            chunks.append(start ..< end)
+            start = end
+        }
+        return chunks
     }
 
     public func acceptDiffusionTokens(_ tokens: MLXArray, cache: [KVCache], windowSize: Int?) {

@@ -355,6 +355,9 @@ public final class DiffusionGemma: Module, VLMModel, BlockDiffusionLanguageModel
 
 extension DiffusionGemma {
     public var toolCallFormat: ToolCallFormat? { .gemma4 }
+
+    /// DiffusionGemma thinks in the labeled channels of Gemma 4 (see `ReasoningConfig.gemma4`).
+    public var reasoningConfig: ReasoningConfig? { .gemma4 }
 }
 
 public struct DiffusionGemma4Processor: UserInputProcessor {
@@ -473,6 +476,11 @@ public struct DiffusionGemma4Processor: UserInputProcessor {
         let promptTokens = try tokenizer.applyChatTemplate(
             messages: messages, tools: input.tools,
             additionalContext: input.additionalContext)
+
+        if input.images.isEmpty, input.videos.isEmpty {
+            // No mask: one unpadded sequence needs none, and a mask stops prompt-cache reuse.
+            return LMInput(tokens: MLXArray(promptTokens).expandedDimensions(axis: 0))
+        }
 
         let images = try input.images.map {
             MediaProcessing.asMLXArray(
