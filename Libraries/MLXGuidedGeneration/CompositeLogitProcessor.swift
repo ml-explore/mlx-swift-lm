@@ -42,4 +42,11 @@ public struct CompositeLogitProcessor: LogitProcessor {
             processors[i].didSample(token: token)
         }
     }
+
+    public func removingAll(
+        where shouldBeRemoved: (any LogitProcessor) -> Bool
+    ) -> (any LogitProcessor)? {
+        let processors = processors.compactMap { $0.removingAll(where: shouldBeRemoved) }
+        return processors.isEmpty ? nil : CompositeLogitProcessor(processors)
+    }
 }

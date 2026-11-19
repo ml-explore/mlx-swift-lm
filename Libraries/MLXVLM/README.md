@@ -94,9 +94,12 @@ block diffusion automatically. Audio and speculative decoding are unsupported.
 Set `GenerateParameters.diffusion` to control denoiser temperature, canvas size,
 and the entropy-bound or confidence-threshold sampler. `maxTokens` limits emitted
 tokens; `seed` also controls canvas initialization. Autoregressive sampling and
-penalty settings do not affect diffusion. Custom autoregressive logit processors
-are rejected because their state cannot be applied safely to provisional canvas
-tokens. Generation component validators still run before prefill.
+penalty settings do not affect diffusion. A custom logit processor applies to
+every canvas position at each denoising step, as in Transformers. Its history
+holds the prompt and the emitted tokens, never provisional canvas tokens. A
+processor that steers one token at a time, such as a thinking budget, conforms
+to `SequentialLogitProcessor` and is skipped with a warning. Generation
+component validators still run before prefill.
 
 Checkpoint preparation maps text and vision tensors together with their file
 metadata and per-layer quantization settings. Conflicting aliases fail loading,
