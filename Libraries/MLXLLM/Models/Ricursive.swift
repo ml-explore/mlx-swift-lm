@@ -82,9 +82,7 @@ public struct RicursiveConfiguration: Codable, Sendable {
 extension RicursiveConfiguration: ModelConfigurationValidating {
     public func validateModelConfiguration() throws {
         func fail(_ message: String) -> Error {
-            NSError(
-                domain: "RicursiveConfiguration", code: 1,
-                userInfo: [NSLocalizedDescriptionKey: message])
+            ModelFactoryError.invalidConfiguration(message)
         }
         guard layerTypes.count == hiddenLayers else {
             throw fail("layer_types needs one entry per layer")
@@ -112,30 +110,47 @@ func ricursiveInverseFrequencies(theta: Float, dimensions: Int) -> MLXArray {
 }
 
 /// `lerp(residual, x, sigmoid(lambda))`, using `torch.lerp`'s low-weight formula for every weight;
-/// near weight 1 it differs from `torch.lerp` on a few elements per million.
-func ricursiveValueInput(_ x: MLXArray, residual: MLXArray, lambda: MLXArray) -> MLXArray {
+/// near weight 1 it differs from `torch.lerp` on a few elements per million. `start` is the
+/// residual (already in the model precision) widened to float32 once per forward pass.
+func ricursiveValueInput(_ x: MLXArray, start: MLXArray, lambda: MLXArray) -> MLXArray {
     // Round the sigmoid to lambda's dtype, then blend in float32, as torch does.
     let blend = sigmoid(lambda[0].asType(.float32)).asType(lambda.dtype).asType(x.dtype)
         .asType(.float32)
-    let start = residual.asType(x.dtype).asType(.float32)
-    return (start + blend * (x.asType(.float32) - start)).asType(x.dtype)
+    return compiledValueBlend(x, start, blend)
 }
 
-/// RoPE in float32 on `[B, heads, T, headDim]`; bfloat16 positions are inexact past 256.
-/// cos and sin are rounded to the model precision and widened again, as in the reference.
-func ricursiveRoPE(_ x: MLXArray, offset: Int, inverseFrequencies: MLXArray) -> MLXArray {
-    let length = x.dim(2)
+private let compiledValueBlend: @Sendable (MLXArray, MLXArray, MLXArray) -> MLXArray = compile(
+    shapeless: true
+) { x, start, blend in
+    (start + blend * (x.asType(.float32) - start)).asType(x.dtype)
+}
+
+/// float32 cos and sin of the RoPE angles for `length` positions from `offset`, shared by every
+/// sliding layer of one forward pass; bfloat16 positions are inexact past 256.
+func ricursiveRoPETables(offset: Int, length: Int, inverseFrequencies: MLXArray) -> (
+    cosine: MLXArray, sine: MLXArray
+) {
     let positions = MLXArray(Int32(offset) ..< Int32(offset + length)).asType(.float32)
     let frequencies = positions[0..., .newAxis] * inverseFrequencies[.newAxis, 0...]
     let angles = concatenated([frequencies, frequencies], axis: -1)
-    let cosine = cos(angles).asType(x.dtype).asType(.float32)
-    let sine = sin(angles).asType(x.dtype).asType(.float32)
-    let source = x.asType(.float32)
-    let half = source.dim(-1) / 2
-    let rotated = concatenated(
-        [-source[.ellipsis, half...], source[.ellipsis, ..<half]], axis: -1)
-    return (source * cosine + rotated * sine).asType(x.dtype)
+    return (cos(angles), sin(angles))
 }
+
+/// RoPE in float32 on `[B, heads, T, headDim]`. cos and sin are rounded to the model precision
+/// and widened again, as in the reference.
+func ricursiveRoPE(_ x: MLXArray, cosine: MLXArray, sine: MLXArray) -> MLXArray {
+    let half = x.dim(-1) / 2
+    let rotated = concatenated([-x[.ellipsis, half...], x[.ellipsis, ..<half]], axis: -1)
+    return compiledRoPE(x, rotated, cosine, sine)
+}
+
+// Slices and concatenation depend on the shape, so they stay outside the shapeless compile.
+private let compiledRoPE: @Sendable (MLXArray, MLXArray, MLXArray, MLXArray) -> MLXArray =
+    compile(shapeless: true) { x, rotated, cosine, sine in
+        let c = cosine.asType(x.dtype).asType(.float32)
+        let s = sine.asType(x.dtype).asType(.float32)
+        return (x.asType(.float32) * c + rotated.asType(.float32) * s).asType(x.dtype)
+    }
 
 /// `output * sigmoid(gate)`, with the sigmoid taken in float32 when `fullPrecision` is set
 /// and rounded to the output's precision, as the reference does.
@@ -149,6 +164,12 @@ func ricursiveEmbedScale(_ h: MLXArray, scale: Float) -> MLXArray {
     (h.asType(.float32) * scale).asType(h.dtype)
 }
 
+/// Values every layer of one forward pass shares: the widened value residual and the RoPE tables.
+private struct RicursiveForwardState {
+    var valueResidualStart: MLXArray?
+    var rope: (cosine: MLXArray, sine: MLXArray)?
+}
+
 private final class RicursiveAttention: Module {
     let nHeads: Int
     let nKVHeads: Int
@@ -156,8 +177,6 @@ private final class RicursiveAttention: Module {
     let scale: Float
     let isSliding: Bool
     let gateFullPrecision: Bool
-    // Leading underscore keeps this out of the module's parameters.
-    private let _inverseFrequencies: MLXArray
 
     @ModuleInfo(key: "q_proj") var queryProj: Linear
     @ModuleInfo(key: "k_proj") var keyProj: Linear
@@ -176,9 +195,6 @@ private final class RicursiveAttention: Module {
         scale = pow(Float(config.headDim), -0.5)
         isSliding = config.isSliding(layer: layer)
         gateFullPrecision = config.gateFullPrecision
-        _inverseFrequencies = ricursiveInverseFrequencies(
-            theta: config.ropeTheta, dimensions: config.headDim)
-
         _queryProj.wrappedValue = Linear(dim, nHeads * headDim, bias: false)
         _keyProj.wrappedValue = Linear(dim, nKVHeads * headDim, bias: false)
         _valueProj.wrappedValue = Linear(dim, nKVHeads * headDim, bias: false)
@@ -195,13 +211,13 @@ private final class RicursiveAttention: Module {
         _ x: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: KVCache?,
-        valueResidual: MLXArray?
+        shared: RicursiveForwardState
     ) -> MLXArray {
         let (B, L) = (x.dim(0), x.dim(1))
 
         var valueInput = x
-        if let valueResidual, let lambda = valueResidualLambda {
-            valueInput = ricursiveValueInput(x, residual: valueResidual, lambda: lambda)
+        if let start = shared.valueResidualStart, let lambda = valueResidualLambda {
+            valueInput = ricursiveValueInput(x, start: start, lambda: lambda)
         }
 
         var queries = queryNorm(queryProj(x).reshaped(B, L, nHeads, headDim))
@@ -211,11 +227,9 @@ private final class RicursiveAttention: Module {
         queries = queries.transposed(0, 2, 1, 3)
         keys = keys.transposed(0, 2, 1, 3)
 
-        if isSliding {
-            let offset = cache?.offset ?? 0
-            queries = ricursiveRoPE(
-                queries, offset: offset, inverseFrequencies: _inverseFrequencies)
-            keys = ricursiveRoPE(keys, offset: offset, inverseFrequencies: _inverseFrequencies)
+        if isSliding, let rope = shared.rope {
+            queries = ricursiveRoPE(queries, cosine: rope.cosine, sine: rope.sine)
+            keys = ricursiveRoPE(keys, cosine: rope.cosine, sine: rope.sine)
         }
 
         var output = attentionWithCacheUpdate(
@@ -236,6 +250,17 @@ private final class RicursiveAttention: Module {
     }
 }
 
+private let compiledSwiglu: @Sendable (MLXArray, MLXArray) -> MLXArray = compile(
+    shapeless: true
+) { gate, up in
+    silu(gate) * up
+}
+
+private let compiledClampedSwiglu: @Sendable (MLXArray, MLXArray, MLXArray) -> MLXArray =
+    compile(shapeless: true) { gate, up, limit in
+        silu(minimum(gate, limit)) * clip(up, min: -limit, max: limit)
+    }
+
 private final class RicursiveMLP: Module, UnaryLayer {
     let clampThreshold: Float?
 
@@ -255,15 +280,12 @@ private final class RicursiveMLP: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        var gate = gateProj(x)
-        var up = upProj(x)
-        if let clampThreshold {
-            let limit = MLXArray(clampThreshold).asType(gate.dtype)
-            gate = minimum(gate, limit)
-            up = clip(up, min: -limit, max: limit)
-        }
+        let gate = gateProj(x)
+        let up = upProj(x)
         // Activation dtype; float32 matches PyTorch's rounding but costs ~2.5% decode.
-        return downProj(silu(gate) * up)
+        guard let clampThreshold else { return downProj(compiledSwiglu(gate, up)) }
+        return downProj(
+            compiledClampedSwiglu(gate, up, MLXArray(clampThreshold).asType(gate.dtype)))
     }
 }
 
@@ -293,10 +315,9 @@ private final class RicursiveBlock: Module {
         _ x: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         cache: KVCache?,
-        valueResidual: MLXArray?
+        shared: RicursiveForwardState
     ) -> MLXArray {
-        let attended = selfAttention(
-            inputNorm(x), mask: mask, cache: cache, valueResidual: valueResidual)
+        let attended = selfAttention(inputNorm(x), mask: mask, cache: cache, shared: shared)
         let h = x + postAttentionNorm(attended)
         return h + postFeedforwardNorm(mlp(preFeedforwardNorm(h)))
     }
@@ -306,6 +327,8 @@ private final class RicursiveBackbone: Module {
     let config: RicursiveConfiguration
     let firstSliding: Int?
     let firstFull: Int?
+    // Leading underscore keeps this out of the module's parameters.
+    private let _inverseFrequencies: MLXArray
 
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo var layers: [RicursiveBlock]
@@ -315,6 +338,8 @@ private final class RicursiveBackbone: Module {
         self.config = config
         firstSliding = config.layerTypes.firstIndex(of: "sliding_attention")
         firstFull = config.layerTypes.firstIndex(of: "full_attention")
+        _inverseFrequencies = ricursiveInverseFrequencies(
+            theta: config.ropeTheta, dimensions: config.headDim)
         _embedTokens.wrappedValue = Embedding(
             embeddingCount: config.vocabularySize, dimensions: config.hiddenSize)
         _layers.wrappedValue = (0 ..< config.hiddenLayers).map {
@@ -330,7 +355,16 @@ private final class RicursiveBackbone: Module {
         if let embedScale = config.embedScale {
             h = ricursiveEmbedScale(h, scale: embedScale)
         }
-        let valueResidual = config.useValueResidual ? h : nil
+        var shared = RicursiveForwardState()
+        if config.useValueResidual {
+            shared.valueResidualStart = h.asType(.float32)
+        }
+        // Every sliding cache holds the same positions, so the first one gives the offset.
+        if let firstSliding {
+            shared.rope = ricursiveRoPETables(
+                offset: cache?[firstSliding].offset ?? 0, length: h.dim(1),
+                inverseFrequencies: _inverseFrequencies)
+        }
 
         // Masks depend only on the attention kind, so build one per kind.
         let slidingMask = firstSliding.map {
@@ -340,7 +374,7 @@ private final class RicursiveBackbone: Module {
 
         for (i, layer) in layers.enumerated() {
             let mask = (layer.isSliding ? slidingMask : fullMask) ?? .none
-            h = layer(h, mask: mask, cache: cache?[i], valueResidual: valueResidual)
+            h = layer(h, mask: mask, cache: cache?[i], shared: shared)
         }
         return norm(h)
     }

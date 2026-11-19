@@ -271,7 +271,9 @@ final class RicursiveTests: XCTestCase {
             let rotated = concatenated(
                 [-source[.ellipsis, 8...], source[.ellipsis, ..<8]], axis: -1)
             let expected = (source * cosine + rotated * sine).asType(.bfloat16)
-            let actual = ricursiveRoPE(x, offset: 300, inverseFrequencies: inverseFrequencies)
+            let tables = ricursiveRoPETables(
+                offset: 300, length: 3, inverseFrequencies: inverseFrequencies)
+            let actual = ricursiveRoPE(x, cosine: tables.cosine, sine: tables.sine)
             XCTAssertEqual(actual.dtype, .bfloat16)
             XCTAssertTrue(arrayEqual(actual, expected).item(Bool.self))
         }
@@ -339,7 +341,8 @@ final class RicursiveTests: XCTestCase {
                 let expected = zip(values(residual), values(x)).map { start, end in
                     bfloat16(start + Double(weight) * (end - start))
                 }
-                let actual = ricursiveValueInput(x, residual: residual, lambda: lambda)
+                let actual = ricursiveValueInput(
+                    x, start: residual.asType(.float32), lambda: lambda)
                 XCTAssertEqual(actual.dtype, .bfloat16)
                 assertMatches(actual, expected, "lambda \(value)")
             }
