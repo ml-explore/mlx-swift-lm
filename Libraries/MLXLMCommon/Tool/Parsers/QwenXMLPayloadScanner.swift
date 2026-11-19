@@ -13,7 +13,8 @@ import Foundation
 ///
 /// - the function close is the structural close, not the first textual
 ///   `</function>` (a parameter value may contain that literal),
-/// - every opened `<parameter=` must close with `</parameter>`,
+/// - every opened `<parameter=` must close with `</parameter>`, or with the
+///   next `<parameter=` at the start of a line,
 /// - the payload must be consumed in full, apart from whitespace.
 enum QwenXMLPayloadScanner {
 
@@ -21,7 +22,7 @@ enum QwenXMLPayloadScanner {
     struct Payload {
         let name: String
         /// Parameters in source order. Each value is the verbatim text between
-        /// the parameter's `>` and its matching `</parameter>`.
+        /// the parameter's `>` and its close.
         let parameters: [(name: String, value: Substring)]
         /// Index just past the payload (after `</function>`, or after the last
         /// parameter when a missing close is explicitly allowed).
@@ -43,6 +44,8 @@ enum QwenXMLPayloadScanner {
     static let functionClose = "</function>"
     static let parameterOpen = "<parameter="
     static let parameterClose = "</parameter>"
+    /// A parameter that opens on a new line closes a value left open before it.
+    static let implicitParameterClose = "\n" + parameterOpen
 
     /// Scan a payload that must begin with `<function=`.
     ///
@@ -112,12 +115,27 @@ enum QwenXMLPayloadScanner {
             let valueStart = text.index(after: parameterNameEnd)
 
             // The parameter value is opaque text up to the first
-            // `</parameter>`. An unterminated value may simply need more input;
-            // the bounded buffer upstream decides when to give up.
-            guard
-                let valueEnd = text.range(
-                    of: parameterClose, range: valueStart ..< text.endIndex)
-            else { return .needMore }
+            // `</parameter>`. Qwen models can omit that close before the next
+            // parameter, which they always open on a new line; Qwen's reference
+            // parser (`qwen3coder_tool_parser.py`) then ends the value there.
+            // Ending it there too keeps every argument, instead of folding the
+            // remaining parameters into this value. An unterminated value may
+            // simply need more input; the bounded buffer upstream decides when
+            // to give up.
+            let explicitClose = text.range(
+                of: parameterClose, range: valueStart ..< text.endIndex)
+            if let implicitClose = text.range(
+                of: implicitParameterClose,
+                range: valueStart ..< (explicitClose?.lowerBound ?? text.endIndex))
+            {
+                // The newline stays with the value, as in the explicit form.
+                let nextParameter = text.index(after: implicitClose.lowerBound)
+                parameters.append(
+                    (name: String(parameterName), value: text[valueStart ..< nextParameter]))
+                index = nextParameter
+                continue
+            }
+            guard let valueEnd = explicitClose else { return .needMore }
             parameters.append(
                 (name: String(parameterName), value: text[valueStart ..< valueEnd.lowerBound]))
             index = valueEnd.upperBound
