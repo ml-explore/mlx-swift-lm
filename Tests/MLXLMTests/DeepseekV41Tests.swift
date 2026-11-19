@@ -9,8 +9,8 @@ import XCTest
 @testable import MLXLMCommon
 
 /// DeepSeek-V4.1 against mlx-lm's `deepseek_v41.py`. Reference values come from
-/// `tools/deepseek-v41-reference.py`, which builds the same tiny model with the same
-/// `deterministicWeight` weights.
+/// `tools/deepseek-v4-reference/deepseek-v41-reference.py`, which builds the same tiny
+/// model with the same `deterministicWeight` weights.
 final class DeepseekV41Tests: XCTestCase {
 
     static let configurationJSON = """
@@ -55,7 +55,7 @@ final class DeepseekV41Tests: XCTestCase {
         try JSONDecoder().decode(DeepseekV41Configuration.self, from: Data(json.utf8))
     }
 
-    // MARK: - Deterministic weights, as tools/deepseek-v41-reference.py
+    // MARK: - Deterministic weights, as tools/deepseek-v4-reference/deepseek-v41-reference.py
 
     private static func phase(_ name: String) -> Double {
         var h = 0
