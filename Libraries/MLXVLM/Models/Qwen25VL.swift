@@ -152,9 +152,9 @@ private enum Language {
                 keys = kEmbed
             } else {
                 // Simple sequential RoPE for autoregressive generation
-                let offset = cache?.offset ?? 0
-                queries = rotaryEmbedding(queries, offset: offset)
-                keys = rotaryEmbedding(keys, offset: offset)
+                let offset = cache?.ropeOffset
+                queries = applyRotaryPosition(rotaryEmbedding, to: queries, offset: offset)
+                keys = applyRotaryPosition(rotaryEmbedding, to: keys, offset: offset)
             }
 
             let output = attentionWithCacheUpdate(

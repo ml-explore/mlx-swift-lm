@@ -283,11 +283,28 @@ private enum Language {
     // MARK: Llama 4 Attention Scaling
 
     static func getLlama4AttentionScale(
-        start: Int, stop: Int, beta: Float, maxPositionEmbeddings: Int
+        offset: RoPEOffset?, length: Int, beta: Float, maxPositionEmbeddings: Int
     ) -> MLXArray {
-        let positions = MLXArray(start ..< stop).asType(.float32)
+        guard beta != 0 else { return MLXArray.ones([length, 1]) }
+        let positions: MLXArray
+        let batched: Bool
+        switch offset {
+        case .batch(let offsets):
+            positions = MLX.maximum(
+                (offsets[0..., .newAxis] + MLXArray(0 ..< length)[.newAxis]).asType(.float32), 0)
+            batched = true
+        case .scalar(let start):
+            let range = MLXArray(start ..< start + length).asType(.float32)
+            positions = start < 0 ? MLX.maximum(range, 0) : range
+            batched = false
+        case nil:
+            positions = MLXArray(0 ..< length).asType(.float32)
+            batched = false
+        }
         let scaling = 1 + beta * MLX.log(1 + MLX.floor(positions / Float(maxPositionEmbeddings)))
-        return expandedDimensions(scaling, axis: -1)
+        return batched
+            ? scaling[0..., .newAxis, 0..., .newAxis]
+            : expandedDimensions(scaling, axis: -1)
     }
 
     // MARK: Language Attention
@@ -352,9 +369,9 @@ private enum Language {
             keys = keys.reshaped(B, L, nKVHeads, -1).transposed(0, 2, 1, 3)
             values = values.reshaped(B, L, nKVHeads, -1).transposed(0, 2, 1, 3)
 
-            let offset = cache?.offset ?? 0
-            queries = rope(queries, offset: offset)
-            keys = rope(keys, offset: offset)
+            let offset = cache?.ropeOffset
+            queries = applyRotaryPosition(rope, to: queries, offset: offset)
+            keys = applyRotaryPosition(rope, to: keys, offset: offset)
 
             queries = queries * attentionScale
 
@@ -473,7 +490,6 @@ private enum Language {
             }
 
             let cache = cache ?? []
-            let offset = cache.first?.offset ?? 0
 
             let faMask = createAttentionMask(h: h, cache: cache[faIndex])
 
@@ -488,8 +504,8 @@ private enum Language {
                 config.ropeParameters?["original_max_position_embeddings"]?.asInt()
                 ?? config.maxPositionEmbeddings ?? 4096
             let attentionScale = getLlama4AttentionScale(
-                start: offset,
-                stop: offset + h.dim(1),  // Use h's length (embeddings), not inputs (token IDs)
+                offset: cache.first?.ropeOffset,
+                length: h.dim(1),
                 beta: beta,
                 maxPositionEmbeddings: originalMaxPos
             ).asType(h.dtype)

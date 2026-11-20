@@ -27,6 +27,64 @@ import Testing
 
 struct Gemma4KVSharedLoadTests {
 
+    @Test(
+        "Gemma4 VLM text rows preserve rotary positions through KV-owning and shared layers",
+        arguments: [0, 2], [2, 3])
+    func raggedTextPositions(numKVSharedLayers: Int, batchSize: Int) throws {
+        try Device.withDefaultDevice(.cpu) {
+            let model = tinyGemma4VLMTextForBatchPositions(numKVSharedLayers: numKVSharedLayers)
+            let prompts = Array(
+                [[1, 2, 3], Array(4 ..< 11), Array(11 ..< 20)].prefix(batchSize))
+            var singles = try prompts.map { prompt in
+                let cache = try model.newCache(parameters: nil)
+                let output = model(MLXArray(prompt.map { Int32($0) })[.newAxis], cache: cache)
+                eval(output.logits)
+                eval(cache)
+                #expect(output.state == nil)
+                return cache
+            }
+            #expect(singles[0].count == 4 - numKVSharedLayers)
+            let batch = try singles[0].indices.map { layer in
+                try mergeCaches(singles.map { $0[layer] })
+            }
+
+            var generated = 0
+            for length in [1, 2, 1] {
+                let tokens = MLXArray(
+                    singles.indices.flatMap { row in
+                        (0 ..< length).map { Int32(21 + row * 7 + generated + $0) }
+                    }
+                ).reshaped([singles.count, length])
+                try Self.expectTextChunk(model, tokens: tokens, batch: batch, singles: singles)
+                generated += length
+            }
+
+            let keep = batchSize == 2 ? [1] : [2, 0]
+            let indices = MLXArray(keep.map { Int32($0) })
+            for layer in batch { layer.filter(batchIndices: indices) }
+            singles = keep.map { singles[$0] }
+            let reorderedTokens = MLXArray(
+                singles.indices.flatMap { row in [Int32(41 + row), Int32(44 + row)] }
+            ).reshaped([singles.count, 2])
+            try Self.expectTextChunk(
+                model, tokens: reorderedTokens, batch: batch, singles: singles)
+
+            if singles.count > 1 {
+                for layer in batch { layer.filter(batchIndices: MLXArray([Int32(1)])) }
+                singles = [singles[1]]
+            }
+            let single = try #require(batch.first as? BatchKVCache)
+            guard case .scalar(let position) = single.ropeOffset else {
+                Issue.record("one remaining text row must keep the scalar rotary path")
+                return
+            }
+            #expect(position == singles[0][0].offset)
+            try Self.expectTextChunk(
+                model, tokens: MLXArray([Int32(51), 52])[.newAxis], batch: batch,
+                singles: singles)
+        }
+    }
+
     /// The module tree of a model with KV sharing must not contain
     /// `k_proj` / `v_proj` / `k_norm` for the shared tail layers, while the
     /// non-shared head layers must still own them.
@@ -90,22 +148,46 @@ struct Gemma4KVSharedLoadTests {
         return Int(key[range.upperBound...].prefix { $0.isNumber })
     }
 
+    private static func expectTextChunk(
+        _ model: Gemma4TextLanguageModel, tokens: MLXArray, batch: [KVCache],
+        singles: [[KVCache]], sourceLocation: SourceLocation = #_sourceLocation
+    ) throws {
+        let output = model(tokens, cache: batch)
+        eval(output.logits)
+        eval(batch)
+        #expect(output.state == nil, sourceLocation: sourceLocation)
+        try #require(
+            output.logits.shape == [singles.count, tokens.dim(1), 64],
+            sourceLocation: sourceLocation)
+        for row in singles.indices {
+            let expected = model(tokens[row ..< row + 1], cache: singles[row])
+            eval(expected.logits)
+            eval(singles[row])
+            #expect(
+                maxAbsDifference(output.logits[row ..< row + 1], expected.logits) < 1e-3,
+                "row \(row) must retain its owner's rotary positions through the KV-shared tail",
+                sourceLocation: sourceLocation)
+        }
+    }
+
     /// Tiny all-`full_attention` text config. `use_double_wide_mlp` is off so the
     /// dense and KV-sharing models differ *only* in the shared layers' K/V tensors,
     /// keeping every other weight shape-compatible across the two.
-    private static func textConfig(numKVSharedLayers: Int) -> Gemma4TextConfiguration {
+    static func textConfig(
+        numKVSharedLayers: Int, headDim: Int = 4, vocabularySize: Int = 12
+    ) -> Gemma4TextConfiguration {
         let json = """
             {
               "model_type": "gemma4_text",
-              "hidden_size": 8,
+              "hidden_size": \(headDim * 2),
               "num_hidden_layers": 4,
-              "intermediate_size": 16,
+              "intermediate_size": \(headDim * 4),
               "num_attention_heads": 2,
               "num_key_value_heads": 1,
-              "head_dim": 4,
-              "global_head_dim": 4,
-              "vocab_size": 12,
-              "vocab_size_per_layer_input": 12,
+              "head_dim": \(headDim),
+              "global_head_dim": \(headDim),
+              "vocab_size": \(vocabularySize),
+              "vocab_size_per_layer_input": \(vocabularySize),
               "num_kv_shared_layers": \(numKVSharedLayers),
               "hidden_size_per_layer_input": 0,
               "sliding_window": 8,
@@ -125,5 +207,17 @@ struct Gemma4KVSharedLoadTests {
             """
         return try! JSONDecoder().decode(
             Gemma4TextConfiguration.self, from: Data(json.utf8))
+    }
+}
+
+/// Text-only Gemma4 VLM backbone with 64-wide heads for float and packed-cache parity tests.
+func tinyGemma4VLMTextForBatchPositions(numKVSharedLayers: Int) -> Gemma4TextLanguageModel {
+    withRandomState(MLXRandom.RandomState(seed: UInt64(923 + numKVSharedLayers))) {
+        let model = Gemma4TextLanguageModel(
+            Gemma4KVSharedLoadTests.textConfig(
+                numKVSharedLayers: numKVSharedLayers, headDim: 64, vocabularySize: 64))
+        model.train(false)
+        eval(model)
+        return model
     }
 }
