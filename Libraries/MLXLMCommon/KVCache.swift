@@ -2814,7 +2814,8 @@ public func quantizedScaledDotProductAttention(
     mask: MLXFast.ScaledDotProductAttentionMaskMode = .none,
     groupSize: Int = 64,
     bits: Int = 8,
-    mode: QuantizationMode = .affine
+    mode: QuantizationMode = .affine,
+    sinks: MLXArray? = nil
 ) -> MLXArray {
 
     let (B, nQHeads, L, D) = (queries.dim(0), queries.dim(1), queries.dim(2), queries.dim(3))
@@ -2871,7 +2872,21 @@ public func quantizedScaledDotProductAttention(
         break
     }
 
-    let attentionWeights = softmax(scores, axis: -1)
+    var attentionWeights: MLXArray
+    if let sinks {
+        precondition(
+            sinks.ndim == 1 && sinks.dim(0) == nQHeads,
+            "sinks must have one value per query head")
+        // Each head's sink is an extra logit that takes softmax mass but has no
+        // value row, as in `MLXFast.scaledDotProductAttention(sinks:)`.
+        let headShape = nRepeats > 1 ? [1, nKVHeads, nRepeats, 1, 1] : [1, nQHeads, 1, 1]
+        var sinkScores = sinks.asType(scores.dtype).reshaped(headShape)
+        sinkScores = broadcast(sinkScores, to: Array(scores.shape.dropLast()) + [1])
+        attentionWeights = softmax(concatenated([sinkScores, scores], axis: -1), axis: -1)
+        attentionWeights = attentionWeights[.ellipsis, 1...]
+    } else {
+        attentionWeights = softmax(scores, axis: -1)
+    }
 
     // Compute output using quantized matmul
     var output = quantizedMM(
