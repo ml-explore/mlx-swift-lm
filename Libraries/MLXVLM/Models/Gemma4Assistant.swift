@@ -406,7 +406,7 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
                 : .array(slidingMask)
             let (out, _, _) = layer(
                 h, mask: layerMask, cache: nil, perLayerInput: nil,
-                sharedKV: kvState, offset: queryOffset)
+                sharedKV: kvState, offset: .scalar(queryOffset))
             h = out
         }
 
