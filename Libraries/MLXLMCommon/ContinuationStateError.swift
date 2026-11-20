@@ -9,7 +9,7 @@ import Foundation
 /// anchor positions new tokens as if the cached prefix contained no images, silently changing
 /// the output rather than failing.
 ///
-/// Save and restore the pair with `savePromptCache(url:cache:metadata:state:)` and
+/// Save and restore the pair with `savePromptCache(url:snapshot:)` and
 /// `loadPromptCacheSnapshot(url:)`.
 public enum ContinuationStateError: LocalizedError, Equatable {
     /// A cache warmed to a non-zero offset was supplied without the state key the model needs.

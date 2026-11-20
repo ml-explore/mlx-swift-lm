@@ -200,6 +200,16 @@ let (loadedCache, metadata) = try loadPromptCache(url: fileURL)
 
 Cache files are `.safetensors` format with metadata.
 
+A `PromptCacheSnapshot` keeps a cache with its model state and, optionally, the tokens
+it represents. `ChatSession.detachCache()` returns one with its tokens, and
+`ChatSession.attachCache(_:)` matches them to the session's transcript, so a saved
+conversation resumes where its cache ends:
+
+```swift
+try savePromptCache(url: fileURL, snapshot: snapshot)
+let restored = try loadPromptCacheSnapshot(url: fileURL)  // restored.tokens == snapshot.tokens
+```
+
 ## Attention Masks
 
 Caches create appropriate attention masks:
