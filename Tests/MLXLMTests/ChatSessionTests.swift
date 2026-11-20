@@ -787,6 +787,8 @@ public class ChatSessionTests: XCTestCase {
         let tokenizer: Tokenizer
         let configuration = ModelConfiguration(id: "test")
         let messageGenerator = DefaultMessageGenerator()
+        /// Hide the first position, as a left-padding mask would.
+        var padsFirstPosition = false
 
         func prepare(input: UserInput) throws -> LMInput {
             let messages = messageGenerator.generate(from: input)
@@ -794,8 +796,9 @@ public class ChatSessionTests: XCTestCase {
                 messages: messages,
                 tools: input.tools,
                 additionalContext: input.additionalContext)
-            let mask = MLXArray(Array(repeating: 1, count: tokens.count))
-                .reshaped(1, tokens.count)
+            var values = Array(repeating: 1, count: tokens.count)
+            if padsFirstPosition { values[0] = 0 }
+            let mask = MLXArray(values).reshaped(1, tokens.count)
             return LMInput(text: .init(tokens: MLXArray(tokens), mask: mask))
         }
     }
@@ -1963,11 +1966,34 @@ public class ChatSessionTests: XCTestCase {
         XCTAssertGreaterThan(second.info.cacheEfficiency, 0)
     }
 
-    func testExactPrefixReuseRebuildsWhenPreparedInputHasMask() async throws {
+    /// An all-ones mask hides nothing, so the cached prefix is reused.
+    func testExactPrefixReuseIgnoresAllOnesMask() async throws {
         let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
         var lengthIterator = renderedLengths.makeAsyncIterator()
         let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
         let processor = MaskedInputProcessor(tokenizer: tokenizer)
+        let session = ChatSession(
+            model(processor: processor),
+            generateParameters: GenerateParameters(maxTokens: 3))
+
+        _ = try await session.respond(to: "first")
+        let firstRenderedLengthValue = await lengthIterator.next()
+        let firstRenderedLength = try XCTUnwrap(firstRenderedLengthValue)
+
+        let second = try await collectGeneration(session.streamDetails(to: "second"))
+        let secondRenderedLengthValue = await lengthIterator.next()
+        let secondRenderedLength = try XCTUnwrap(secondRenderedLengthValue)
+
+        XCTAssertEqual(second.info.cachedPromptTokenCount, firstRenderedLength + 3)
+        XCTAssertEqual(
+            second.info.promptTokenCount, secondRenderedLength - firstRenderedLength - 3)
+    }
+
+    func testExactPrefixReuseRebuildsWhenPreparedInputHasPaddingMask() async throws {
+        let (renderedLengths, continuation) = AsyncStream<Int>.makeStream()
+        var lengthIterator = renderedLengths.makeAsyncIterator()
+        let tokenizer = PrefixPreservingTokenizer(renderedLengthContinuation: continuation)
+        let processor = MaskedInputProcessor(tokenizer: tokenizer, padsFirstPosition: true)
         let session = ChatSession(
             model(processor: processor),
             generateParameters: GenerateParameters(maxTokens: 3))
