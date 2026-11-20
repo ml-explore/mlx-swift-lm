@@ -166,19 +166,23 @@ struct ScriptedLogitsModelTests {
         let session = ChatSession(
             scenario.context, generateParameters: GenerateParameters(maxTokens: 64, temperature: 0))
 
-        let replies = [
-            try await session.respond(to: Self.transcript.userMessages[0]),
-            try await session.respond(to: Self.transcript.userMessages[1]),
-        ]
-        #expect(replies == Self.transcript.assistantTurns.map(\.text))
-
         let log = scenario.model.callLog
+        var replies: [String] = []
+        var offsets: [Int] = []
+        for (turn, message) in Self.transcript.userMessages.enumerated() {
+            let start = log.calls.count
+            replies.append(try await session.respond(to: message))
+            let prepares = log.calls.dropFirst(start).filter { $0.kind == .prepare }
+            let prepare = try #require(prepares.first)
+            offsets.append(prepare.cacheOffsetBefore)
+            if turn > 0 {
+                #expect(prepares.count == 1, "append-only turns should not split prefill")
+            }
+        }
+        #expect(replies == Self.transcript.assistantTurns.map(\.text))
         #expect(log.inputMismatches.isEmpty)
-
-        let prepares = log.calls.filter { $0.kind == .prepare }
-        #expect(prepares.count == 2)
-        #expect(prepares[0].cacheOffsetBefore == 0)
-        #expect(prepares[1].cacheOffsetBefore > 0, "turn 2 should reuse turn 1's cache")
+        #expect(offsets[0] == 0)
+        #expect(offsets[1] > 0, "turn 2 should reuse turn 1's cache")
         #expect(log.calls.last?.cursor?.turn == 1)
     }
 

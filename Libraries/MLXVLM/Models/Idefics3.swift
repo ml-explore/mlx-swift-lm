@@ -729,6 +729,55 @@ public class Idefics3: Module, VLMModel, KVCacheDimensionProvider {
         return finalEmbeds.expandedDimensions(axis: 0)
     }
 
+    /// Checks the image shape and the image-token count against what the vision
+    /// tower and `prepareInputsForMultimodal` assume, so a mismatch throws here
+    /// instead of failing inside MLX or dividing by zero.
+    private func validateImageInputs(inputIds: MLXArray, pixelValues: MLXArray) throws {
+        let vision = config.visionConfig
+        let patchSize = vision.patchSize
+        let side = vision.imageSize / patchSize
+        // pixelValues is (images, height, width, channels)
+        guard pixelValues.ndim == 4 else {
+            throw VLMError.processing(
+                "Idefics3 expects pixel values of shape (images, height, width, channels), got \(pixelValues.shape)."
+            )
+        }
+        guard pixelValues.dim(3) == vision.numChannels else {
+            throw VLMError.processing(
+                "Idefics3 expects \(vision.numChannels) image channels, got \(pixelValues.dim(3))."
+            )
+        }
+        let height = pixelValues.dim(1)
+        let width = pixelValues.dim(2)
+        // The patch convolution has stride patch_size and no padding, so it keeps
+        // floor(side / patch_size) patches per side (SmolVLM's 384 with patch 14).
+        // Any other grid, even one with the right patch count, would give patches
+        // the wrong positions and pixel-shuffle neighbours and silently wrong output.
+        guard height / patchSize == side, width / patchSize == side else {
+            throw VLMError.processing(
+                "Idefics3 image of \(height)x\(width) does not give the \(side)x\(side) grid of \(patchSize)-pixel patches the vision model expects (image_size \(vision.imageSize))."
+            )
+        }
+
+        let scale = config.scaleFactor
+        guard scale > 0, side % scale == 0 else {
+            throw VLMError.processing(
+                "Idefics3 scale_factor \(scale) does not divide the \(side)x\(side) patch grid."
+            )
+        }
+        let featuresPerImage = side * side / (scale * scale)
+        let expectedTokens = pixelValues.dim(0) * featuresPerImage
+        let imageTokens = inputIds.asArray(Int.self).filter { $0 == config.imageTokenIndex }.count
+        guard featuresPerImage > 0, imageTokens == expectedTokens else {
+            let tokens = imageTokens == 1 ? "1 image token" : "\(imageTokens) image tokens"
+            let images =
+                pixelValues.dim(0) == 1 ? "1 image needs" : "\(pixelValues.dim(0)) images need"
+            throw VLMError.processing(
+                "Idefics3 prompt has \(tokens), but \(images) \(expectedTokens)."
+            )
+        }
+    }
+
     public func prepare(
         _ input: LMInput, cache: [any KVCache], state _: LMOutput.State?, prefill: PrefillParameters
     ) throws
@@ -737,6 +786,9 @@ public class Idefics3: Module, VLMModel, KVCacheDimensionProvider {
         var inputIds = input.text.tokens
         if inputIds.ndim == 1 { inputIds = inputIds.expandedDimensions(axis: 0) }
         let pixelValues = input.image?.pixels
+        if let pixelValues {
+            try validateImageInputs(inputIds: inputIds, pixelValues: pixelValues)
+        }
         let embeddings = getInputEmbeddings(
             inputIds: inputIds,
             pixelValues: pixelValues
