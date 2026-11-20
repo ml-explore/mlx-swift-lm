@@ -393,6 +393,18 @@ struct KVCacheConfigurationTests {
         #expect(storage.nativeAttentionOffsetsAreAligned)
     }
 
+    #if !DEBUG
+    @Test func modelCacheAdoptsMinimumOfDivergentAttentionOffsets() {
+        let ahead = KVCacheSimple()
+        ahead.offset = 8
+        let behind = KVCacheSimple()
+        behind.offset = 6
+
+        #expect(KVCacheStorage([ahead, behind], plan: .disabled).processedTokenCount == 6)
+        #expect(KVCacheStorage([behind, ahead], plan: .disabled).processedTokenCount == 6)
+    }
+    #endif
+
     @Test func modelCacheCopyAndTrimPreserveOneTimeline() throws {
         let attention = KVCacheSimple()
         _ = attention.update(
@@ -411,6 +423,102 @@ struct KVCacheConfigurationTests {
         #expect(storage.cache[0].offset == 8)
         let snapshotAttention = try #require(snapshot.cache[0] as? KVCacheSimple)
         #expect(snapshotAttention !== attention)
+    }
+
+    @Test func modelCacheAdoptsRepeatedRaggedAttentionPositions() throws {
+        Device.withDefaultDevice(.cpu) {
+            let global = BatchKVCache(leftPadding: [0, 0])
+            let sliding = BatchRotatingKVCache(maxSize: 16, leftPadding: [0, 0])
+            for lengths in [[5, 3], [1, 3]] {
+                global.prepare(lengths: lengths)
+                sliding.prepare(lengths: lengths)
+                let kv = makePositionKV(
+                    positions: 0 ..< lengths.max()!, heads: 1, headDim: 4,
+                    batchSize: 2, rowStride: 10)
+                _ = global.update(keys: kv.0, values: kv.1)
+                _ = sliding.update(keys: kv.0, values: kv.1)
+                global.finalize()
+                sliding.finalize()
+            }
+
+            // Both rows sit behind two columns of padding: six tokens in a buffer of eight.
+            #expect(global.offset == 6)
+            #expect(sliding.offset == 6)
+            #expect(global.leftPadding.asArray(Int.self) == [2, 2])
+            #expect(global.batchOffset.asArray(Int.self) == [6, 6])
+            #expect(sliding.batchOffset.asArray(Int.self) == [6, 6])
+            let storage = KVCacheStorage([global, CacheList(sliding)], plan: .disabled)
+            #expect(storage.processedTokenCount == 6)
+            #expect(storage.nativeAttentionOffsetsAreAligned)
+
+            let next = makePositionKV(
+                positions: 6 ..< 7, heads: 1, headDim: 4, batchSize: 2, rowStride: 10)
+            _ = global.update(keys: next.0, values: next.1)
+            _ = sliding.update(keys: next.0, values: next.1)
+            storage.commitProcessedTokens(1)
+
+            #expect(storage.processedTokenCount == 7)
+            #expect(global.offset == 7)
+            #expect(sliding.offset == 7)
+            #expect(storage.nativeAttentionOffsetsAreAligned)
+        }
+    }
+
+    @Test func modelCacheAdoptsRaggedBatchAtLongestRow() {
+        Device.withDefaultDevice(.cpu) {
+            let global = BatchKVCache(leftPadding: [1, 0])
+            let sliding = BatchRotatingKVCache(maxSize: 16, leftPadding: [1, 0])
+            let kv = makePositionKV(
+                positions: 0 ..< 3, heads: 1, headDim: 4, batchSize: 2)
+            _ = global.update(keys: kv.0, values: kv.1)
+            _ = sliding.update(keys: kv.0, values: kv.1)
+            #expect(global.batchOffset.asArray(Int.self) == [2, 3])
+            #expect(sliding.batchOffset.asArray(Int.self) == [2, 3])
+            let storage = KVCacheStorage([global, sliding], plan: .disabled)
+            #expect(storage.processedTokenCount == 3)
+            #expect(storage.nativeAttentionOffsetsAreAligned)
+        }
+    }
+
+    @Test func modelCacheAdoptsSingleAndBatchedRowsAtOnePosition() {
+        Device.withDefaultDevice(.cpu) {
+            let single = KVCacheSimple()
+            let kv = makePositionKV(positions: 0 ..< 3, heads: 1, headDim: 4)
+            _ = single.update(keys: kv.0, values: kv.1)
+            let batch = KVCacheSimple.merge([single])
+            let storage = KVCacheStorage([single, batch], plan: .disabled)
+            #expect(storage.processedTokenCount == 3)
+            #expect(storage.nativeAttentionOffsetsAreAligned)
+        }
+    }
+
+    @Test func modelCacheAdoptsEmptyBatchedAttention() {
+        Device.withDefaultDevice(.cpu) {
+            let global = BatchKVCache(leftPadding: [])
+            let sliding = BatchRotatingKVCache(maxSize: 16, leftPadding: [])
+            let storage = KVCacheStorage([global, sliding], plan: .disabled)
+            #expect(storage.processedTokenCount == 0)
+            #expect(storage.nativeAttentionOffsetsAreAligned)
+        }
+    }
+
+    @Test func batchedRotatingRejectsRequestedRewindReserve() throws {
+        let configuration = KVCacheConfiguration(rewind: try .init(maxTokens: 4))
+        let batch = BatchRotatingKVCache(maxSize: 8, leftPadding: [0])
+        let expected = KVCacheConfigurationError.incompatibleRewindCapacity(expected: 4, count: 1)
+        #expect(throws: expected) {
+            try validateKVCacheCompatibility([batch], configuration: configuration)
+        }
+        var caches: [KVCache] = [CacheList(batch)]
+        #expect(throws: expected) {
+            try applyKVCacheConfiguration(cache: &caches, configuration: configuration)
+        }
+        #expect(throws: expected) {
+            try validateKVCacheCompatibility(
+                [RotatingKVCache(maxSize: 8)], configuration: configuration)
+        }
+        try validateKVCacheCompatibility(
+            [RotatingKVCache(maxSize: 8, rewindCapacity: 4)], configuration: configuration)
     }
 
     @Test func turboRuntimeReportMarksDifferentRequestedStrategy() {

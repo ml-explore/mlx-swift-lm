@@ -44,10 +44,24 @@ class Internlm2DynamicNTKScalingRoPE: Module, OffsetLayer, ArrayOffsetLayer {
     }
 
     public func callAsFunction(_ x: MLXArray, offset: MLXArray) -> MLXArray {
-        let maxOffset = offset.max().item(Int.self)
-        let base = computeBase(seqLen: x.dim(1) + maxOffset)
-        return MLXFast.RoPE(
-            x, dimensions: dims, traditional: traditional, base: base, scale: scale, offset: offset)
+        let rowOffsets = offset.asArray(Int32.self)
+        let length = x.dim(1)
+        let base = computeBase(seqLen: length + Int(rowOffsets.first ?? 0))
+        if rowOffsets.dropFirst().allSatisfy({ computeBase(seqLen: length + Int($0)) == base }) {
+            return MLXFast.RoPE(
+                x, dimensions: dims, traditional: traditional, base: base, scale: scale,
+                offset: offset)
+        }
+
+        // Fast RoPE accepts one base for the entire input. Apply the scalar path
+        // to each row when dynamic scaling gives them different bases.
+        precondition(
+            offset.ndim == 1 && offset.dtype.isInteger && rowOffsets.count == x.dim(0),
+            "InternLM2 RoPE requires one integer offset per batch row")
+        let rows = rowOffsets.enumerated().map { row, offset in
+            self(x[row ..< row + 1], offset: Int(offset))
+        }
+        return concatenated(rows, axis: 0)
     }
 }
 
