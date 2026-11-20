@@ -6,6 +6,7 @@ private let messageContentLogger = MLXLogger(label: "MessageContent")
 
 package enum MessageContentLayout: Sendable {
     case imagesThenVideosThenText
+    case imagesThenVideosThenAudioThenText
     case imagesThenText
     case textThenImages
 }
@@ -230,9 +231,12 @@ extension MessageGenerator {
         }
 
         switch layout {
-        case .imagesThenVideosThenText:
+        case .imagesThenVideosThenText, .imagesThenVideosThenAudioThenText:
             appendImages()
             parts.append(contentsOf: message.videos.map { _ in ["type": "video"] })
+            if case .imagesThenVideosThenAudioThenText = layout {
+                parts.append(contentsOf: message.audios.map { _ in ["type": "audio"] })
+            }
             appendText(message.content)
         case .imagesThenText:
             appendImages()
