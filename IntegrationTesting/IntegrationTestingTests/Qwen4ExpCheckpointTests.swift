@@ -125,4 +125,63 @@ final class Qwen4ExpCheckpointTests: XCTestCase {
         print("Qwen4Exp answer: \(context.tokenizer.decode(tokenIds: generated).debugDescription)")
         XCTAssertEqual(generated, answer)
     }
+
+    /// The MTP head of mlx-community/Qwen3.8-Flash-Next-4bit-mtp drafting for the OptiQ
+    /// target. Set MLX_QWEN4_EXP_MTP_CHECKPOINT to a directory with that repo's config.json
+    /// and model-mtp-00001-of-00001.safetensors.
+    ///
+    /// A verify pass reads two tokens at once, so its bf16 logits round apart from a
+    /// one-token step, and a near tie can go either way. So every speculative token must be
+    /// greedy's choice after the same tokens, or within `|top| / 64` (a few bf16 steps) of
+    /// it. The acceptance rate shows the head's forward is right: a wrong one accepts almost
+    /// no drafts.
+    func testPublishedMTPHeadKeepsGreedyTokens() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let checkpoint = environment["MLX_QWEN4_EXP_CHECKPOINT"],
+            let head = environment["MLX_QWEN4_EXP_MTP_CHECKPOINT"]
+        else {
+            throw XCTSkip("Set MLX_QWEN4_EXP_CHECKPOINT and MLX_QWEN4_EXP_MTP_CHECKPOINT")
+        }
+        let (context, model) = try await load(URL(filePath: checkpoint))
+        await Qwen4ExpMTPRegistration.register()
+        let drafter = try await MTPDrafterModelFactory.shared.load(
+            from: URL(filePath: head), using: tokenizerLoader)
+        XCTAssertTrue(drafter.model is Qwen4ExpMTPDraftModel)
+
+        let input = try await context.processor.prepare(
+            input: UserInput(
+                chat: [.user("Explain why the sky is blue, then give a simple analogy.")],
+                additionalContext: ["enable_thinking": false]))
+
+        var iterator = try MTPSpeculativeTokenIterator(
+            input: input, mainModel: model, drafter: drafter.model,
+            parameters: GenerateParameters(maxTokens: 96, temperature: 0), blockSize: 2)
+        var tokens: [Int] = []
+        while let token = iterator.next() { tokens.append(token) }
+        XCTAssertNil(iterator.passthroughReason)
+        let accepted = iterator.acceptedDraftTokens
+        let proposed = iterator.proposedDraftTokens
+        let rate = Double(accepted) / Double(max(proposed, 1))
+        print("Qwen4Exp MTP: accepted \(accepted)/\(proposed)")
+        print("Qwen4Exp MTP text: \(context.tokenizer.decode(tokenIds: tokens).debugDescription)")
+
+        // One-token greedy decode over the speculative tokens, as TokenIterator runs.
+        let cache = try model.newCache(parameters: nil)
+        var logits = model(input.text.tokens.reshaped(1, -1), cache: cache)[0, -1]
+        var ties: [String] = []
+        for (i, token) in tokens.enumerated() {
+            let row = logits.asType(.float32)
+            let best = argMax(row).item(Int.self)
+            if best != token {
+                let top = row[best].item(Float.self)
+                let gap = top - row[token].item(Float.self)
+                ties.append("\(i): \(gap)")
+                XCTAssertLessThanOrEqual(gap, abs(top) / 64, "token \(i) is not a bf16 tie")
+            }
+            logits = model(MLXArray([Int32(token)]).reshaped(1, 1), cache: cache)[0, -1]
+            eval(logits)
+        }
+        print("Qwen4Exp MTP ties with greedy: \(ties)")
+        XCTAssertGreaterThan(rate, 0.3)
+    }
 }

@@ -68,6 +68,7 @@ struct Qwen4ExpTextConfiguration: Codable, Sendable {
     var outputGateType: String
     var hiddenAct: String
     var tieWordEmbeddings: Bool
+    var mtpNumHiddenLayers: Int
 
     // Derived from `rope_parameters` and `eos_token_id`.
     var ropeTheta: Float = 0
@@ -112,6 +113,7 @@ struct Qwen4ExpTextConfiguration: Codable, Sendable {
         case outputGateType = "output_gate_type"
         case hiddenAct = "hidden_act"
         case tieWordEmbeddings = "tie_word_embeddings"
+        case mtpNumHiddenLayers = "mtp_num_hidden_layers"
     }
 
     init(from decoder: Decoder) throws {
@@ -154,6 +156,7 @@ struct Qwen4ExpTextConfiguration: Codable, Sendable {
         hiddenAct = try c.decodeIfPresent(String.self, forKey: .hiddenAct) ?? "silu"
         outputGateType = try c.decodeIfPresent(String.self, forKey: .outputGateType) ?? hiddenAct
         tieWordEmbeddings = try c.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? false
+        mtpNumHiddenLayers = try c.decodeIfPresent(Int.self, forKey: .mtpNumHiddenLayers) ?? 0
 
         layerTypes = try c.decodeIfPresent([String].self, forKey: .layerTypes) ?? []
         if layerTypes.isEmpty {
@@ -646,7 +649,11 @@ private final class Qwen4ExpGatedDeltaNet: Module {
         super.init()
     }
 
-    func callAsFunction(_ x: MLXArray, mask: MLXArray?, cache: ArraysCache?) -> MLXArray {
+    /// The output and, with `checkpointAfter`, cache slots 0 and 1 after that many tokens.
+    /// The caller advances the cache.
+    func callAsFunction(
+        _ x: MLXArray, mask: MLXArray?, cache: ArraysCache?, checkpointAfter: Int? = nil
+    ) -> (MLXArray, checkpoint: [MLXArray]?) {
         let B = x.dim(0)
         let S = x.dim(1)
         var mixedQKV = inProjQKV(x)
@@ -679,15 +686,33 @@ private final class Qwen4ExpGatedDeltaNet: Module {
             * MLXFast.rmsNorm(q, weight: .mlxNone, eps: qkEps)
         k = MLXArray(invScale).asType(k.dtype) * MLXFast.rmsNorm(k, weight: .mlxNone, eps: qkEps)
 
-        let (out, state) = gatedDeltaUpdate(
-            q: q, k: k, v: v, a: a, b: b, aLog: aLog, dtBias: dtBias,
-            state: cache?[1], mask: mask, useKernel: !training)
-        if let cache {
-            cache[1] = state
-            cache.advance(S)
+        func update(_ range: Range<Int>, state: MLXArray?) -> (MLXArray, MLXArray) {
+            gatedDeltaUpdate(
+                q: q[0..., range], k: k[0..., range], v: v[0..., range],
+                a: a[0..., range], b: b[0..., range], aLog: aLog, dtBias: dtBias,
+                state: state, mask: mask?[0..., range], useKernel: !training)
         }
 
-        return outProj(norm(out, gate: z).reshaped(B, S, -1))
+        let out: MLXArray
+        let state: MLXArray
+        var checkpoint: [MLXArray]?
+        if let split = checkpointAfter, split > 0, split < S {
+            // Two updates: the state after `split` tokens is the checkpoint.
+            let (prefixOut, prefixState) = update(0 ..< split, state: cache?[1])
+            let (suffixOut, suffixState) = update(split ..< S, state: prefixState)
+            out = concatenated([prefixOut, suffixOut], axis: 1)
+            state = suffixState
+            checkpoint = [
+                contiguous(convInput[0..., split ..< (split + convKernelSize - 1)]), prefixState,
+            ]
+        } else {
+            (out, state) = gatedDeltaUpdate(
+                q: q, k: k, v: v, a: a, b: b, aLog: aLog, dtBias: dtBias,
+                state: cache?[1], mask: mask, useKernel: !training)
+        }
+        cache?[1] = state
+
+        return (outProj(norm(out, gate: z).reshaped(B, S, -1)), checkpoint)
     }
 }
 
@@ -899,7 +924,10 @@ private final class Qwen4ExpNGramEmbedding: Module {
         return tokens
     }
 
-    func callAsFunction(_ ids: MLXArray, cache: ArraysCache?) -> MLXArray {
+    /// The embeddings and, with `checkpointAfter`, cache slot 3 after that many tokens.
+    func callAsFunction(
+        _ ids: MLXArray, cache: ArraysCache?, checkpointAfter: Int? = nil
+    ) -> (MLXArray, checkpoint: MLXArray?) {
         let n = ngramSize
         // Slot 3 holds `token ^ eos`: XOR with eos again gives the token, and the
         // zeros that batching puts in a new row read as EOS (no tokens yet).
@@ -910,6 +938,9 @@ private final class Qwen4ExpNGramEmbedding: Module {
         let history = concatenated([previous, ids], axis: 1)
         if let cache {
             cache[3] = keepLast(history, n: n - 1, lengths: cache.currentLengths) ^ eosTokenId
+        }
+        let checkpoint = checkpointAfter.map {
+            history[0..., $0 ..< ($0 + n - 1)] ^ eosTokenId
         }
 
         let tokens = ngramTokens(history.asType(.int64))
@@ -924,9 +955,10 @@ private final class Qwen4ExpNGramEmbedding: Module {
         }
         let hashed = concatenated(rows, axis: -1)
 
-        return concatenated(
+        let embedding = concatenated(
             ngramEmbedding.enumerated().map { h, table in table(hashed[.ellipsis, h]) },
             axis: -1)
+        return (embedding, checkpoint)
     }
 
     /// The constant a checkpoint stores under `name`, rebuilt from the config.
@@ -975,25 +1007,32 @@ private final class Qwen4ExpPLELayer: Module {
         super.init()
     }
 
-    private func shortConv(_ x: MLXArray, cache: ArraysCache?) -> MLXArray {
+    /// The short conv output and, with `checkpointAfter`, cache slot 2 after that many tokens.
+    private func shortConv(
+        _ x: MLXArray, cache: ArraysCache?, checkpointAfter: Int?
+    ) -> (MLXArray, checkpoint: MLXArray?) {
         let n = shortConvStateLength
         let state = cache?[2] ?? MLXArray.zeros([x.dim(0), n, x.dim(-1)], dtype: x.dtype)
         let full = concatenated([state, x], axis: 1)
         if let cache {
             cache[2] = keepLast(full, n: n, lengths: cache.currentLengths)
         }
-        return silu(conv1d(full))
+        let checkpoint = checkpointAfter.map { contiguous(full[0..., $0 ..< ($0 + n)]) }
+        return (silu(conv1d(full)), checkpoint)
     }
 
+    /// The PLE output and, with `checkpointAfter`, cache slots 2 and 3 after that many tokens.
     func callAsFunction(
-        _ hidden: MLXArray, ids: MLXArray, cache: ArraysCache?, mask: MLXArray?
-    ) -> MLXArray {
+        _ hidden: MLXArray, ids: MLXArray, cache: ArraysCache?, mask: MLXArray?,
+        checkpointAfter: Int? = nil
+    ) -> (MLXArray, checkpoint: [MLXArray]?) {
         var ids = ids
         if let mask {
             // Padding reads as EOS, like the start of a prompt.
             ids = MLX.where(mask, ids, MLXArray(pleEmbedding.eosTokenId, dtype: ids.dtype))
         }
-        let embedding = pleEmbedding(ids, cache: cache)
+        let (embedding, ngramCheckpoint) = pleEmbedding(
+            ids, cache: cache, checkpointAfter: checkpointAfter)
 
         let prefix = Array(hidden.shape.dropLast())
         let key = normKey(keyProj(embedding)).reshaped(prefix + [hc, d])
@@ -1007,7 +1046,10 @@ private final class Qwen4ExpPLELayer: Module {
             gated = MLX.where(mask[.ellipsis, .newAxis], gated, MLXArray(0, dtype: gated.dtype))
         }
 
-        return gated + shortConv(normConv(gated), cache: cache)
+        let (conv, convCheckpoint) = shortConv(
+            normConv(gated), cache: cache, checkpointAfter: checkpointAfter)
+        let checkpoint = convCheckpoint.flatMap { c in ngramCheckpoint.map { [c, $0] } }
+        return (gated + conv, checkpoint)
     }
 }
 
@@ -1040,12 +1082,15 @@ private final class Qwen4ExpDecoderLayer: Module {
         super.init()
     }
 
+    /// With `checkpointAfter`, a linear layer saves its state after that many tokens
+    /// as the cache's speculative checkpoint.
     func callAsFunction(
         _ h: MLXArray,
         mask: MLXFast.ScaledDotProductAttentionMaskMode,
         convMask: MLXArray?,
         cache: KVCache?,
-        ids: MLXArray
+        ids: MLXArray,
+        checkpointAfter: Int? = nil
     ) -> MLXArray {
         var h = h
         if isLinear {
@@ -1056,11 +1101,24 @@ private final class Qwen4ExpDecoderLayer: Module {
                 }
                 return arrays
             }
+            var pleCheckpoint: [MLXArray] = []
             if let ple {
-                h = h + ple(h, ids: ids, cache: cache, mask: convMask)
+                let (out, checkpoint) = ple(
+                    h, ids: ids, cache: cache, mask: convMask, checkpointAfter: checkpointAfter)
+                h = h + out
+                pleCheckpoint = checkpoint ?? []
             }
             let (x, inject) = attnHyperConnection(h)
-            h = injectResidual(h, linearAttn!(x, mask: convMask, cache: cache), inject!)
+            let (out, checkpoint) = linearAttn!(
+                x, mask: convMask, cache: cache, checkpointAfter: checkpointAfter)
+            h = injectResidual(h, out, inject!)
+            if let cache {
+                if let checkpoint, let checkpointAfter, let recurrent = cache as? MambaCache {
+                    recurrent.saveSpeculativeCheckpoint(
+                        state: checkpoint + pleCheckpoint, advancedBy: checkpointAfter)
+                }
+                cache.advance(h.dim(1))
+            }
         } else {
             let cache = cache.map { cache -> CacheList in
                 guard let list = cache as? CacheList else {
@@ -1100,6 +1158,11 @@ private final class Qwen4ExpModelInner: Module {
     }
 
     func callAsFunction(_ ids: MLXArray, cache: [KVCache]?) -> MLXArray {
+        hyperConnectionMixer(hyperStates(ids, cache: cache)).mixed
+    }
+
+    /// The hyper-connection streams `[B, S, hc * d]` before the final mixer.
+    func hyperStates(_ ids: MLXArray, cache: [KVCache]?, checkpointAfter: Int? = nil) -> MLXArray {
         var h = embedTokens(ids)
 
         // Each kind of layer shares the mask of its first layer.
@@ -1110,9 +1173,11 @@ private final class Qwen4ExpModelInner: Module {
 
         h = tiled(h, repetitions: [1, 1, hc])
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, convMask: convMask, cache: cache?[i], ids: ids)
+            h = layer(
+                h, mask: mask, convMask: convMask, cache: cache?[i], ids: ids,
+                checkpointAfter: checkpointAfter)
         }
-        return hyperConnectionMixer(h).mixed
+        return h
     }
 }
 
@@ -1139,11 +1204,35 @@ public final class Qwen4ExpModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        let out = model(inputs, cache: cache)
-        if let lmHead {
-            return lmHead(out)
+        project(model(inputs, cache: cache))
+    }
+
+    /// With the MTP emit flag, also returns the hyper-connection streams before the final
+    /// mixer: the paired MTP head reads them.
+    public func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        guard state?[mtpEmitFlagKey] ?? false else {
+            return LMOutput(logits: callAsFunction(input.tokens, cache: cache))
         }
-        return model.embedTokens.asLinear(out)
+        let hyper = model.hyperStates(
+            input.tokens, cache: cache, checkpointAfter: state?[mtpCacheCheckpointIndexKey])
+        var outState = state ?? LMOutput.State()
+        outState[mtpLastHiddenStatesKey] = hyper
+        // The head keeps its own cache: no target K/V is shared.
+        outState[mtpSharedKVSourceIndicesKey] = [:]
+        return LMOutput(logits: project(model.hyperConnectionMixer(hyper).mixed), state: outState)
+    }
+
+    /// The token embedding the MTP head shares.
+    var embedTokens: Embedding { model.embedTokens }
+
+    /// The vocabulary logits of mixed hidden states.
+    func project(_ hidden: MLXArray) -> MLXArray {
+        if let lmHead {
+            return lmHead(hidden)
+        }
+        return model.embedTokens.asLinear(hidden)
     }
 
     /// Attention layers keep a `CacheList` of their keys and values, then the indexer keys.
@@ -1159,13 +1248,14 @@ public final class Qwen4ExpModel: Module, LLMModel, KVCacheDimensionProvider {
         }
         return model.layers.map { layer in
             if layer.isLinear {
-                return ArraysCache(size: layer.ple == nil ? 2 : 4)
+                // A MambaCache holds the speculative checkpoint MTP decoding rewinds to.
+                return MambaCache(size: layer.ple == nil ? 2 : 4)
             }
             return CacheList(KVCacheSimple(), Qwen4ExpIndexerKeyCache())
         }
     }
 
-    // Not in this text-only port: the MTP head and the vision tower.
+    // The MTP head loads as `Qwen4ExpMTPDraftModel`; the vision tower is not ported.
     public var excludedCheckpointNamespaces: [String] {
         ["mtp", "model.mtp", "model.visual", "visual", "vision_tower"]
     }
@@ -1196,19 +1286,7 @@ public final class Qwen4ExpModel: Module, LLMModel, KVCacheDimensionProvider {
                 continue
             }
 
-            // The experts stack as (E, out, in); gate_up_proj holds gate, then up.
-            if key.hasSuffix("mlp.experts.gate_up_proj") {
-                let base = key.dropLast("experts.gate_up_proj".count)
-                let mid = value.dim(-2) / 2
-                weights[key] = nil
-                weights["\(base)switch_mlp.gate_proj.weight"] = value[.ellipsis, ..<mid, 0...]
-                weights["\(base)switch_mlp.up_proj.weight"] = value[.ellipsis, mid..., 0...]
-                continue
-            }
-            if key.hasSuffix("mlp.experts.down_proj") {
-                let base = key.dropLast("experts.down_proj".count)
-                weights[key] = nil
-                weights["\(base)switch_mlp.down_proj.weight"] = value
+            if Self.splitExperts(key, value, into: &weights) {
                 continue
             }
 
@@ -1221,14 +1299,7 @@ public final class Qwen4ExpModel: Module, LLMModel, KVCacheDimensionProvider {
             }
         }
 
-        // Merge the checkpoint's block inject into the mix down.
-        for key in weights.keys.sorted() where key.hasSuffix("block_inject_weight.weight") {
-            let prefix = key.dropLast("block_inject_weight.weight".count)
-            let down = "\(prefix)input_mix_weight_down"
-            let inject = "\(prefix)block_inject_weight"
-            try Self.moveQuantization(&checkpoint, from: [down, inject], to: [down])
-            Self.mergeLinears(&weights, [down, inject], target: down)
-        }
+        try Self.mergeBlockInjects(&weights, checkpoint: &checkpoint)
 
         // The checkpoint has equal row shards; the model keeps one table per head.
         for key in weights.keys.sorted() where key.hasSuffix("ngram_embedding.shards.0.weight") {
@@ -1262,7 +1333,7 @@ public final class Qwen4ExpModel: Module, LLMModel, KVCacheDimensionProvider {
     }
 
     // Norms stored as `w` for a `1 + w` scale; `linear_attn.norm` is not one.
-    private static let foldOne = [
+    static let foldOne = [
         "q_layernorm.weight", "k_layernorm.weight", "q_norm.weight", "k_norm.weight",
         "hc_norm.weight", "norm_key.weight", "norm_query.weight", "norm_conv.weight",
     ]
@@ -1316,6 +1387,41 @@ public final class Qwen4ExpModel: Module, LLMModel, KVCacheDimensionProvider {
                     + "match the checkpoint (\(rebuilt.asArray(Int64.self)) vs "
                     + "\(value.asType(.int64).asArray(Int64.self))); check `seed` and the hash "
                     + "parameters")
+        }
+    }
+
+    /// Split a fused expert tensor into `switch_mlp` weights; `false` for any other tensor.
+    static func splitExperts(
+        _ key: String, _ value: MLXArray, into weights: inout [String: MLXArray]
+    ) -> Bool {
+        // The experts stack as (E, out, in); gate_up_proj holds gate, then up.
+        if key.hasSuffix("mlp.experts.gate_up_proj") {
+            let base = key.dropLast("experts.gate_up_proj".count)
+            let mid = value.dim(-2) / 2
+            weights[key] = nil
+            weights["\(base)switch_mlp.gate_proj.weight"] = value[.ellipsis, ..<mid, 0...]
+            weights["\(base)switch_mlp.up_proj.weight"] = value[.ellipsis, mid..., 0...]
+            return true
+        }
+        if key.hasSuffix("mlp.experts.down_proj") {
+            let base = key.dropLast("experts.down_proj".count)
+            weights[key] = nil
+            weights["\(base)switch_mlp.down_proj.weight"] = value
+            return true
+        }
+        return false
+    }
+
+    /// Merge each checkpoint block inject into its mix down projection.
+    static func mergeBlockInjects(
+        _ weights: inout [String: MLXArray], checkpoint: inout ModelCheckpoint
+    ) throws {
+        for key in weights.keys.sorted() where key.hasSuffix("block_inject_weight.weight") {
+            let prefix = key.dropLast("block_inject_weight.weight".count)
+            let down = "\(prefix)input_mix_weight_down"
+            let inject = "\(prefix)block_inject_weight"
+            try moveQuantization(&checkpoint, from: [down, inject], to: [down])
+            mergeLinears(&weights, [down, inject], target: down)
         }
     }
 
@@ -1385,6 +1491,72 @@ public final class Qwen4ExpModel: Module, LLMModel, KVCacheDimensionProvider {
 extension Qwen4ExpModel: LoRAModel {
     public var loraLayers: [Module] {
         model.layers
+    }
+}
+
+// MARK: - MTP
+
+// A verify pass checkpoints every linear layer after its first token.
+extension Qwen4ExpModel: SpeculativeCacheRewindModel {
+    public var maximumNativeTargetCacheRewind: Int { 1 }
+}
+
+// The default `prepare` gathers the hidden rows of a chunked MTP prefill.
+extension Qwen4ExpModel: MTPChunkedPrefillModel {}
+
+/// The MTP head: one full-attention layer over the fused token embedding and target
+/// hyper-connection streams, then its own mixer.
+final class Qwen4ExpMTPPredictor: Module {
+    let hc: Int
+    let d: Int
+
+    @ModuleInfo(key: "fc_embedding") var fcEmbedding: Linear
+    @ModuleInfo(key: "fc_hidden") var fcHidden: Linear
+    @ModuleInfo(key: "pre_fc_norm_embedding") private var preFCNormEmbedding: Qwen4ExpRMSNorm
+    // One norm over all hc * d values, not per stream.
+    @ModuleInfo(key: "pre_fc_norm_hidden") private var preFCNormHidden: Qwen4ExpRMSNorm
+    @ModuleInfo(key: "layers") private var layers: [Qwen4ExpDecoderLayer]
+    @ModuleInfo(key: "hyper_connection_mixer") private var hyperConnectionMixer:
+        Qwen4ExpGatedResidual
+
+    init(_ args: Qwen4ExpTextConfiguration) {
+        hc = args.hcCount
+        d = args.hiddenSize
+        var mtpArgs = args
+        mtpArgs.hiddenLayers = 1
+        mtpArgs.layerTypes = ["full_attention"]
+        mtpArgs.pleLayerIds = []
+        _fcEmbedding.wrappedValue = Linear(d, d, bias: false)
+        _fcHidden.wrappedValue = Linear(d, d, bias: false)
+        _preFCNormEmbedding.wrappedValue = Qwen4ExpRMSNorm(dimensions: d, eps: args.rmsNormEps)
+        _preFCNormHidden.wrappedValue = Qwen4ExpRMSNorm(dimensions: hc * d, eps: args.rmsNormEps)
+        _layers.wrappedValue = [Qwen4ExpDecoderLayer(mtpArgs, layerIndex: 0)]
+        _hyperConnectionMixer.wrappedValue = Qwen4ExpGatedResidual(mtpArgs, useCombine: false)
+        super.init()
+    }
+
+    func newCache() -> [KVCache] {
+        [CacheList(KVCacheSimple(), Qwen4ExpIndexerKeyCache())]
+    }
+
+    /// `embeddings` `[B, S, d]` are the next tokens', `hyper` `[B, S, hc * d]` the streams
+    /// at the positions before them. Returns the mixed state for the LM head and the
+    /// streams for the next step.
+    func callAsFunction(
+        embeddings: MLXArray, hyper: MLXArray, ids: MLXArray, cache: [KVCache]
+    ) -> (mixed: MLXArray, hyper: MLXArray) {
+        precondition(cache.count == layers.count, "Qwen4Exp MTP cache/layer count mismatch")
+        let prefix = Array(hyper.shape.dropLast())
+        let embedding = fcEmbedding(preFCNormEmbedding(embeddings))
+        let streams = fcHidden(preFCNormHidden(hyper).reshaped(prefix + [hc, d]))
+        // The embedding goes into every stream.
+        var h = (streams + embedding[.ellipsis, .newAxis, 0...]).reshaped(prefix + [hc * d])
+
+        let mask = createAttentionMask(h: h, cache: (cache[0] as? CacheList)?[0])
+        for (layer, layerCache) in zip(layers, cache) {
+            h = layer(h, mask: mask, convMask: nil, cache: layerCache, ids: ids)
+        }
+        return (hyperConnectionMixer(h).mixed, h)
     }
 }
 

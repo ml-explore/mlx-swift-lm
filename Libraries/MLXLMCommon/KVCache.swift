@@ -1860,6 +1860,12 @@ public class MambaCache: ArraysCache {
         super.init(size: 2, leftPadding: leftPadding)
     }
 
+    /// A cache with `size` slots, for layers that keep more state than the conv and
+    /// recurrent arrays.
+    public override init(size: Int, leftPadding: [Int]? = nil) {
+        super.init(size: size, leftPadding: leftPadding)
+    }
+
     /// Save the recurrent state at the last unconditionally committed token
     /// inside a speculative verification pass.
     package func saveSpeculativeCheckpoint(
@@ -1867,8 +1873,14 @@ public class MambaCache: ArraysCache {
         recurrentState: MLXArray,
         advancedBy tokenCount: Int
     ) {
+        saveSpeculativeCheckpoint(state: [convState, recurrentState], advancedBy: tokenCount)
+    }
+
+    /// Save every slot at the last unconditionally committed token, in slot order.
+    package func saveSpeculativeCheckpoint(state: [MLXArray?], advancedBy tokenCount: Int) {
+        precondition(state.count == cache.count, "A checkpoint must hold every cache slot")
         speculativeCheckpoint = SpeculativeCheckpoint(
-            state: [convState, recurrentState],
+            state: state,
             offset: offset,
             leftPadding: leftPadding.map { $0 - tokenCount },
             lengths: lengths.map { $0 - tokenCount })
@@ -2736,7 +2748,8 @@ package func rewindSpeculativePromptCache(
     guard numTokens > 0,
         cache.allSatisfy({ entry in
             if entry.isTrimmable {
-                return entry.offset >= numTokens
+                // `maxTrimCount`, not `offset`: a `CacheList` reports no offset of its own.
+                return entry.maxTrimCount >= numTokens
                     && canRewindConvolutionCache(entry, positions: numTokens)
             }
             // A recurrent checkpoint records one atomic verify step. Models
