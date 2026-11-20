@@ -350,10 +350,7 @@ public struct QwenVL {
         // The processor pairs media with an all-ones mask. Anything else is a real
         // padding mask this routine will not reinterpret.
         if let mask = input.text.mask {
-            guard mask.size == ids.count else { return nil }
-            guard mask.asType(.int32).asArray(Int32.self).allSatisfy({ $0 == 1 }) else {
-                return nil
-            }
+            guard mask.size == ids.count, !input.text.carriesPaddingMask else { return nil }
         }
 
         var splitImage: LMInput.ProcessedImage?

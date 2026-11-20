@@ -1682,40 +1682,26 @@ public class Qwen35: Module, VLMModel {
         inputIds: MLXArray,
         imageTokenIndex: Int,
         videoTokenIndex: Int
-    ) throws -> (MLXArray, MLXArray) {
+    ) throws -> MLXArray {
         let imageMask = (inputIds .== MLXArray(imageTokenIndex))
         let videoMask = (inputIds .== MLXArray(videoTokenIndex))
-        var specialMask = imageMask .|| videoMask
+        let specialMask = imageMask .|| videoMask
 
-        let nImageTokens = specialMask.sum().item(Int.self)
+        // Read back one bool per token, not per hidden element, and scatter whole rows.
+        let visualIndices = nonZero(specialMask)
 
-        specialMask = expandedDimensions(specialMask, axis: -1)
-        let maskExpanded = broadcast(specialMask, to: inputEmbeds.shape)
-
-        let nImageFeatures = imageFeatures.dim(0)
-        let nImageMaskElements = maskExpanded.sum().item(Int.self)
-        let imageFeatureSize = imageFeatures.size
-
-        guard nImageMaskElements == imageFeatureSize else {
-            throw Qwen35VLError.featureTokenMismatch(expected: nImageTokens, actual: nImageFeatures)
+        let hiddenSize = inputEmbeds.dim(-1)
+        guard visualIndices.count * hiddenSize == imageFeatures.size else {
+            throw Qwen35VLError.featureTokenMismatch(
+                expected: visualIndices.count, actual: imageFeatures.dim(0))
         }
+        guard !visualIndices.isEmpty else { return inputEmbeds }
 
-        let originalShape = inputEmbeds.shape
-        let flattenedEmbeds = inputEmbeds.flattened()
-        let flattenedFeatures = imageFeatures.flattened()
-        let flattenedMask = maskExpanded.flattened()
+        let result = inputEmbeds.reshaped([-1, hiddenSize])
+        result[MLXArray(visualIndices.map { Int32($0) }), 0...] =
+            imageFeatures.reshaped([visualIndices.count, hiddenSize])
 
-        let indices = nonZero(flattenedMask.asType(.bool))
-
-        var result = flattenedEmbeds
-        if !indices.isEmpty && indices.count == flattenedFeatures.size {
-            let indexArray = MLXArray(indices.map { UInt32($0) })
-            result[indexArray] = flattenedFeatures
-        }
-
-        result = result.reshaped(originalShape)
-        let visualMask = specialMask.squeezed(axis: -1).asType(.bool)
-        return (result, visualMask)
+        return result.reshaped(inputEmbeds.shape)
     }
 
     private func nonZero(_ mask: MLXArray) -> [Int] {
@@ -1772,7 +1758,7 @@ public class Qwen35: Module, VLMModel {
             let (visionHidden, _) = vision(typedPixels, gridTHW: frames)
             let visionFeatures = visionHidden.asType(textEmbeds.dtype)
 
-            let (mergedEmbeds, _) = try mergeInputIdsWithImageFeatures(
+            let mergedEmbeds = try mergeInputIdsWithImageFeatures(
                 imageFeatures: visionFeatures,
                 inputEmbeds: textEmbeds,
                 inputIds: inputIds,

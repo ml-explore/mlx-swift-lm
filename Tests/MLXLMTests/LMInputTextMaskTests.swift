@@ -31,6 +31,14 @@ struct LMInputTextMaskTests {
         #expect(text(mask: mask.asType(.bool)).carriesPaddingMask)
     }
 
+    @Test func `a zero in any row of a batch mask is padding`() {
+        let ones = MLXArray.ones([2, 4], dtype: .int8)
+        #expect(!text(mask: ones).carriesPaddingMask)
+
+        let mask = MLXArray([1, 1, 1, 1, 1, 1, 0, 1] as [Int8]).reshaped(2, 4)
+        #expect(text(mask: mask).carriesPaddingMask)
+    }
+
     @Test func `a floating-point mask is always padding`() {
         let mask = MLXArray([1, 1, 1, 1]).expandedDimensions(axis: 0).asType(.float32)
         #expect(text(mask: mask).carriesPaddingMask)

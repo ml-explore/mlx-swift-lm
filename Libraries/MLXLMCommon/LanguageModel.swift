@@ -180,7 +180,8 @@ public struct LMInput {
         package var carriesPaddingMask: Bool {
             guard let mask else { return false }
             guard !mask.dtype.isFloatingPoint else { return true }
-            return !mask.asType(.int32).asArray(Int32.self).allSatisfy { $0 == 1 }
+            // Reduce on the device so only one scalar reaches the host.
+            return !(mask .== 1).all().item(Bool.self)
         }
 
         /// Number of logical sequence positions consumed by one model call.
