@@ -148,6 +148,9 @@ public struct ModelConfiguration: Sendable {
     /// ``ModelComponentsProviding``.
     public var excludedComponents: Set<ModelComponent> = []
 
+    /// Storage for supported frozen, lookup-only embedding tables.
+    public var embeddingStorage: EmbeddingStoragePolicy = .automatic
+
     /// Overrides the ``MessageGenerator`` the model would otherwise supply.
     ///
     /// A model class is shared by every checkpoint of its model type, so a fine-tune that
@@ -170,7 +173,8 @@ public struct ModelConfiguration: Sendable {
         toolCallFormat: ToolCallFormat? = nil,
         reasoningConfig: ReasoningConfig? = nil,
         messageGenerator: (any MessageGenerator)? = nil,
-        generationConfig: GenerationConfigFile? = nil
+        generationConfig: GenerationConfigFile? = nil,
+        embeddingStorage: EmbeddingStoragePolicy = .automatic
     ) {
         self.id = .id(id, revision: revision)
         self.modelSubdirectory = modelSubdirectory
@@ -183,6 +187,7 @@ public struct ModelConfiguration: Sendable {
         self.reasoningConfig = reasoningConfig
         self.messageGenerator = messageGenerator
         self.generationConfig = generationConfig
+        self.embeddingStorage = embeddingStorage
     }
 
     public init(
@@ -195,7 +200,8 @@ public struct ModelConfiguration: Sendable {
         toolCallFormat: ToolCallFormat? = nil,
         reasoningConfig: ReasoningConfig? = nil,
         messageGenerator: (any MessageGenerator)? = nil,
-        generationConfig: GenerationConfigFile? = nil
+        generationConfig: GenerationConfigFile? = nil,
+        embeddingStorage: EmbeddingStoragePolicy = .automatic
     ) {
         self.id = .directory(directory)
         self.modelSubdirectory = modelSubdirectory
@@ -208,6 +214,7 @@ public struct ModelConfiguration: Sendable {
         self.reasoningConfig = reasoningConfig
         self.messageGenerator = messageGenerator
         self.generationConfig = generationConfig
+        self.embeddingStorage = embeddingStorage
     }
 
     /// Maps this configuration's behavioral properties into a
@@ -231,7 +238,7 @@ public struct ModelConfiguration: Sendable {
             messageGenerator: messageGenerator,
             generationConfig: generationConfig,
             weightFileSelection: weightFileSelection,
-            excludedComponents: excludedComponents)
+            excludedComponents: excludedComponents, embeddingStorage: embeddingStorage)
     }
 
     /// Validated, canonical repository-relative model directory.
@@ -287,6 +294,7 @@ extension ModelConfiguration: Equatable {
             && lhs.weightFileSelection == rhs.weightFileSelection
             && lhs.excludedComponents == rhs.excludedComponents
             && lhs.generationConfig == rhs.generationConfig
+            && lhs.embeddingStorage == rhs.embeddingStorage
             && sameMessageGenerator(lhs.messageGenerator, rhs.messageGenerator)
     }
 

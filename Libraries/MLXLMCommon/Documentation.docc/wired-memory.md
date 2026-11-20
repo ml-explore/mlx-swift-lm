@@ -29,6 +29,10 @@ let weightBytes = memory.total
 component loads on first use. The KV cache is not included; read
 ``KVCacheStatus/memoryBytes`` for it.
 
+``ModelMemory/fileBacked`` is the part of the model held in file-backed embedding tables. The
+system reads those pages on use and can reclaim them. ``ModelMemory/total`` includes them, so
+subtract them from a ticket that should cover only resident weights.
+
 Summing `nbytes` across the parameter arrays gives a similar number from array metadata alone,
 but it can count a shared buffer more than once and misses on-demand components:
 
