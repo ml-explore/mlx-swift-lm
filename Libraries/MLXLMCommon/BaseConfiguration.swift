@@ -30,6 +30,17 @@ public struct BaseConfiguration: Codable, Sendable {
             self.bits = bits
         }
 
+        /// Initializes a new quantization configuration with an explicit mode.
+        /// - Parameters:
+        ///   - groupSize: The number of weights that share the same scale.
+        ///   - bits: The bit-depth of the quantized weights.
+        ///   - mode: The quantization method, e.g. `.mxfp8`.
+        public init(groupSize: Int, bits: Int, mode: QuantizationMode) {
+            self.groupSize = groupSize
+            self.bits = bits
+            self._mode = mode
+        }
+
         /// The size of the quantization group.
         public let groupSize: Int
 
@@ -120,6 +131,12 @@ public struct BaseConfiguration: Codable, Sendable {
         var quantization: Quantization
         var perLayerQuantization: PerLayerQuantization
 
+        init(quantization: Quantization) {
+            self.quantization = quantization
+            self.perLayerQuantization = PerLayerQuantization(
+                quantization: quantization, perLayerQuantization: [:])
+        }
+
         /// A custom CodingKey used to iterate over arbitrary layer names in JSON.
         internal struct _DictionaryCodingKey: CodingKey {
             internal let stringValue: String
@@ -193,6 +210,50 @@ public struct BaseConfiguration: Codable, Sendable {
         }
     }
 
+    /// An upstream `quantization_config` whose weights MLX loads packed.
+    ///
+    /// Mapped as mlx-lm's `load_model` does. Other formats map to `nil`: their models
+    /// dequantize in `sanitize`, or the loader cannot read them.
+    struct UpstreamQuantizationConfig: Decodable {
+        var quantMethod: String?
+        var scaleFmt: String?
+        var weightBlockSize: [Int]?
+        var format: String?
+
+        enum CodingKeys: String, CodingKey {
+            case quantMethod = "quant_method"
+            case scaleFmt = "scale_fmt"
+            case weightBlockSize = "weight_block_size"
+            case format
+        }
+
+        var quantization: Quantization? {
+            switch quantMethod {
+            case "mxfp4":
+                return .init(groupSize: 32, bits: 4, mode: .mxfp4)
+            case "mxfp8":
+                return .init(groupSize: 32, bits: 8, mode: .mxfp8)
+            case "fp8" where scaleFmt == "ue8m0" && weightBlockSize == [32, 32]:
+                // Power-of-two scales over 32x32 blocks are mxfp8, so the weights stay packed.
+                return .init(groupSize: 32, bits: 8, mode: .mxfp8)
+            case "compressed-tensors":
+                switch format {
+                case "nvfp4-pack-quantized": return .init(groupSize: 16, bits: 4, mode: .nvfp4)
+                case "mxfp4-pack-quantized": return .init(groupSize: 32, bits: 4, mode: .mxfp4)
+                case "pack-quantized": return .init(groupSize: 32, bits: 4, mode: .affine)
+                default: return nil
+                }
+            default:
+                return nil
+            }
+        }
+    }
+
+    private enum UpstreamKeys: String, CodingKey {
+        case quantizationConfig = "quantization_config"
+        case textConfig = "text_config"
+    }
+
     /// Internal storage for quantization details extracted from `config.json`.
     var quantizationContainer: QuantizationContainer?
 
@@ -223,5 +284,29 @@ public struct BaseConfiguration: Codable, Sendable {
         case quantizationContainer = "quantization"
         case textConfiguration = "text_config"
         case eosTokenIds = "eos_token_id"
+    }
+
+    /// Without a `quantization` entry, the default comes from `quantization_config`, at the top
+    /// level or in `text_config`.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        modelType = try container.decode(String.self, forKey: .modelType)
+        quantizationContainer = try container.decodeIfPresent(
+            QuantizationContainer.self, forKey: .quantizationContainer)
+        textConfiguration = try container.decodeIfPresent(
+            TextConfiguration.self, forKey: .textConfiguration)
+        eosTokenIds = try container.decodeIfPresent(IntOrIntArray.self, forKey: .eosTokenIds)
+
+        if quantizationContainer == nil {
+            let upstream = try decoder.container(keyedBy: UpstreamKeys.self)
+            let config =
+                (try? upstream.decodeIfPresent(
+                    UpstreamQuantizationConfig.self, forKey: .quantizationConfig))
+                ?? (try? upstream.nestedContainer(keyedBy: UpstreamKeys.self, forKey: .textConfig)
+                    .decodeIfPresent(UpstreamQuantizationConfig.self, forKey: .quantizationConfig))
+            if let quantization = config?.quantization {
+                quantizationContainer = QuantizationContainer(quantization: quantization)
+            }
+        }
     }
 }

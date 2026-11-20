@@ -182,25 +182,31 @@ struct MixedPrecisionQuantLoadTests {
         }
     }
 
-    @Test("Ignoring the per-module overrides fails loudly, not silently")
-    func globalOnlyQuantizationFailsLoudly() throws {
+    @Test("Without the per-module overrides, the bits come from the checkpoint shapes")
+    func globalOnlyQuantizationInfersBits() throws {
         let config = try tinyUnifiedConfig()
         let reference = Gemma4Unified(config)
-        let (arrays, mlpPaths, _) = makeCheckpoint(model: reference)
+        let (arrays, mlpPaths, fourBitPaths) = makeCheckpoint(model: reference)
         #expect(!mlpPaths.isEmpty)
 
         let directory = try writeCheckpoint(arrays)
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        // A loader that applies only the global 4-bit settings would build
-        // 4-bit MLP modules whose packed shapes cannot hold the checkpoint's
-        // 8-bit payload. That must surface as a load error — decoding the
-        // 8-bit payload as 4-bit would produce garbage logits downstream.
+        // Decoding the 8-bit payload as 4-bit would produce garbage logits, so the loader reads
+        // the bits from the packed shapes, as mlx-lm's infer_quant_config does.
         let model = Gemma4Unified(config)
-        #expect(throws: (any Error).self) {
-            try loadWeights(
-                modelDirectory: directory, model: model,
-                quantization: .init(groupSize: Self.groupSize, bits: 4))
+        try loadWeights(
+            modelDirectory: directory, model: model,
+            quantization: .init(groupSize: Self.groupSize, bits: 4))
+
+        let modules = Dictionary(uniqueKeysWithValues: model.leafModules().flattened())
+        for path in mlpPaths {
+            let quantized = try #require(modules[path] as? Quantized, "\(path) should be quantized")
+            #expect(quantized.bits == 8, "\(path) must load with its saved 8 bits")
+        }
+        for path in fourBitPaths {
+            let quantized = try #require(modules[path] as? Quantized, "\(path) should be quantized")
+            #expect(quantized.bits == 4)
         }
     }
 

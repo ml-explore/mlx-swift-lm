@@ -99,4 +99,84 @@ final class DeepseekV3Tests: XCTestCase {
         XCTAssertNotNil(sanitized["model.layers.77.self_attn.q_proj.weight"])
         XCTAssertNil(sanitized["model.layers.78.self_attn.q_proj.weight"])
     }
+
+    /// Safetensors fp8 loads as raw bytes, so the block dequantization must decode them first,
+    /// as mlx-lm's `from_fp8` does, and return bfloat16.
+    func testSanitizeDecodesFP8BeforeScaling() throws {
+        let model = DeepseekV3Model(try makeConfig())
+        let values = sin(MLXArray(0 ..< (130 * 200)).asType(.float32) * Float(0.37)) * Float(3)
+        let fp8 = toFP8(values.reshaped(130, 200))
+        let scaleInv = MLXArray([0.5, 2.0, 4.0, 0.25] as [Float]).reshaped(2, 2)
+        let key = "model.layers.0.self_attn.o_proj.weight"
+        let sanitized = model.sanitize(weights: [key: fp8, "\(key)_scale_inv": scaleInv])
+
+        let blockScales = repeated(repeated(scaleInv, count: 128, axis: 0), count: 128, axis: 1)[
+            ..<130, ..<200]
+        let expected = (fromFP8(fp8, dtype: .bfloat16) * blockScales).asType(.bfloat16)
+        let weight = try XCTUnwrap(sanitized[key])
+        XCTAssertEqual(weight.dtype, .bfloat16)
+        XCTAssertEqual(weight.shape, [130, 200])
+        XCTAssertTrue(arrayEqual(weight, expected).item(Bool.self))
+        XCTAssertNil(sanitized["\(key)_scale_inv"])
+    }
+
+    /// fp8 experts are dequantized before they are stacked, and no per-expert key is left.
+    func testSanitizeStacksDequantizedFP8Experts() throws {
+        let model = DeepseekV3Model(try makeConfig())
+        var weights = [String: MLXArray]()
+        var expected = [MLXArray]()
+        for expert in 0 ..< 4 {
+            let values = cos(MLXArray(0 ..< 64).asType(.float32) * Float(expert + 1)).reshaped(8, 8)
+            let key = "model.layers.1.mlp.experts.\(expert).gate_proj.weight"
+            weights[key] = toFP8(values)
+            weights["\(key)_scale_inv"] = MLXArray([Float(expert + 1)]).reshaped(1, 1)
+            expected.append(
+                (fromFP8(toFP8(values), dtype: .bfloat16) * Float(expert + 1))
+                    .asType(.bfloat16))
+        }
+        let sanitized = model.sanitize(weights: weights)
+        XCTAssertEqual(Array(sanitized.keys), ["model.layers.1.mlp.switch_mlp.gate_proj.weight"])
+        let stackedWeight = try XCTUnwrap(
+            sanitized["model.layers.1.mlp.switch_mlp.gate_proj.weight"])
+        XCTAssertEqual(stackedWeight.dtype, .bfloat16)
+        XCTAssertTrue(arrayEqual(stackedWeight, stacked(expected)).item(Bool.self))
+    }
+
+    /// compressed-tensors int4 maps to MLX affine words with a zero point of 8, as mlx-lm does.
+    func testSanitizeRemapsCompressedTensorsInt4() throws {
+        let model = DeepseekV3Model(try makeConfig())
+        let q = (MLXArray(0 ..< 256) * 7 % 16).asType(.uint32).reshaped(4, 64)
+        let shifts = MLXArray(stride(from: 0, to: 32, by: 4).map { UInt32($0) })
+        let packed = (q.reshaped(4, 8, 8) << shifts).sum(axis: -1)
+        let scales = MLXArray([0.5, 0.25, 1, 2, 4, 0.125, 1, 0.5] as [Float])
+            .reshaped(4, 2).asType(.bfloat16)
+
+        let dense = "model.layers.0.self_attn.o_proj."
+        var weights: [String: MLXArray] = [
+            dense + "weight_packed": packed.view(dtype: .int32),
+            dense + "weight_scale": scales,
+            dense + "weight_shape": MLXArray([4, 64] as [Int32]),
+        ]
+        for expert in 0 ..< 4 {
+            let base = "model.layers.1.mlp.experts.\(expert).up_proj."
+            weights[base + "weight_packed"] = packed.view(dtype: .int32)
+            weights[base + "weight_scale"] = scales
+            weights[base + "weight_shape"] = MLXArray([4, 64] as [Int32])
+        }
+        let sanitized = model.sanitize(weights: weights)
+
+        let switchMLP = "model.layers.1.mlp.switch_mlp.up_proj."
+        XCTAssertEqual(
+            Set(sanitized.keys),
+            Set(["weight", "scales", "biases"].flatMap { [dense + $0, switchMLP + $0] }))
+        let weight = try XCTUnwrap(sanitized[dense + "weight"])
+        XCTAssertEqual(weight.dtype, .uint32)
+        let decoded = dequantized(
+            weight, scales: sanitized[dense + "scales"]!, biases: sanitized[dense + "biases"],
+            groupSize: 32, bits: 4)
+        let expected = (q.asType(.float32) - 8) * repeated(scales, count: 32, axis: 1)
+        XCTAssertTrue(arrayEqual(decoded.asType(.float32), expected).item(Bool.self))
+        XCTAssertEqual(sanitized[switchMLP + "weight"]?.shape, [4, 4, 8])
+        XCTAssertEqual(sanitized[switchMLP + "biases"]?.shape, [4, 4, 2])
+    }
 }

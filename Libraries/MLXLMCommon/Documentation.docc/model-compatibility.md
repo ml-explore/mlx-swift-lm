@@ -43,7 +43,9 @@ metadata, and per-layer quantization settings together. The loading sequence is:
 
 1. Read tensors with the metadata of the file that supplied each tensor.
 2. Select the requested component and normalize its names and tensor layout.
-3. Quantize runtime modules using the normalized layer settings.
+3. Quantize runtime modules using the normalized layer settings. A layer with no
+   setting of its own takes the group size, bits and mode its packed weights were
+   saved with, and the default only when the shapes do not decide them.
 4. Update the model with strict parameter validation, then prepare it for inference.
 
 ``CheckpointComponent`` declares accepted serialized namespaces, a runtime
