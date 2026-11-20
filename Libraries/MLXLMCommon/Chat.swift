@@ -10,8 +10,8 @@ package enum MessageContentLayout: Sendable {
     case textThenImages
 }
 
-public enum Chat {
-    public struct Message {
+public enum Chat: Sendable {
+    public struct Message: Sendable {
         /// The role of the message sender.
         public var role: Role
 

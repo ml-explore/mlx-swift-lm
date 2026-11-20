@@ -40,7 +40,7 @@ struct UserInputImageTests {
     @Test("An array source becomes an image of the same size")
     func arraySourceBecomesAnImage() throws {
         let array = MLXArray.ones([3, 3, 4]) * 255
-        let image = UserInput.Image.array(array)
+        let image = UserInput.Image.array(array.materialized())
         let recovered = try image.asCIImage()
         #expect(recovered.extent.width == 4)
         #expect(recovered.extent.height == 3)

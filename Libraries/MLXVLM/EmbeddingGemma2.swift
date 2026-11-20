@@ -398,7 +398,7 @@ package struct EmbeddingGemma2AudioProcessor: Sendable {
     package nonisolated(nonsending) func features(for audio: UserInput.Audio) async throws
         -> MLXArray
     {
-        let samples: MLXArray
+        let samples: MaterializedArray
         switch audio.source {
         case .array(let array):
             samples = array

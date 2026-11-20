@@ -4,7 +4,7 @@ import Foundation
 import MLX
 
 #if canImport(AVFoundation)
-@preconcurrency import AVFoundation
+import AVFoundation
 #endif
 #if canImport(CoreImage)
 import CoreImage
@@ -16,13 +16,13 @@ public typealias Message = [String: any Sendable]
 ///
 /// A ``UserInputProcessor`` can convert this to ``LMInput``.
 /// See also ``ModelContext``.
-public struct UserInput {
+public struct UserInput: Sendable {
 
     /// Representation of a prompt or series of messages (conversation).
     ///
     /// This may be a single string with a user prompt or a series of back
     /// and forth responses representing a conversation.
-    public enum Prompt: CustomStringConvertible {
+    public enum Prompt: CustomStringConvertible, Sendable {
         /// A single string
         case text(String)
 
@@ -44,7 +44,7 @@ public struct UserInput {
         }
     }
 
-    public struct VideoFrame {
+    public struct VideoFrame: Sendable {
         public let image: Image
         public let timeStamp: CMTime
 
@@ -76,11 +76,11 @@ public struct UserInput {
     }
 
     /// Representation of a video resource.
-    public struct Video {
+    public struct Video: Sendable {
 
-        public enum Source {
+        public enum Source: Sendable {
             #if canImport(AVFoundation)
-            case avAsset(AVAsset)
+            case avAsset(AVURLAsset)
             #endif
             case url(URL)
             /// Useful for decoded frames held in memory
@@ -94,7 +94,7 @@ public struct UserInput {
         }
 
         #if canImport(AVFoundation)
-        public static func avAsset(_ asset: AVAsset) -> Self {
+        public static func avAsset(_ asset: AVURLAsset) -> Self {
             Self(source: .avAsset(asset))
         }
         #endif
@@ -128,14 +128,14 @@ public struct UserInput {
     }
 
     /// Representation of an image resource.
-    public struct Image {
+    public struct Image: Sendable {
 
-        public enum Source {
+        public enum Source: Sendable {
             #if canImport(CoreImage)
             case ciImage(CIImage)
             #endif
             case url(URL)
-            case array(MLXArray)
+            case array(MaterializedArray)
         }
 
         public var source: Source
@@ -184,13 +184,36 @@ public struct UserInput {
             Self(source: .url(url))
         }
 
+        /// Create an image from an `MLXArray`.
+        ///
+        /// This evaluates `array` and stores a read-only `MaterializedArray`
+        /// snapshot, so the input can be sent across concurrency boundaries.
+        /// Do not call it inside a function transform such as `compile` or `grad`.
+        @available(
+            *, deprecated, message: "Pass a MaterializedArray, e.g. .array(array.materialized())"
+        )
         public static func array(_ array: MLXArray, label: String? = nil) -> Self {
-            Self(source: .array(array), label: label)
+            Self(source: .array(array.materialized()), label: label)
         }
 
         /// Makes `arrays.map(UserInput.Image.array)` compile, because a function value
         /// cannot use the default `label`.
+        ///
+        /// Like the labeled overload, this evaluates `array`.
+        @available(
+            *, deprecated, message: "Pass a MaterializedArray, e.g. .array(array.materialized())"
+        )
         public static func array(_ array: MLXArray) -> Self {
+            Self(source: .array(array.materialized()))
+        }
+
+        /// Create an image from an already evaluated `MaterializedArray`.
+        public static func array(_ array: MaterializedArray, label: String? = nil) -> Self {
+            Self(source: .array(array), label: label)
+        }
+
+        /// Makes `arrays.map(UserInput.Image.array)` compile for `MaterializedArray`.
+        public static func array(_ array: MaterializedArray) -> Self {
             Self(source: .array(array))
         }
 
@@ -212,7 +235,7 @@ public struct UserInput {
                         "array must have 3 dimensions: \(array.ndim)")
                 }
 
-                var array = array
+                var array: MLXArray = array
 
                 // convert to 0 .. 255
                 if array.max().item(Float.self) <= 1.0 {
@@ -255,11 +278,11 @@ public struct UserInput {
     }
 
     /// Representation of an audio resource.
-    public struct Audio {
+    public struct Audio: Sendable {
 
-        public enum Source {
+        public enum Source: Sendable {
             case url(URL)
-            case array(MLXArray)
+            case array(MaterializedArray)
         }
 
         public var source: Source
@@ -272,7 +295,20 @@ public struct UserInput {
             Self(source: .url(url))
         }
 
+        /// Create audio from an `MLXArray`.
+        ///
+        /// This evaluates `array` and stores a read-only `MaterializedArray`
+        /// snapshot, so the input can be sent across concurrency boundaries.
+        /// Do not call it inside a function transform such as `compile` or `grad`.
+        @available(
+            *, deprecated, message: "Pass a MaterializedArray, e.g. .array(array.materialized())"
+        )
         public static func array(_ array: MLXArray) -> Self {
+            Self(source: .array(array.materialized()))
+        }
+
+        /// Create audio from an already evaluated `MaterializedArray`.
+        public static func array(_ array: MaterializedArray) -> Self {
             Self(source: .array(array))
         }
 

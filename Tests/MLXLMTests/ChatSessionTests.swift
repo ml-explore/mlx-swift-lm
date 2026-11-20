@@ -2089,7 +2089,7 @@ public class ChatSessionTests: XCTestCase {
 
         _ = try await session.respond(
             to: "inspect this",
-            image: .array(MLXArray([Float(0)])))
+            image: .array(MLXArray([Float(0)]).materialized()))
         let firstRenderedLengthValue = await lengthIterator.next()
         let firstRenderedLength = try XCTUnwrap(firstRenderedLengthValue)
 
@@ -2109,7 +2109,7 @@ public class ChatSessionTests: XCTestCase {
         for try await item in session.streamDetails(
             to: "now inspect this",
             role: .user,
-            images: [.array(MLXArray([Float(1)]))],
+            images: [.array(MLXArray([Float(1)]).materialized())],
             videos: [])
         {
             if let info = item.info {
@@ -2143,7 +2143,7 @@ public class ChatSessionTests: XCTestCase {
 
         _ = try await session.respond(
             to: "inspect this",
-            image: .array(MLXArray([Float(0)])))
+            image: .array(MLXArray([Float(0)]).materialized()))
         _ = await lengthIterator.next()
 
         for try await _ in session.streamDetails(to: "describe it") {}
@@ -2153,7 +2153,7 @@ public class ChatSessionTests: XCTestCase {
         for try await item in session.streamDetails(
             to: "now inspect this",
             role: .user,
-            images: [.array(MLXArray([Float(1)]))],
+            images: [.array(MLXArray([Float(1)]).materialized())],
             videos: [])
         {
             if let info = item.info {
@@ -2181,7 +2181,7 @@ public class ChatSessionTests: XCTestCase {
 
         _ = try await session.respond(
             to: "inspect this",
-            image: .array(MLXArray([Float(0)])))
+            image: .array(MLXArray([Float(0)]).materialized()))
         _ = await lengthIterator.next()
 
         var completionInfo: GenerateCompletionInfo?
@@ -2548,7 +2548,7 @@ public class ChatSessionTests: XCTestCase {
 
         _ = try await session.respond(
             to: "inspect this",
-            image: .array(MLXArray([Float(0)])))
+            image: .array(MLXArray([Float(0)]).materialized()))
         _ = await lengthIterator.next()
 
         for try await _ in session.streamDetails(to: "describe it") {}
@@ -2559,7 +2559,7 @@ public class ChatSessionTests: XCTestCase {
         for try await item in session.streamDetails(
             to: "now inspect this",
             role: .user,
-            images: [.array(MLXArray([Float(1)]))],
+            images: [.array(MLXArray([Float(1)]).materialized())],
             videos: [])
         {
             if let info = item.info {
@@ -2596,7 +2596,7 @@ public class ChatSessionTests: XCTestCase {
 
         _ = try await session.respond(
             to: "inspect this",
-            image: .array(MLXArray([Float(0)])))
+            image: .array(MLXArray([Float(0)]).materialized()))
         _ = await lengthIterator.next()
 
         for try await _ in session.streamDetails(to: "describe it") {}
@@ -2606,7 +2606,7 @@ public class ChatSessionTests: XCTestCase {
         for try await item in session.streamDetails(
             to: "now inspect this",
             role: .user,
-            images: [.array(MLXArray([Float(1)]))],
+            images: [.array(MLXArray([Float(1)]).materialized())],
             videos: [])
         {
             if let info = item.info {
@@ -2637,7 +2637,7 @@ public class ChatSessionTests: XCTestCase {
 
         _ = try await session.respond(
             to: "inspect this",
-            image: .array(MLXArray([Float(0)])))
+            image: .array(MLXArray([Float(0)]).materialized()))
         _ = await lengthIterator.next()
 
         var completionInfo: GenerateCompletionInfo?
@@ -3003,7 +3003,7 @@ public class ChatSessionTests: XCTestCase {
 
         let first = try await collectGeneration(
             session.streamDetails(
-                to: "inspect this", images: [.array(MLXArray([Float(0)]))]))
+                to: "inspect this", images: [.array(MLXArray([Float(0)]).materialized())]))
         let second = try await collectGeneration(session.streamDetails(to: "describe it"))
 
         for info in [first.info, second.info] {
@@ -3479,11 +3479,11 @@ public class ChatSessionTests: XCTestCase {
 
         let answer = try await session.respond(
             to: "inspect this",
-            image: .array(MLXArray([Float(0)])))
+            image: .array(MLXArray([Float(0)]).materialized()))
 
         // The source's tokens exactly, over a different image.
         let fork = await session.fork(history: [
-            .user("inspect this", images: [.array(MLXArray([Float(1)]))]),
+            .user("inspect this", images: [.array(MLXArray([Float(1)]).materialized())]),
             .assistant(answer),
         ])
         let reply = try await collectGeneration(fork.streamDetails(to: "describe it"))
@@ -3511,7 +3511,7 @@ public class ChatSessionTests: XCTestCase {
         _ = try await session.respond(to: "first")
 
         _ = await session.fork(history: [
-            .user("inspect this", images: [.array(MLXArray([Float(0)]))])
+            .user("inspect this", images: [.array(MLXArray([Float(0)]).materialized())])
         ])
         XCTAssertEqual(copies.value, 0)
 
