@@ -1314,6 +1314,9 @@ extension Qwen35TextModel: SpeculativeCacheRewindModel {
     public var maximumNativeTargetCacheRewind: Int { 1 }
 }
 
+// The default `prepare` gathers the hidden rows of a chunked MTP prefill.
+extension Qwen35TextModel: MTPChunkedPrefillModel {}
+
 // MARK: - Top-level Model
 
 public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
@@ -1392,6 +1395,8 @@ extension Qwen35Model: ModelComponentsProviding {
 extension Qwen35Model: SpeculativeCacheRewindModel {
     public var maximumNativeTargetCacheRewind: Int { 1 }
 }
+
+extension Qwen35Model: MTPChunkedPrefillModel {}
 
 // MARK: - Chat conventions
 

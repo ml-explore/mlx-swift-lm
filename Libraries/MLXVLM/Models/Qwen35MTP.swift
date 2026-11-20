@@ -170,9 +170,13 @@ public final class Qwen35VLMNextNDraftModel: Module, ResumableMTPDrafterModel {
         let shifted = concatenated([prompt[0..., 1...], bonus], axis: 1)
         let hidden = targetHidden[0..., ..<shifted.dim(1), 0...]
         state.nextPosition = 0
-        let mtpHidden = mtp(
-            inputsEmbeds: inputEmbedding(shifted), hiddenStates: hidden,
-            cache: state.cache, positionOffset: 0, positionDeltas: positionDeltas)
+        let mtpHidden = mtpForwardInChunks(count: shifted.dim(1), cache: state.cache) { range in
+            mtp(
+                inputsEmbeds: inputEmbedding(shifted[0..., range]),
+                hiddenStates: hidden[0..., range, 0...],
+                cache: state.cache, positionOffset: range.lowerBound,
+                positionDeltas: positionDeltas)
+        }
         state.nextPosition = shifted.dim(1)
         state.seedHidden = mtpHidden[0..., (-1)..., 0...]
         state.seedToken = sampleMTPSeed(
@@ -221,10 +225,14 @@ public final class Qwen35VLMNextNDraftModel: Module, ResumableMTPDrafterModel {
             [suffix, normalizedMTPColumn(firstBonus)], axis: 1)
         let hiddens = concatenated(
             [targetBoundaryHidden, suffixTargetHidden[0..., ..<suffixLength, 0...]], axis: 1)
-        let mtpHidden = mtp(
-            inputsEmbeds: inputEmbedding(tokens), hiddenStates: hiddens,
-            cache: state.cache, positionOffset: state.nextPosition,
-            positionDeltas: positionDeltas)
+        let start = state.nextPosition
+        let mtpHidden = mtpForwardInChunks(count: tokens.dim(1), cache: state.cache) { range in
+            mtp(
+                inputsEmbeds: inputEmbedding(tokens[0..., range]),
+                hiddenStates: hiddens[0..., range, 0...],
+                cache: state.cache, positionOffset: start + range.lowerBound,
+                positionDeltas: positionDeltas)
+        }
         state.nextPosition += tokens.dim(1)
         state.seedHidden = mtpHidden[0..., (-1)..., 0...]
         state.seedToken = sampleMTPSeed(

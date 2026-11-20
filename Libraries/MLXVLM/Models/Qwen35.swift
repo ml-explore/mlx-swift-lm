@@ -2087,6 +2087,9 @@ extension Qwen35: SpeculativeCacheRewindModel {
     public var maximumNativeTargetCacheRewind: Int { 1 }
 }
 
+// `prepareContinuation` gathers the hidden rows of a chunked MTP prefill.
+extension Qwen35: MTPChunkedPrefillModel {}
+
 extension Array where Element == THW {
     fileprivate var nilIfEmpty: [THW]? { isEmpty ? nil : self }
 }
