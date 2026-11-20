@@ -195,6 +195,20 @@ XGStatus xg_compile_json_schema(
 );
 
 /*
+ * Same as `xg_compile_json_schema`, with xgrammar's `any_whitespace`
+ * option. Nonzero `any_whitespace` matches `xg_compile_json_schema`:
+ * the grammar admits any whitespace between JSON tokens. Zero
+ * compiles fixed separators (", " and ": ") and no other whitespace,
+ * so the output is single-line JSON.
+ */
+XGStatus xg_compile_json_schema_with_whitespace(
+    XGGrammarCompiler *compiler,
+    const char *schema_json,
+    int32_t any_whitespace,
+    XGCompiledGrammar **out_compiled
+);
+
+/*
  * Release a handle returned by `xg_compile_json_schema`. Safe to call
  * with a NULL pointer.
  */
