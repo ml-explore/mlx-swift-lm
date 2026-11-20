@@ -167,6 +167,7 @@ public class Qwen2ModelInner: Module {
 public class Qwen2Model: Module, LLMModel, KVCacheDimensionProvider {
     public let vocabularySize: Int
     public let kvHeads: [Int]
+    public var kvHeadDim: Int? { configuration.hiddenSize / configuration.attentionHeads }
 
     public let model: Qwen2ModelInner
     let configuration: Qwen2Configuration
