@@ -9,6 +9,18 @@ import Testing
 
 @Suite("KV-cache configuration")
 struct KVCacheConfigurationTests {
+
+    @Test func modelCacheAdoptsSingleAndBatchedRowsAtOnePosition() {
+        Device.withDefaultDevice(.cpu) {
+            let single = KVCacheSimple()
+            let kv = makePositionKV(positions: 0 ..< 3, heads: 1, headDim: 4)
+            _ = single.update(keys: kv.0, values: kv.1)
+            let batch = KVCacheSimple.merge([single])
+            let storage = KVCacheStorage([single, batch], plan: .disabled)
+            #expect(storage.processedTokenCount == 3)
+            #expect(storage.nativeAttentionOffsetsAreAligned)
+        }
+    }
     @Test func typedPresetsExposeStableAlgorithmIdentity() {
         let quality = KVCacheConfiguration(
             strategy: .turboQuant(.qualityFirst))
@@ -392,6 +404,18 @@ struct KVCacheConfigurationTests {
         #expect(attention.offset == 4)
         #expect(storage.nativeAttentionOffsetsAreAligned)
     }
+
+    #if !DEBUG
+    @Test func modelCacheAdoptsMinimumOfDivergentAttentionOffsets() {
+        let ahead = KVCacheSimple()
+        ahead.offset = 8
+        let behind = KVCacheSimple()
+        behind.offset = 6
+
+        #expect(KVCacheStorage([ahead, behind], plan: .disabled).processedTokenCount == 6)
+        #expect(KVCacheStorage([behind, ahead], plan: .disabled).processedTokenCount == 6)
+    }
+    #endif
 
     @Test func modelCacheCopyAndTrimPreserveOneTimeline() throws {
         let attention = KVCacheSimple()

@@ -457,9 +457,9 @@ private class MuseGlimmerTextAttention: Module {
         values = values.transposed(0, 2, 1, 3)
 
         if useRope {
-            let offset = cache?.offset ?? 0
-            queries = rope(queries, offset: offset)
-            keys = rope(keys, offset: offset)
+            let offset = cache?.ropeOffset
+            queries = applyRotaryPosition(rope, to: queries, offset: offset)
+            keys = applyRotaryPosition(rope, to: keys, offset: offset)
         }
 
         var output = attentionWithCacheUpdate(

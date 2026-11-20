@@ -267,6 +267,11 @@ extension KVCacheLeaf {
                 state: requested == .fullPrecision ? .active : .skipped,
                 resolvedStrategy: .fullPrecision,
                 reason: requested == .fullPrecision ? nil : .slidingWindow)
+        case .unsupported where cache is BatchKVCache:
+            return status(
+                state: requested == .fullPrecision ? .active : .skipped,
+                resolvedStrategy: .fullPrecision,
+                reason: requested == .fullPrecision ? nil : .unsupportedShape)
         case .simple where requested == .fullPrecision:
             return status(
                 state: .active,
