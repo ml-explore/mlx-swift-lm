@@ -232,9 +232,29 @@ public enum QwenReasoningTemplateTests {
                 fourth.info?.cachedPromptTokenCount == thirdCachedCount,
                 "A second user turn lost preserved-reasoning cache reuse")
         } else {
+            // A recurrent cache cannot trim back into the reply, so the turn resumes from the
+            // checkpoint before it: the reply's prefilled `<think>`, the last matching token.
+            guard let think = tokenizer.convertTokenToId("<think>"),
+                let turnCheckpoint = firstPrompt.lastIndex(of: think)
+            else { throw IntegrationTestFailure("The first prompt has no prefilled <think>") }
             try check(
-                second.info?.cachedPromptTokenCount == 0 && model.prefills[1] == secondPrompt,
-                "A mismatching hybrid prompt was reused instead of rebuilt")
+                second.info?.cachedPromptTokenCount == turnCheckpoint
+                    && model.prefills[1] == Array(secondPrompt.dropFirst(turnCheckpoint)),
+                "A mismatching hybrid prompt did not resume from the checkpoint before the reply")
+            guard variant != .incomplete else { return }
+
+            // The second reply's call mismatches too. Its tool step resumes before that latest
+            // reply, not before the first one.
+            let third = try await collect(
+                session.streamDetails(to: [.tool(result, id: second.calls.first?.id)]))
+            let thirdPrompt = processor.prompts[2]
+            guard let stepCheckpoint = secondPrompt.lastIndex(of: think) else {
+                throw IntegrationTestFailure("The second prompt has no prefilled <think>")
+            }
+            try check(
+                third.info?.cachedPromptTokenCount == stepCheckpoint
+                    && model.prefills[2] == Array(thirdPrompt.dropFirst(stepCheckpoint)),
+                "A mismatching tool step did not resume from the checkpoint before its reply")
         }
     }
 
@@ -275,6 +295,10 @@ public enum QwenReasoningTemplateTests {
         private let eos: Int
         private var pass = -1
         private var cursor = 0
+        /// A checkpoint splits one pass's prefill into several prepares, so a pass ends only
+        /// once its script has written end-of-sequence.
+        private var passEnded = true
+        /// The tokens each pass prefilled, across all of its prepares.
         private(set) var prefills: [[Int]] = []
         private(set) var lastOffset = 0
 
@@ -293,9 +317,13 @@ public enum QwenReasoningTemplateTests {
             _ input: LMInput, cache: [any KVCache], state: LMOutput.State?,
             prefill: PrefillParameters
         ) throws -> PrepareResult {
-            pass += 1
+            if passEnded {
+                pass += 1
+                prefills.append([])
+                passEnded = false
+            }
             cursor = 0
-            prefills.append(input.text.tokens.asArray(Int.self))
+            prefills[prefills.count - 1] += input.text.tokens.asArray(Int.self)
             return .tokens(input.text)
         }
 
@@ -308,6 +336,7 @@ public enum QwenReasoningTemplateTests {
             let script = scripts[min(pass, scripts.count - 1)]
             let token = cursor < script.count ? script[cursor] : eos
             cursor += 1
+            passEnded = token == eos
             var logits = [Float](repeating: -30, count: vocabularySize)
             logits[token] = 30
             return MLXArray(logits, [1, 1, vocabularySize])

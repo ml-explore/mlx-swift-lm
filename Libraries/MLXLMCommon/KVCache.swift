@@ -4,6 +4,12 @@ import Foundation
 import MLX
 import MLXNN
 
+/// Materializes a bounded state view. A contiguous slice can still pin its source's allocation.
+func materializedCacheState(_ array: MLXArray) -> MLXArray {
+    let input = array.ndim == 0 ? array.reshaped(1) : array
+    return take(input, MLXArray(0 ..< input.dim(0)), axis: 0).reshaped(array.shape)
+}
+
 /// Offset to use with ``applyRotaryPosition(_:to:offset:)``.
 ///
 /// See ``KVCache/ropeOffset``.
@@ -1149,6 +1155,22 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         return new
     }
 
+    /// Excludes a multi-token prefill's temporary rows beyond the configured history.
+    package func copyForCheckpoint() -> any KVCache {
+        let new = copy() as! RotatingKVCache
+        if (keys?.dim(2) ?? 0) > storageCapacity,
+            let (keys, values) = retainedView(tail: storageCapacity)
+        {
+            new.keys = keys
+            new.values = values
+            new.idx = keys.dim(2)
+            new.wrappedFlag = false
+        }
+        new.keys = new.keys.map(materializedCacheState)
+        new.values = new.values.map(materializedCacheState)
+        return new
+    }
+
     /// Convert to a quantized cache.
     ///
     /// Rotating-cache quantization needs a representation that preserves temporal ordering and
@@ -1654,7 +1676,7 @@ public class ArraysCache: BaseKVCache {
     }
 
     public override func innerState() -> [MLXArray] {
-        cache.compactMap { $0 }
+        (cache + [leftPadding, lengths]).compactMap { $0 }
     }
 
     public subscript(index: Int) -> MLXArray? {
@@ -1682,6 +1704,14 @@ public class ArraysCache: BaseKVCache {
         new.offset = self.offset
         new.leftPadding = self.leftPadding
         new.lengths = self.lengths
+    }
+
+    package func copyForCheckpoint() -> any KVCache {
+        let new = copy() as! ArraysCache
+        new.cache = cache.map { $0.map(materializedCacheState) }
+        new.leftPadding = leftPadding.map(materializedCacheState)
+        new.lengths = lengths.map(materializedCacheState)
+        return new
     }
 
     internal var batchSize: Int {
@@ -2110,15 +2140,17 @@ public class CacheList: BaseKVCache {
     /// Rewrite every non-composite child while preserving its stable tree path.
     func rewriteLeaves(
         path: [Int],
+        includingAuxiliary: Bool = false,
         using transform: (KVCacheLeaf) -> KVCache
     ) {
         caches = caches.enumerated().map { index, child in
             let childPath = path + [index]
             if let list = child as? CacheList {
-                list.rewriteLeaves(path: childPath, using: transform)
+                list.rewriteLeaves(
+                    path: childPath, includingAuxiliary: includingAuxiliary, using: transform)
                 return list
             }
-            if child is any AuxiliaryKVCache {
+            if !includingAuxiliary && child is any AuxiliaryKVCache {
                 return child
             }
             let leaf = KVCacheLeaf(path: childPath, cache: child)

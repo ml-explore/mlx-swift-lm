@@ -1,5 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
+import MLX
+
 /// Immutable, resolved cache behavior for one generation request.
 ///
 /// A disabled plan is a first-class value, so generation paths do not need to
@@ -9,6 +11,11 @@ package struct KVCachePlan: Sendable, Equatable {
 
     package let configuration: KVCacheConfiguration?
     package let requestSource: KVCacheStatus.RequestSource?
+
+    /// Tile compression must run before a checkpoint captures its mutable raw tail.
+    package var requiresRealizedCheckpoint: Bool {
+        configuration?.strategy.identifier == .varianceNormalized
+    }
 
     package init(
         configuration: KVCacheConfiguration?,
@@ -346,6 +353,131 @@ package final class KVCacheStorage {
             nativeAttentionOffsetsAreAligned,
             "rewinding a committed round left the leaves and the timeline out of step")
         return rewound
+    }
+
+    /// A saved prefix from this cache's history. The caller must verify its token prefix.
+    package struct Checkpoint: Evaluatable {
+        package let processedTokenCount: Int
+        fileprivate let plan: KVCachePlan
+        fileprivate let leaves: [Leaf]
+
+        package var retainedBytes: Int {
+            innerState().reduce(0) { $0 + $1.nbytes }
+        }
+
+        package func innerState() -> [MLXArray] {
+            leaves.flatMap { leaf -> [MLXArray] in
+                switch leaf.recovery {
+                case .trim: []
+                case .copy(let copy): copy.innerState()
+                case .varianceNormalized(let checkpoint): checkpoint.innerState()
+                }
+            }
+        }
+
+        fileprivate struct Leaf {
+            let path: [Int]
+            let recovery: Recovery
+        }
+
+        fileprivate enum Recovery {
+            case trim
+            case copy(KVCache)
+            case varianceNormalized(VarianceNormalizedKVCache.Checkpoint)
+
+            func canRestore(_ leaf: KVCacheLeaf, trimming count: Int) -> Bool {
+                switch self {
+                case .trim:
+                    return leaf.checkpointStrategy == .trim && leaf.cache.maxTrimCount >= count
+                case .copy(let copy):
+                    return type(of: leaf.cache) == type(of: copy)
+                        && leaf.cache.maxSize == copy.maxSize
+                case .varianceNormalized(let checkpoint):
+                    return (leaf.cache as? VarianceNormalizedKVCache)
+                        .map { $0.canRestore(checkpoint) } ?? false
+                }
+            }
+
+            func restore(_ cache: KVCache, trimming count: Int) -> KVCache {
+                switch self {
+                case .trim:
+                    if count > 0 {
+                        precondition(cache.trim(count) == count, "a checked prefix trim failed")
+                    }
+                    return cache
+                case .copy(let copy):
+                    return copy.copy()
+                case .varianceNormalized(let checkpoint):
+                    let cache = cache as! VarianceNormalizedKVCache
+                    cache.restore(checkpoint)
+                    return cache
+                }
+            }
+        }
+    }
+
+    /// Whether a supported leaf needs more than a trim to recover an arbitrary prefix.
+    package var needsCheckpoint: Bool {
+        let strategies = KVCacheTree.leaves(in: cache, includingAuxiliary: true)
+            .map(\.checkpointStrategy)
+        return !strategies.contains(.unsupported)
+            && (plan.requiresRealizedCheckpoint || strategies.contains { $0 != .trim })
+    }
+
+    /// Copies only bounded state, including within composite caches. Unknown leaves refuse.
+    package func checkpoint() -> Checkpoint? {
+        precondition(!roundIsOpen, "cannot checkpoint while a staged round is open")
+        let leaves = KVCacheTree.leaves(in: cache, includingAuxiliary: true)
+        guard leaves.allSatisfy({ $0.checkpointStrategy != .unsupported }) else { return nil }
+        let saved = leaves.map { leaf -> Checkpoint.Leaf in
+            let recovery: Checkpoint.Recovery
+            switch leaf.checkpointStrategy {
+            case .trim: recovery = .trim
+            case .copy:
+                recovery = .copy(
+                    (leaf.cache as? RotatingKVCache)?.copyForCheckpoint()
+                        ?? (leaf.cache as? ArraysCache)?.copyForCheckpoint()
+                        ?? leaf.cache.copy())
+            case .varianceNormalized:
+                recovery = .varianceNormalized(
+                    (leaf.cache as! VarianceNormalizedKVCache).checkpoint())
+            case .unsupported: preconditionFailure("checkpoint support was checked above")
+            }
+            return Checkpoint.Leaf(path: leaf.path, recovery: recovery)
+        }
+        let checkpoint = Checkpoint(
+            processedTokenCount: processedTokenCount, plan: plan, leaves: saved)
+        asyncEval(checkpoint)
+        return checkpoint
+    }
+
+    /// Checks every path and recovery operation before changing any leaf.
+    package func canRestore(_ checkpoint: Checkpoint) -> Bool {
+        guard !roundIsOpen, checkpoint.plan == plan,
+            checkpoint.processedTokenCount <= processedTokenCount
+        else { return false }
+        let leaves = KVCacheTree.leaves(in: cache, includingAuxiliary: true)
+        guard leaves.map(\.path) == checkpoint.leaves.map(\.path) else { return false }
+        let count = processedTokenCount - checkpoint.processedTokenCount
+        return zip(leaves, checkpoint.leaves).allSatisfy { leaf, saved in
+            saved.recovery.canRestore(leaf, trimming: count)
+        }
+    }
+
+    /// Returns to `checkpoint`, or changes nothing and returns `false` when it cannot.
+    @discardableResult
+    package func restore(_ checkpoint: Checkpoint) -> Bool {
+        guard canRestore(checkpoint) else { return false }
+        let count = processedTokenCount - checkpoint.processedTokenCount
+        var restored = cache
+        var index = 0
+        KVCacheTree.rewrite(&restored, includingAuxiliary: true) { leaf in
+            defer { index += 1 }
+            return checkpoint.leaves[index].recovery.restore(leaf.cache, trimming: count)
+        }
+        cache = restored
+        processedTokenCount = checkpoint.processedTokenCount
+        return true
     }
 
     /// How much of the emitted sequence the given leaf can still describe, outside a round.

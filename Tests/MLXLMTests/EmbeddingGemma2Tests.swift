@@ -902,7 +902,10 @@ struct EmbeddingGemma2Tests {
             prepared, height: Int(upright.height), width: Int(upright.width))
         let expected = EmbeddingGemma2ImageProcessor.pixels(
             decoded, height: Int(upright.height), width: Int(upright.width))
-        #expect(actual.asArray(Float.self) == expected.asArray(Float.self))
+        // The two paths orient the same JPEG at different stages, so decoders may round them a
+        // few 8-bit steps apart. A wrong orientation moves the blue square over red: about 1.
+        let difference = abs(actual - expected).max().item(Float.self)
+        #expect(difference <= 0.05, "max difference \(difference)")
         #expect(try EmbeddingGemma2ImageProcessor.prepared(image).extent.size == image.extent.size)
     }
 
