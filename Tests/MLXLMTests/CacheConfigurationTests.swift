@@ -144,6 +144,7 @@ private func legacyStatus(cache: [KVCache], maxKVSize: Int) throws -> KVCacheSta
         status.layers.map(\.memoryBytes)
             == [attentionBytes, 0, recurrentBytes, attentionBytes])
     #expect(status.memoryBytes == 2 * attentionBytes + recurrentBytes)
+    #expect(status.checkpoint == nil)
 }
 
 // MARK: - Default LanguageModel path
