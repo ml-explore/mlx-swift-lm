@@ -872,7 +872,7 @@ private final class Inkling2Attention: Module {
             func grouped(_ x: MLXArray?) -> MLXArray? { x?.expandedDimensions(axis: 2) }
             output = referenceAttention(
                 queries: queries, positionBias: positionBias, sinks: sinks,
-                distance: masks.distance(keys: s, queries: l, ringIndex: nil),
+                distance: masks.distance(keys: s, queries: l, ringIndex: nil, keep: 0, evicted: 0),
                 scores: { q in
                     quantizedMM(
                         q, grouped(quantizedKeys.0)!, scales: grouped(quantizedKeys.1)!,
@@ -943,10 +943,12 @@ private final class Inkling2Attention: Module {
             relativeDim: relativeLogits.proj.dim(0), qkThreshold: qkThreshold,
             relativeThreshold: relativeThreshold)
         let (keys, values) = cache.update(keys: out[2], values: out[3])
+        let rotating = cache as? RotatingKVCache
         let attention = inkling2DecodeAttention(
             q: out[0], k: keys, v: values, relative: out[1], table: relativeLogits.proj,
-            sinks: p.sinks, gate: p.gate, scale: scale,
-            ringIndex: (cache as? RotatingKVCache)?.ringWriteIndex, window: window)
+            sinks: p.sinks, gate: p.gate, scale: scale, ringIndex: rotating?.ringWriteIndex,
+            window: window, keep: rotating?.preservedPrefixTokens ?? 0,
+            evicted: offset + 1 - keys.dim(2))
         return (outputProj(attention.reshaped(rows, 1, -1)), out[4], out[5])
     }
 
@@ -957,16 +959,19 @@ private final class Inkling2Attention: Module {
     ) -> MLXArray {
         let (b, l) = (queries.dim(0), queries.dim(2))
         let s = keys.dim(2)
+        let rotating = cache as? RotatingKVCache
+        let keep = rotating?.preservedPrefixTokens ?? 0
         let onGPU = Device.defaultDevice().deviceType == .gpu
         let bf16 = queries.dtype == .bfloat16 && keys.dtype == .bfloat16
         if l > 1 && onGPU && bf16 {
             return inkling2RelativeAttention(
                 q: queries, k: keys, v: values, rel: positionBias, sinks: sinks, scale: scale,
-                window: window, keyStart: MLXArray.full([b], values: MLXArray(Int32(s - end))))
+                window: window, keyStart: MLXArray.full([b], values: MLXArray(Int32(s - end))),
+                keep: keep, evicted: end - s)
         }
 
-        let ringIndex = (cache as? RotatingKVCache)?.ringWriteIndex
-        let distance = masks.distance(keys: s, queries: l, ringIndex: ringIndex)
+        let distance = masks.distance(
+            keys: s, queries: l, ringIndex: rotating?.ringWriteIndex, keep: keep, evicted: end - s)
         return referenceAttention(
             queries: queries, positionBias: positionBias, sinks: sinks, distance: distance,
             scores: { q in
@@ -1011,23 +1016,31 @@ private final class Inkling2Attention: Module {
 }
 
 /// The key distances of one forward pass, shared by the layers whose caches agree.
-private final class Inkling2DecodeMasks {
+final class Inkling2DecodeMasks {
     private var distances = [String: MLXArray]()
 
     /// int32 `[L, S]` (`[S]` for one query): each query's distance to each key.
-    func distance(keys: Int, queries: Int, ringIndex: Int?) -> MLXArray {
-        let key = "\(keys):\(queries):\(ringIndex ?? -1)"
+    ///
+    /// The first `keep` keys are pinned and `evicted` positions older than their slots.
+    func distance(keys: Int, queries: Int, ringIndex: Int?, keep: Int, evicted: Int) -> MLXArray {
+        let key = "\(keys):\(queries):\(ringIndex ?? -1):\(keep):\(evicted)"
         if let cached = distances[key] { return cached }
         let k = MLXArray.arange(keys, dtype: .int32)
-        let result: MLXArray
-        if let ringIndex {
-            // A decode step wrote the newest key at ringIndex - 1.
-            result = (MLXArray(Int32(ringIndex - 1 + keys)) - k) % Int32(keys)
-        } else if queries == 1 {
-            result = MLXArray(Int32(keys - 1)) - k
+        let slots: MLXArray
+        if queries == 1 {
+            slots = MLXArray(Int32(keys - 1)) - k
         } else {
             let q = MLXArray.arange(queries, dtype: .int32) + Int32(keys - queries)
-            result = q[0..., .newAxis] - k[.newAxis, 0...]
+            slots = q[0..., .newAxis] - k[.newAxis, 0...]
+        }
+        var result = slots
+        if let ringIndex {
+            // A decode step wrote the newest key at ringIndex - 1 of the ring after the pinned keys.
+            let ring = keys - keep
+            result = (MLXArray(Int32(ringIndex - 1 + ring)) - k) % Int32(ring)
+        }
+        if keep > 0 {
+            result = which(k .< Int32(keep), slots + Int32(evicted), result)
         }
         distances[key] = result
         return result
@@ -1810,12 +1823,6 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
 
     /// Each layer visit has its own attention cache and the states of its four convolutions.
     public func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
-        if let capacity = try parameters?.effectiveKVCacheCapacity(),
-            capacity.preservedPrefixTokens > 0
-        {
-            throw VLMError.processing(
-                "Inkling 2 does not support preserved prefixes in rotating KV caches")
-        }
         let text = config.textConfiguration
         return try text.layerVisits.map { layer in
             let attention: KVCache =

@@ -155,8 +155,13 @@ struct Inkling2KernelTests {
 
     @Test(
         "Prefill attention matches the reference",
-        arguments: [(window: 0, cached: 0), (window: 16, cached: 0), (window: 16, cached: 23)])
-    func prefillAttention(window: Int, cached: Int) {
+        arguments: [
+            (window: 0, cached: 0, keep: 0, evicted: 0),
+            (window: 16, cached: 0, keep: 0, evicted: 0),
+            (window: 16, cached: 23, keep: 0, evicted: 0),
+            (window: 0, cached: 23, keep: 4, evicted: 3),
+        ])
+    func prefillAttention(window: Int, cached: Int, keep: Int, evicted: Int) {
         MLXRandom.seed(2)
         let (b, hq, hkv, l, d, extent) = (1, 4, 2, 40, 64, 24)
         let s = cached + l
@@ -168,9 +173,12 @@ struct Inkling2KernelTests {
 
         let out = inkling2RelativeAttention(
             q: q, k: k, v: v, rel: rel, sinks: sinks, scale: 0.125, window: window,
-            keyStart: MLXArray([Int32(0)]))
-        let queries = MLXArray.arange(l, dtype: .int32) + Int32(s - l)
-        let distance = queries[0..., .newAxis] - MLXArray.arange(s, dtype: .int32)[.newAxis]
+            keyStart: MLXArray([Int32(-evicted)]), keep: keep, evicted: evicted)
+        // The pinned keys hold positions 0 ..< keep and the others end at the last query.
+        let queries = MLXArray.arange(l, dtype: .int32) + Int32(s - l + evicted)
+        let slots = MLXArray.arange(s, dtype: .int32)
+        let positions = which(slots .< Int32(keep), slots, slots + Int32(evicted))
+        let distance = queries[0..., .newAxis] - positions[.newAxis]
         let expected = referenceRelativeAttention(
             q: q, k: k, v: v, rel: rel, sinks: sinks, scale: 0.125, window: window,
             distance: distance)
@@ -180,13 +188,16 @@ struct Inkling2KernelTests {
     @Test(
         "Decode attention matches the reference",
         arguments: [
-            (keys: 37, ring: false, window: 0),
-            (keys: 37, ring: true, window: 0),
-            (keys: 64, ring: true, window: 48),
-            (keys: 3000, ring: false, window: 0),
-            (keys: 1500, ring: true, window: 1100),
+            (keys: 37, ring: false, window: 0, keep: 0, evicted: 0),
+            (keys: 37, ring: true, window: 0, keep: 0, evicted: 0),
+            (keys: 64, ring: true, window: 48, keep: 0, evicted: 0),
+            (keys: 3000, ring: false, window: 0, keep: 0, evicted: 0),
+            (keys: 1500, ring: true, window: 1100, keep: 0, evicted: 0),
+            (keys: 37, ring: false, window: 0, keep: 4, evicted: 2),
+            (keys: 37, ring: true, window: 0, keep: 4, evicted: 2),
+            (keys: 3000, ring: true, window: 0, keep: 4, evicted: 900),
         ])
-    func decodeAttention(keys s: Int, ring: Bool, window: Int) {
+    func decodeAttention(keys s: Int, ring: Bool, window: Int, keep: Int, evicted: Int) {
         MLXRandom.seed(3)
         let (b, hq, hkv, d, extent) = (2, 6, 2, 64, 40)
         let q = (MLXRandom.normal([b, hq, 1, d]) * 0.3).asType(.bfloat16)
@@ -201,21 +212,27 @@ struct Inkling2KernelTests {
             axis: 1)
         let sinks = MLXRandom.normal([b, 1, hq]).asType(.bfloat16)
 
-        // A ring holds temporal position t at slot (ringIndex + t) % S.
+        // The pinned keys come first; the ring after them holds its oldest key at ringIndex.
         let ringIndex = ring ? 11 : nil
         var ringK = k
         var ringV = v
         if let ringIndex {
-            let order = MLXArray((0 ..< s).map { Int32(($0 - ringIndex + s) % s) })
+            let n = s - keep
+            let order = MLXArray(
+                (0 ..< s).map { Int32($0 < keep ? $0 : keep + ($0 - ringIndex + n) % n) })
             ringK = k.take(order, axis: 2)
             ringV = v.take(order, axis: 2)
         }
         let gate = (MLXRandom.normal([b, 1, hq * d]) * 0.5).asType(.bfloat16)
         let out = inkling2DecodeAttention(
             q: q.squeezed(axis: 2), k: ringK, v: ringV, relative: relative, table: table,
-            sinks: sinks, gate: gate, scale: 0.125, ringIndex: ringIndex, window: window)
+            sinks: sinks, gate: gate, scale: 0.125, ringIndex: ringIndex, window: window,
+            keep: keep, evicted: evicted)
 
-        let distance = (MLXArray(Int32(s - 1)) - MLXArray.arange(s, dtype: .int32))[.newAxis]
+        let slots = MLXArray.arange(s, dtype: .int32)
+        let distance =
+            (MLXArray(Int32(s - 1)) - slots + which(slots .< Int32(keep), Int32(evicted), Int32(0)))[
+                .newAxis]
         let expected = referenceRelativeAttention(
             q: q, k: k, v: v, rel: rel, sinks: sinks, scale: 0.125, window: window,
             distance: distance)
@@ -556,15 +573,40 @@ struct Inkling2ModelTests {
         return model
     }
 
-    @Test("Rotating cache capacity cannot preserve a prefix")
-    func rotatingCacheCapacity() throws {
-        let model = try Self.makeModel()
-        let capacity = try KVCacheConfiguration.Capacity(maxTokens: 16, preservedPrefixTokens: 4)
-        let parameters = GenerateParameters(kvCache: .init(capacity: capacity))
-        #expect(throws: VLMError.self) { try model.newCache(parameters: parameters) }
-        let tailOnly = try KVCacheConfiguration.Capacity(maxTokens: 16, preservedPrefixTokens: 0)
-        let caches = try model.newCache(parameters: .init(kvCache: .init(capacity: tailOnly)))
-        #expect(!caches.isEmpty)
+    @Test("Pinned keys keep their positions in the reference distances")
+    func pinnedDistances() {
+        let masks = Inkling2DecodeMasks()
+        let ring = masks.distance(keys: 7, queries: 1, ringIndex: 6, keep: 2, evicted: 10)
+        #expect(ring.asArray(Int32.self) == [16, 15, 3, 2, 1, 0, 4])
+        let prefill = masks.distance(keys: 6, queries: 2, ringIndex: nil, keep: 2, evicted: 3)
+        #expect(prefill.asArray(Int32.self) == [7, 6, 2, 1, 0, -1, 8, 7, 3, 2, 1, 0])
+    }
+
+    @Test(
+        "A pinned prefix reads the same through the ring and the rewind view",
+        arguments: [false, true])
+    func pinnedPrefix(bfloat16: Bool) throws {
+        let model = try Self.makeModel(bfloat16: bfloat16)
+        let tokens = MLXArray((0 ..< 30).map { Int32(($0 * 7 + 3) % 48) }).reshaped(1, -1)
+        let capacity = try KVCacheConfiguration.Capacity(maxTokens: 12, preservedPrefixTokens: 4)
+        func decode(rewind: Int?) throws -> [MLXArray] {
+            let configuration = KVCacheConfiguration(
+                capacity: capacity, rewind: try rewind.map { try .init(maxTokens: $0) })
+            let cache = try model.newCache(parameters: .init(kvCache: configuration))
+            try validateKVCacheCompatibility(cache, configuration: configuration)
+            _ = model(tokens[0..., ..<5], cache: cache)
+            return (5 ..< 30).map { position in
+                let step = model(tokens[0..., position ..< (position + 1)], cache: cache)
+                eval(step)
+                return step
+            }
+        }
+        let ring = try decode(rewind: nil)
+        let view = try decode(rewind: 8)
+        let tolerance: Float = bfloat16 ? 0.1 : 1e-2
+        for (position, (a, b)) in zip(5..., zip(ring, view)) {
+            #expect(maxDifference(a, b) < tolerance, "position \(position)")
+        }
     }
 
     @Test("Decoding through the caches matches the full-sequence forward")

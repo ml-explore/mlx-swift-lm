@@ -185,6 +185,8 @@ private let relativeAttentionSource = """
         constexpr int LDV = D + 8;
         const int L = sizes[0];
         const int S = sizes[1];
+        const int keep = sizes[2];
+        const int evicted = sizes[3];
         const uint tid = thread_position_in_threadgroup.x;
         const uint sg = simdgroup_index_in_threadgroup;
         const uint lane = thread_index_in_simdgroup;
@@ -273,7 +275,7 @@ private let relativeAttentionSource = """
             for (int kb = 0; kb < BK / 8; ++kb) {
                 for (int e = 0; e < 2; ++e) {
                     const int key = k0 + kb * 8 + fn + e;
-                    const int d = diag - key;
+                    const int d = diag - key + (key < keep ? evicted : 0);
                     const bool visible = row_ok && d >= 0 && key >= start
                         && (WINDOW == 0 || d < WINDOW);
                     float s = -INFINITY;
@@ -335,10 +337,11 @@ private let relativeAttentionSource = """
 ///   - sinks: `[B, L, Hq]`.
 ///   - window: the sliding window, or 0 for full attention.
 ///   - keyStart: int32 `[B]`, the first visible key of each row.
+///   - keep: the pinned keys at the front, `evicted` positions older than their slots.
 /// - Returns: `[B, L, Hq, D]`.
 func inkling2RelativeAttention(
     q: MLXArray, k: MLXArray, v: MLXArray, rel: MLXArray, sinks: MLXArray,
-    scale: Float, window: Int, keyStart: MLXArray
+    scale: Float, window: Int, keyStart: MLXArray, keep: Int, evicted: Int
 ) -> MLXArray {
     let (b, hq, l, d) = (q.dim(0), q.dim(1), q.dim(2), q.dim(3))
     let (hkv, s) = (k.dim(1), k.dim(2))
@@ -347,7 +350,8 @@ func inkling2RelativeAttention(
     return Inkling2Kernels.shared.relativeAttention(
         [
             q, k, v, contiguous(rel), contiguous(sinks.asType(.float32)),
-            contiguous(keyStart.asType(.int32)), MLXArray([Int32(l), Int32(s)]),
+            contiguous(keyStart.asType(.int32)),
+            MLXArray([Int32(l), Int32(s), Int32(keep), Int32(evicted)]),
             MLXArray(scale),
         ],
         template: [
@@ -713,6 +717,18 @@ func inkling2RowConvolution(
 
 // MARK: - Decode attention
 
+/// The distance of slot `j` from the newest key. The first `keep` slots are pinned and
+/// `evicted` positions older than their slots. A wrapped ring over the other slots holds the
+/// newest key at `ring - 1`; `ring` is negative when the keys are oldest first.
+private let keyDistanceHeader = """
+    inline int key_distance(int j, int S, int ring, int keep, int evicted) {
+        if (j < keep) {
+            return S - 1 - j + evicted;
+        }
+        return ring >= 0 ? (ring - 1 - j + S - keep) % (S - keep) : S - 1 - j;
+    }
+    """
+
 /// One query per head over all keys. The bias of each distance comes from the head's relative
 /// state and the projection table; the output is gated by `sigmoid(gate)`.
 private let relativeDecodeSource = """
@@ -726,6 +742,8 @@ private let relativeDecodeSource = """
         const uint sg = simdgroup_index_in_threadgroup;
         const int S = params[0];
         const int ring = params[1];
+        const int keep = params[2];
+        const int evicted = params[3];
 
         threadgroup float bias[R];
         const device T* rq = rel + size_t(bh) * DR;
@@ -752,8 +770,7 @@ private let relativeDecodeSource = """
             acc[i] = 0.0f;
         }
         for (int j = int(sg); j < S; j += NSG) {
-            // A wrapped ring holds the newest key at ring - 1.
-            const int d = ring >= 0 ? (ring - 1 - j + S) % S : S - 1 - j;
+            const int d = key_distance(j, S, ring, keep, evicted);
             if (WINDOW > 0 && d >= WINDOW) {
                 continue;
             }
@@ -824,13 +841,15 @@ private let groupedDecodeSplitSource = """
         const uint sg = simdgroup_index_in_threadgroup;
         const int S = params[0];
         const int ring = params[1];
+        const int keep = params[2];
+        const int evicted = params[3];
         const int k0 = split * PER;
         const int k1 = min(S, k0 + PER);
 
         threadgroup float bias[G * PER];
         for (int t = tid; t < G * PER; t += NSG * 32) {
             const int j = k0 + t % PER;
-            const int d = ring >= 0 ? (ring - 1 - j + S) % S : S - 1 - j;
+            const int d = key_distance(j, S, ring, keep, evicted);
             if (j < k1 && d < R) {
                 const device T* rq = rel + (size_t(b) * HQ + kv_head * G + t / PER) * DR;
                 float s = 0.0f;
@@ -857,7 +876,7 @@ private let groupedDecodeSplitSource = """
         const device T* k_head = k + b * k_strides[0] + kv_head * k_strides[1] + lane * E;
         const device T* v_head = v + b * v_strides[0] + kv_head * v_strides[1] + lane * E;
         for (int j = k0 + int(sg); j < k1; j += NSG) {
-            const int d = ring >= 0 ? (ring - 1 - j + S) % S : S - 1 - j;
+            const int d = key_distance(j, S, ring, keep, evicted);
             if (WINDOW > 0 && d >= WINDOW) {
                 continue;
             }
@@ -959,15 +978,17 @@ private let relativeDecodeReduceSource = """
 ///   - gate: `[B, 1, Hq * D]` with a contiguous last axis.
 ///   - ringIndex: the slot after the newest key when the keys are a wrapped ring.
 ///   - window: the sliding window, or 0 for full attention.
+///   - keep: the pinned keys at the front, `evicted` positions older than their slots.
 /// - Returns: `[B, Hq * D]`.
 func inkling2DecodeAttention(
     q: MLXArray, k: MLXArray, v: MLXArray, relative: MLXArray, table: MLXArray,
-    sinks: MLXArray, gate: MLXArray, scale: Float, ringIndex: Int?, window: Int
+    sinks: MLXArray, gate: MLXArray, scale: Float, ringIndex: Int?, window: Int, keep: Int,
+    evicted: Int
 ) -> MLXArray {
     let (b, hq, d) = (q.dim(0), q.dim(1), q.dim(2))
     let (hkv, s) = (k.dim(1), k.dim(2))
     let kernels = Inkling2DecodeKernels.shared
-    let params = MLXArray([Int32(s), Int32(ringIndex ?? -1)])
+    let params = MLXArray([Int32(s), Int32(ringIndex ?? -1), Int32(keep), Int32(evicted)])
     let inputs: [MLXArray] = [
         q, k, v, relative, table, sinks, gate, params, MLXArray(scale),
     ]
@@ -1814,11 +1835,11 @@ private final class Inkling2DecodeKernels: @unchecked Sendable {
         let inputs = ["q", "k", "v", "rel", "table", "sinks", "gate", "params", "scale"]
         single = MLXFast.metalKernel(
             name: "inkling2_decode_attention", inputNames: inputs, outputNames: ["out"],
-            source: relativeDecodeSource, ensureRowContiguous: false)
+            source: relativeDecodeSource, header: keyDistanceHeader, ensureRowContiguous: false)
         split = MLXFast.metalKernel(
             name: "inkling2_decode_attention_split", inputNames: inputs,
             outputNames: ["partial", "stats"], source: groupedDecodeSplitSource,
-            ensureRowContiguous: false)
+            header: keyDistanceHeader, ensureRowContiguous: false)
         reduce = MLXFast.metalKernel(
             name: "inkling2_decode_attention_reduce",
             inputNames: ["partial", "stats", "sinks", "gate"], outputNames: ["out"],
