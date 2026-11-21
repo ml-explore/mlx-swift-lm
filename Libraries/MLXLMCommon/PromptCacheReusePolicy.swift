@@ -74,8 +74,8 @@ struct PromptCacheTurn: Sendable {
     /// path cannot account for.
     var carriesPreparedMedia: Bool = false
 
-    /// The prepared input carries an explicit attention mask; a partial prefill
-    /// would apply it against the wrong positions.
+    /// The prepared input carries a mask that hides positions; a partial prefill
+    /// would apply it against the wrong positions. An all-ones mask does not count.
     var carriesAttentionMask: Bool = false
 
     /// Per-call model state (e.g. M-RoPE deltas) is carried across turns. Such
