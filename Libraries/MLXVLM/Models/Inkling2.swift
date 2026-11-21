@@ -1368,7 +1368,7 @@ private final class Inkling2DecoderLayer: Module {
                     first: messages.1, down: controllers.down[..<3],
                     forget: controllers.forget[..<3], gain: controllers.gain[..<3],
                     normWeight: attentionNorms, eps: eps, f32Copy: false)
-                inputs = (0 ..< 3).map { out[$0].reshaped(rows, 1, dims) }
+                inputs = (0 ..< 3).map { out[$0 ..< ($0 + 1)].reshaped(rows, 1, dims) }
             } else {
                 let readout = mix.readout.reshaped(rows, 1, -1, dims)
                 inputs = (0 ..< readout.dim(2)).map { readout[0..., 0..., $0, 0...] }
@@ -1781,7 +1781,7 @@ extension Inkling2: LoRAModel {
 
 extension Inkling2: ModelComponentsProviding {
     public var modelComponents: [ModelComponent: [CheckpointComponent]] {
-        config.visionConfiguration == nil ? [:] : [.vision: .modules("vision_tower")]
+        [.vision: .modules("vision_tower")]
     }
 
     public var onDemandComponents: [AnyOnDemandComponent] {

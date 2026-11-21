@@ -241,6 +241,84 @@ struct Inkling2KernelTests {
             indices.asType(.int32).asArray(Int32.self) == order.asType(.int32).asArray(Int32.self))
         #expect(maxDifference(weights, expected) < 1e-5)
     }
+
+    @Test("Message controllers match the gated blend", arguments: [(3, false), (1, true)])
+    func messageControllers(streams: Int, f32Copy: Bool) {
+        MLXRandom.seed(6)
+        let (rows, d, rank, first) = (2, 320, 8, 1)
+        let inputs = MLXRandom.normal([streams, rows, d])
+        let messages = MLXRandom.normal([rows, 6, d])
+        let down = (MLXRandom.normal([streams, rank, 2 * d]) * 0.1).asType(.bfloat16)
+        let forget = (MLXRandom.normal([streams, rank, d]) * 0.3).asType(.bfloat16)
+        let gain = (MLXRandom.normal([streams, rank, d]) * 0.3).asType(.bfloat16)
+        let normWeight = MLXRandom.uniform(0.5 ..< 1.5, [streams, d]).asType(.bfloat16)
+        let (out, outF32) = inkling2MessageControllers(
+            inputs: inputs, messages: messages, first: first, down: down, forget: forget,
+            gain: gain, normWeight: normWeight, eps: 1e-6, f32Copy: f32Copy)
+
+        func rmsNormed(_ x: MLXArray) -> MLXArray {
+            x * rsqrt(x.square().mean(axis: -1, keepDims: true) + 1e-6)
+        }
+        let message = messages[0..., first ..< (first + streams), 0...].transposed(1, 0, 2)
+        let pair = concatenated([rmsNormed(inputs), rmsNormed(message)], axis: -1)
+            .asType(.bfloat16).asType(.float32)
+        let h = matmul(pair, down.asType(.float32).transposed(0, 2, 1))
+            .asType(.bfloat16).asType(.float32)
+        let blend =
+            (1 - tanh(matmul(h, forget.asType(.float32)))) * inputs
+            + tanh(matmul(h, gain.asType(.float32))) * message
+        let expected = normWeight.asType(.float32).expandedDimensions(axis: 1) * rmsNormed(blend)
+
+        #expect(out.dtype == .bfloat16)
+        #expect(maxDifference(out, expected) < 2e-2)
+        #expect((outF32 != nil) == f32Copy)
+        if let outF32 {
+            #expect(maxDifference(outF32, out) == 0)
+        }
+    }
+
+    @Test("The depth mix matches the softmax over the blocks and the residual")
+    func depthMix() {
+        MLXRandom.seed(7)
+        let (rows, d, k, q) = (2, 320, 3, 3)
+        let blocks = MLXRandom.normal([k, rows, d])
+        let base = MLXRandom.normal([rows, d]).asType(.bfloat16)
+        let x = MLXRandom.normal([rows, d]).asType(.bfloat16)
+        let state = MLXRandom.normal([rows, 3, d]).asType(.bfloat16)
+        let weight = (MLXRandom.normal([d, 4, 1]) * 0.5).asType(.bfloat16)
+        let queries = MLXRandom.normal([q, d]) * 0.2
+        let normWeight = MLXRandom.uniform(0.5 ..< 1.5, [q, d]).asType(.bfloat16)
+        let mix = inkling2DepthMix(
+            blocks: blocks, base: base, convolution: (x, state, weight), queries: queries,
+            normWeight: normWeight, f32Copy: true, eps: 1e-6)
+
+        let window = concatenated([state, x.expandedDimensions(axis: 1)], axis: 1)
+            .asType(.float32)
+        let taps = weight.asType(.float32).reshaped(d, 4).transposed()
+        let convolved = (window * taps).sum(axis: 1).asType(.bfloat16).asType(.float32)
+        let residual =
+            base.asType(.float32)
+            + ((convolved + x.asType(.float32)) / Float(5).squareRoot())
+            .asType(.bfloat16).asType(.float32)
+        let normed = residual * rsqrt(residual.square().mean(axis: -1, keepDims: true) + 1e-6)
+        let sources = concatenated([blocks, normed.expandedDimensions(axis: 0)])
+        let weights = softmax(
+            matmul(sources, queries.transposed()) / Float(d).squareRoot(), axis: 0)
+        let readout =
+            (weights.expandedDimensions(axis: -1)
+            * sources.expandedDimensions(axis: 2)).sum(axis: 0)
+        let expected =
+            normWeight.asType(.float32)
+            * readout * rsqrt(readout.square().mean(axis: -1, keepDims: true) + 1e-6)
+
+        #expect(maxDifference(mix.residual, residual) < 1e-4)
+        #expect(maxDifference(mix.normed, normed) < 1e-4)
+        #expect(maxDifference(mix.readout, expected) < 2e-2)
+        #expect(maxDifference(mix.readoutF32!, mix.readout) == 0)
+        let expectedState = concatenated(
+            [state[0..., 1...], x.expandedDimensions(axis: 1)], axis: 1)
+        #expect(maxDifference(mix.state!, expectedState) == 0)
+    }
 }
 
 // MARK: - Model
@@ -270,8 +348,9 @@ struct Inkling2ModelTests {
         }
         """
 
-    /// A tiny model with random weights and NVFP4 experts.
-    static func makeModel() throws -> Inkling2 {
+    /// A tiny model with random weights and NVFP4 experts. In bfloat16, the tensors that the
+    /// checkpoint stores in float32 stay float32, and the model is prepared as after a load.
+    static func makeModel(bfloat16: Bool = false) throws -> Inkling2 {
         let config = try JSONDecoder().decode(
             Inkling2Configuration.self, from: Data(tinyJSON.utf8))
         let model = Inkling2(config)
@@ -293,8 +372,21 @@ struct Inkling2ModelTests {
             parameters[key] = weight
             parameters["\(prefix).scales"] = scales
         }
+        if bfloat16 {
+            let float32Suffixes = [
+                ".query", "mlp.gate.weight", "e_score_correction_bias",
+                "forget_gate_proj.weight", "message_gate_proj.weight", ".global_scale",
+            ]
+            for (key, value) in parameters
+            where value.dtype == .float32 && !float32Suffixes.contains(where: key.hasSuffix) {
+                parameters[key] = value.asType(.bfloat16)
+            }
+        }
         try model.update(
             parameters: ModuleParameters.unflattened(parameters), verify: .noUnusedKeys)
+        if bfloat16 {
+            try model.prepare()
+        }
         eval(model)
         return model
     }
@@ -329,6 +421,22 @@ struct Inkling2ModelTests {
                 maxDifference(step, full[0..., position ..< (position + 1)]) < 1e-2,
                 "position \(position)")
         }
+    }
+
+    @Test("The bfloat16 decode kernels match the full-sequence forward")
+    func bfloat16DecodeKernels() throws {
+        let model = try Self.makeModel(bfloat16: true)
+        let tokens = MLXArray((0 ..< 21).map { Int32(($0 * 7 + 3) % 48) }).reshaped(1, -1)
+        let full = model(tokens, cache: nil)
+
+        let cache = try model.newCache(parameters: nil)
+        _ = model(tokens[0..., ..<5], cache: cache)
+        var worst: Float = 0
+        for position in 5 ..< 21 {
+            let step = model(tokens[0..., position ..< (position + 1)], cache: cache)
+            worst = max(worst, maxDifference(step, full[0..., position ..< (position + 1)]))
+        }
+        #expect(worst < 0.1)
     }
 
     @Test("Chunked prefill matches one prefill")

@@ -597,19 +597,21 @@ private let depthMixSource = """
             red[N * Q][sg] = ssv;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        float total = 0.0f;
-        for (int s = 0; s < NR; s++) {
-            total += red[N * Q][s];
-        }
-        const float inv = metal::precise::rsqrt(total / D + eps);
-        float w[N * Q];
-        for (int i = 0; i < N * Q; i++) {
+        // One thread per sum, so no thread reads every partial.
+        threadgroup float totals[N * Q + 1];
+        if (tid <= N * Q) {
             float t = 0.0f;
             for (int s = 0; s < NR; s++) {
-                t += red[i][s];
+                t += red[tid][s];
             }
-            w[i] = t * scale * (i >= K * Q ? inv : 1.0f);
+            totals[tid] = t;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        const float inv = metal::precise::rsqrt(totals[N * Q] / D + eps);
+        float w[N * Q];
+        for (int i = 0; i < N * Q; i++) {
+            w[i] = totals[i] * scale * (i >= K * Q ? inv : 1.0f);
         }
         for (int j = 0; j < Q; j++) {
             float m = -INFINITY;
@@ -659,13 +661,17 @@ private let depthMixSource = """
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        float invs[Q];
-        for (int j = 0; j < Q; j++) {
+        if (tid < Q) {
             float t = 0.0f;
             for (int s = 0; s < NR; s++) {
-                t += red[j][s];
+                t += red[tid][s];
             }
-            invs[j] = metal::precise::rsqrt(t / D + eps);
+            totals[tid] = metal::precise::rsqrt(t / D + eps);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float invs[Q];
+        for (int j = 0; j < Q; j++) {
+            invs[j] = totals[j];
         }
         for (int d = tid; d < D; d += TG) {
             for (int j = 0; j < Q; j++) {
@@ -878,7 +884,7 @@ func inkling2AttentionPrologue(
 // MARK: - Message controllers
 
 /// The rank-`R` projection `h` of the RMS-normalized `[input, message]` pair of each stream.
-/// Each threadgroup normalizes one pair and computes `CH` of its outputs.
+/// Each threadgroup normalizes one pair and computes `TG / 32` of its outputs.
 private let messageDownSource = """
         constexpr int NR = TG / 32;
         const uint unit = threadgroup_position_in_grid.x;
@@ -927,8 +933,10 @@ private let messageDownSource = """
         }
         const device T* w = down + (size_t(s) * R + o) * 2 * D;
         float acc = 0.0f;
-        for (int k = lane; k < 2 * D; k += 32) {
-            acc += float(pair[k]) * float(w[k]);
+        for (int k = lane * 4; k < 2 * D; k += 128) {
+            for (int e = 0; e < 4; e++) {
+                acc += float(pair[k + e]) * float(w[k + e]);
+            }
         }
         acc = simd_sum(acc);
         if (lane == 0) {
@@ -936,58 +944,74 @@ private let messageDownSource = """
         }
     """
 
-/// `(1 - tanh(forget(h))) * input + tanh(gain(h)) * message`, then its RMS norm with the
-/// weight of the stream.
+/// `(1 - tanh(forget(h))) * input + tanh(gain(h)) * message` for `TG` channels of one stream,
+/// and the sum of their squares.
 private let messageBlendSource = """
-        constexpr int NR = TG / 32;
         const uint unit = threadgroup_position_in_grid.x;
+        const uint chunk = threadgroup_position_in_grid.y;
+        const uint chunks = threadgroups_per_grid.y;
         const uint rows = threadgroups_per_grid.x / S;
         const uint s = unit / rows;
         const uint row = unit % rows;
         const uint tid = thread_position_in_threadgroup.x;
         const uint lane = thread_index_in_simdgroup;
         const uint sg = simdgroup_index_in_threadgroup;
+        const size_t unit_row = size_t(s) * rows + row;
         const device float* in = input + (size_t(SHARED ? 0 : s) * rows + row) * D;
         const device float* msg = messages + (size_t(row) * MSTRIDE + first + s) * D;
 
         threadgroup float hv[R];
-        if (tid < R) {
-            hv[tid] = h[(size_t(s) * rows + row) * R + tid];
+        for (int r = tid; r < R; r += TG) {
+            hv[r] = h[unit_row * R + r];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        threadgroup float outs[D];
-        float ss = 0.0f;
-        const device T* wf = forget + size_t(s) * R * D;
-        const device T* wg = gain + size_t(s) * R * D;
-        for (int d = tid; d < D; d += TG) {
+        const int d = chunk * TG + tid;
+        float o = 0.0f;
+        if (d < D) {
+            const device T* wf = forget + size_t(s) * R * D + d;
+            const device T* wg = gain + size_t(s) * R * D + d;
             float f = 0.0f;
             float g = 0.0f;
             for (int r = 0; r < R; r++) {
-                f += hv[r] * float(wf[r * D + d]);
-                g += hv[r] * float(wg[r * D + d]);
+                f += hv[r] * float(wf[r * D]);
+                g += hv[r] * float(wg[r * D]);
             }
-            const float o = (1.0f - metal::precise::tanh(f)) * in[d]
-                + metal::precise::tanh(g) * msg[d];
-            outs[d] = o;
-            ss += o * o;
+            o = (1.0f - metal::precise::tanh(f)) * in[d] + metal::precise::tanh(g) * msg[d];
+            blend[unit_row * D + d] = o;
         }
-        threadgroup float red[NR];
-        ss = simd_sum(ss);
+        threadgroup float red[TG / 32];
+        const float ss = simd_sum(o * o);
         if (lane == 0) {
             red[sg] = ss;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        ss = 0.0f;
-        for (int i = 0; i < NR; i++) {
-            ss += red[i];
+        if (tid == 0) {
+            float t = 0.0f;
+            for (int i = 0; i < TG / 32; i++) {
+                t += red[i];
+            }
+            sums[unit_row * chunks + chunk] = t;
         }
-        const float inv = metal::precise::rsqrt(ss / D + eps[0]);
+    """
+
+/// The RMS norm of each blended stream with the weight of the stream.
+private let messageNormSource = """
+        const uint unit = threadgroup_position_in_grid.x;
+        const uint rows = threadgroups_per_grid.x / S;
+        const uint s = unit / rows;
+        const uint tid = thread_position_in_threadgroup.x;
+        float t = 0.0f;
+        for (int c = 0; c < C; c++) {
+            t += sums[size_t(unit) * C + c];
+        }
+        const float inv = metal::precise::rsqrt(t / D + eps[0]);
         for (int d = tid; d < D; d += TG) {
-            const T y = T(float(norm_weight[(NW == 1 ? 0 : s) * D + d]) * (outs[d] * inv));
-            out[(size_t(s) * rows + row) * D + d] = y;
+            const size_t i = size_t(unit) * D + d;
+            const T y = T(float(norm_weight[(NW == 1 ? 0 : s) * D + d]) * (blend[i] * inv));
+            out[i] = y;
             if (F32_COPY) {
-                out_f32[(size_t(s) * rows + row) * D + d] = float(y);
+                out_f32[i] = float(y);
             }
         }
     """
@@ -1009,21 +1033,32 @@ func inkling2MessageControllers(
 ) -> (MLXArray, MLXArray?) {
     let (streams, rank) = (down.dim(0), down.dim(1))
     let (rows, d) = (messages.dim(0), messages.dim(2))
-    let threads = 1024
+    // Small threadgroups spread the weight reads over every GPU core.
+    let threads = 256
+    let chunks = (d + threads - 1) / threads
     let template: [(String, any KernelTemplateArg)] = [
         ("T", down.dtype), ("D", d), ("S", streams), ("R", rank), ("TG", threads),
         ("SHARED", inputs.dim(0) == 1 && streams > 1), ("MSTRIDE", messages.dim(1)),
-        ("NW", normWeight.dim(0)), ("F32_COPY", f32Copy),
     ]
     let kernels = Inkling2DecodeKernels.shared
     let firstArray = MLXArray(Int32(first))
     let h = kernels.messageDown(
         [inputs, messages, firstArray, down], template: template,
-        grid: (streams * rows * threads, (rank + 31) / 32, 1), threadGroup: (threads, 1, 1),
+        grid: (streams * rows * threads, (rank + threads / 32 - 1) / (threads / 32), 1),
+        threadGroup: (threads, 1, 1),
         outputShapes: [[streams, rows, rank]], outputDTypes: [.float32])[0]
-    let out = kernels.messageBlend(
-        [inputs, messages, firstArray, h, forget, gain, normWeight, MLXArray([eps])],
-        template: template, grid: (streams * rows * threads, 1, 1), threadGroup: (threads, 1, 1),
+    let blend = kernels.messageBlend(
+        [inputs, messages, firstArray, h, forget, gain], template: template,
+        grid: (streams * rows * threads, chunks, 1), threadGroup: (threads, 1, 1),
+        outputShapes: [[streams, rows, d], [streams, rows, chunks]],
+        outputDTypes: [.float32, .float32])
+    let out = kernels.messageNorm(
+        [blend[0], blend[1], normWeight, MLXArray([eps])],
+        template: [
+            ("T", down.dtype), ("D", d), ("S", streams), ("C", chunks), ("TG", threads),
+            ("NW", normWeight.dim(0)), ("F32_COPY", f32Copy),
+        ],
+        grid: (streams * rows * threads, 1, 1), threadGroup: (threads, 1, 1),
         outputShapes: [[streams, rows, d], f32Copy ? [streams, rows, d] : [1]],
         outputDTypes: [down.dtype, .float32])
     return (out[0], f32Copy ? out[1] : nil)
@@ -1085,6 +1120,7 @@ private final class Inkling2DecodeKernels: @unchecked Sendable {
     let depthMix: MLXFast.MLXFastKernel
     let messageDown: MLXFast.MLXFastKernel
     let messageBlend: MLXFast.MLXFastKernel
+    let messageNorm: MLXFast.MLXFastKernel
 
     private init() {
         let inputs = ["q", "k", "v", "rel", "table", "sinks", "gate", "params", "scale"]
@@ -1123,10 +1159,11 @@ private final class Inkling2DecodeKernels: @unchecked Sendable {
             outputNames: ["h"], source: messageDownSource)
         messageBlend = MLXFast.metalKernel(
             name: "inkling2_message_blend",
-            inputNames: [
-                "input", "messages", "first", "h", "forget", "gain", "norm_weight", "eps",
-            ],
-            outputNames: ["out", "out_f32"], source: messageBlendSource)
+            inputNames: ["input", "messages", "first", "h", "forget", "gain"],
+            outputNames: ["blend", "sums"], source: messageBlendSource)
+        messageNorm = MLXFast.metalKernel(
+            name: "inkling2_message_norm", inputNames: ["blend", "sums", "norm_weight", "eps"],
+            outputNames: ["out", "out_f32"], source: messageNormSource)
     }
 }
 
