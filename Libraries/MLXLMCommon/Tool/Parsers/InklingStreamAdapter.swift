@@ -33,6 +33,7 @@ private struct InklingFrameParser {
     }
 
     private enum State {
+        case start
         case betweenFrames(reportedUnexpectedToken: Bool)
         case header(tokens: [Int])
         case payload(kind: InklingContentKind, name: String, tokens: [Int])
@@ -41,7 +42,7 @@ private struct InklingFrameParser {
 
     private let tokenizer: any Tokenizer
     private let controls: Controls
-    private var state = State.betweenFrames(reportedUnexpectedToken: false)
+    private var state = State.start
     private let maximumHeaderTokens = 64
 
     init?(tokenizer: any Tokenizer) {
@@ -89,6 +90,16 @@ private struct InklingFrameParser {
         switch state {
         case .finished:
             return .consumed
+
+        case .start:
+            // A model turn opens with a frame marker, so a first token without one continues
+            // the frame the prompt left open: a continued final message ends inside its text.
+            let opensFrame = token == controls.messageModel || controls.kinds[token] != nil
+            state =
+                opensFrame
+                ? .betweenFrames(reportedUnexpectedToken: false)
+                : .payload(kind: .text, name: "", tokens: [])
+            return push(token)
 
         case .betweenFrames(let reported):
             if token == controls.messageModel {

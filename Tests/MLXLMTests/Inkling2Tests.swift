@@ -820,6 +820,24 @@ struct Inkling2StreamProtocolTests {
         #expect(!decoder.additionalStopTokenIDs.contains(tokenizer.id("<|end_message|>")))
     }
 
+    /// A continued final message ends the prompt inside its text frame, so the model writes
+    /// the rest of the text before any frame marker.
+    @Test("A continued text frame streams as response")
+    func continuedTextFrame() throws {
+        let tokenizer = InklingTestTokenizer()
+        let continued = try events(
+            tokenizer,
+            tokenizer.ids(
+                "    return a", "\n}", "<|end_message|>", "<|content_model_end_sampling|>"))
+        #expect(text(continued).response == "    return a\n}")
+        #expect(text(continued).reasoning.isEmpty)
+        #expect(!continued.contains { if case .protocolError = $0 { true } else { false } })
+
+        let closed = try events(
+            tokenizer, tokenizer.ids("<|end_message|>", "<|content_model_end_sampling|>"))
+        #expect(!closed.contains { if case .protocolError = $0 { true } else { false } })
+    }
+
     @Test("The text parser reads a tool frame")
     func textParser() {
         let call = InklingToolCallParser().parse(
