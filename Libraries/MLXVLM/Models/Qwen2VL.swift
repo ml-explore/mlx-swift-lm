@@ -1018,8 +1018,8 @@ public class Qwen2VL: Module, VLMModel, KVCacheDimensionProvider {
             embeds = mergedVisionEmbeds(inputIds: inputIds2D, pixelValues: pixels, frames: frames)
             let (positionIds, ropeDeltas) = Language.getRopeIndex(
                 inputIds: inputIds2D,
-                imageGridTHW: frames,
-                videoGridTHW: nil,
+                imageGridTHW: input.image?.frames,
+                videoGridTHW: input.video?.frames,
                 spatialMergeSize: config.visionConfiguration.spatialMergeSize,
                 imageTokenId: config.baseConfiguration.imageTokenId,
                 videoTokenId: config.baseConfiguration.videoTokenId)
@@ -1057,8 +1057,8 @@ public class Qwen2VL: Module, VLMModel, KVCacheDimensionProvider {
 
         let (positionIds, ropeDeltas) = Language.getRopeIndex(
             inputIds: inputIds,
-            imageGridTHW: frames,
-            videoGridTHW: nil,
+            imageGridTHW: input.image?.frames,
+            videoGridTHW: input.video?.frames,
             spatialMergeSize: config.visionConfiguration.spatialMergeSize,
             imageTokenId: config.baseConfiguration.imageTokenId,
             videoTokenId: config.baseConfiguration.videoTokenId,

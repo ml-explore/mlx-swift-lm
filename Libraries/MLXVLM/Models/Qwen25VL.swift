@@ -1,6 +1,7 @@
 // Port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/qwen2_5_vl
 
 import CoreImage
+import CoreMedia
 import Foundation
 import MLX
 import MLXLMCommon
@@ -787,6 +788,21 @@ public struct Qwen25VLProcessor: UserInputProcessor {
         self.tokenizer = tokenizer
     }
 
+    /// The video sampling rate when the caller sets none, as in the transformers processor.
+    static let defaultVideoFPS = 2.0
+
+    /// Seconds of video in one temporal grid step: `temporalPatchSize` sampled frames, spaced
+    /// by the mean interval between the sampled timestamps.
+    static func secondsPerGrid(timestamps: [CMTime], temporalPatchSize: Int) -> Double {
+        let frameInterval: Double
+        if timestamps.count > 1, let first = timestamps.first, let last = timestamps.last {
+            frameInterval = (last - first).seconds / Double(timestamps.count - 1)
+        } else {
+            frameInterval = 1 / defaultVideoFPS
+        }
+        return Double(temporalPatchSize) * frameInterval
+    }
+
     func preprocessVideoFrame(image: CIImage, resizedSize: CGSize) -> CIImage {
         // Bicubic matches the image-path resampler (the dedicated PIL-
         // Lanczos port for images was reverted in PR #243 once parity
@@ -869,6 +885,7 @@ public struct Qwen25VLProcessor: UserInputProcessor {
         var processedVideo: LMInput.ProcessedVideo?
         if !input.videos.isEmpty {
             var videosAsImageSequences = [[MLXArray]]()
+            var secondsPerGrid = [Double]()
             for video in input.videos {
 
                 var resizedSize: CGSize = .zero
@@ -876,7 +893,7 @@ public struct Qwen25VLProcessor: UserInputProcessor {
                 let imageSequence = try await MediaProcessing.asProcessedSequence(
                     video,
                     processing: input.processing.video,
-                    targetFPS: { _ in Double(2) }
+                    targetFPS: { _ in Self.defaultVideoFPS }
                 ) { frame in
                     // first apply the user requested resizing, etc. if any
                     let resizedImage = MediaProcessing.apply(
@@ -895,6 +912,10 @@ public struct Qwen25VLProcessor: UserInputProcessor {
                 }
 
                 videosAsImageSequences.append(imageSequence.frames)
+                secondsPerGrid.append(
+                    Self.secondsPerGrid(
+                        timestamps: imageSequence.timestamps,
+                        temporalPatchSize: config.temporalPatchSize))
             }
             let videoPixelsAndFrames = try videosAsImageSequences.map {
                 try QwenVL.patchify(
@@ -903,7 +924,8 @@ public struct Qwen25VLProcessor: UserInputProcessor {
             }
             let videoPixelsConcatenated = concatenated(videoPixelsAndFrames.map { $0.0 })
             processedVideo = LMInput.ProcessedVideo(
-                pixels: videoPixelsConcatenated, frames: videoPixelsAndFrames.map { $0.1 })
+                pixels: videoPixelsConcatenated, frames: videoPixelsAndFrames.map { $0.1 },
+                secondsPerGrid: secondsPerGrid)
             if let videoFrames = processedVideo?.frames {
                 promptTokens = try QwenVL.replacePaddingTokens(
                     in: promptTokens, frames: videoFrames, paddingToken: "<|video_pad|>",
@@ -984,6 +1006,15 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
         cache.first?.offset ?? 0
     }
 
+    /// `tokens_per_second × seconds per grid` for each video. Like transformers, a video whose
+    /// processor recorded no timing counts one second per grid.
+    private func videoTemporalSteps(_ input: LMInput) -> [Double]? {
+        guard let video = input.video, let frames = video.frames else { return nil }
+        let tokensPerSecond = Double(config.visionConfiguration.tokensPerSecond)
+        let secondsPerGrid = video.secondsPerGrid ?? Array(repeating: 1, count: frames.count)
+        return secondsPerGrid.map { tokensPerSecond * $0 }
+    }
+
     public func prepare(
         _ input: LMInput, cache: [any KVCache], state: LMOutput.State?,
         prefill: PrefillParameters
@@ -1008,12 +1039,13 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
             embeds = mergedVisionEmbeds(inputIds: inputIds2D, pixelValues: pixels, frames: frames)
             let (positionIds, ropeDeltas) = Qwen25VL.getRopeIndex(
                 inputIds: inputIds2D,
-                imageGridTHW: frames,
-                videoGridTHW: nil,
+                imageGridTHW: input.image?.frames,
+                videoGridTHW: input.video?.frames,
                 spatialMergeSize: config.visionConfiguration.spatialMergeSize,
                 imageTokenId: config.baseConfiguration.imageTokenId,
                 videoTokenId: config.baseConfiguration.videoTokenId,
-                visionStartTokenId: config.baseConfiguration.visionStartTokenId)
+                visionStartTokenId: config.baseConfiguration.visionStartTokenId,
+                videoTemporalSteps: videoTemporalSteps(input))
             state[positionIdsKey] = positionIds
             state[ropeDeltasKey] = ropeDeltas
         }
@@ -1048,13 +1080,14 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
 
         let (positionIds, ropeDeltas) = Qwen25VL.getRopeIndex(
             inputIds: inputIds,
-            imageGridTHW: frames,
-            videoGridTHW: nil,
+            imageGridTHW: input.image?.frames,
+            videoGridTHW: input.video?.frames,
             spatialMergeSize: config.visionConfiguration.spatialMergeSize,
             imageTokenId: config.baseConfiguration.imageTokenId,
             videoTokenId: config.baseConfiguration.videoTokenId,
             visionStartTokenId: config.baseConfiguration.visionStartTokenId,
-            positionOffset: positionOffset)
+            positionOffset: positionOffset,
+            videoTemporalSteps: videoTemporalSteps(input))
 
         let processed = try prefill.forEachChunk(total: remainderLength) { range in
             let chunkEmbeds = embeds.map { $0[0..., range, 0...] }
@@ -1083,6 +1116,9 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
         return .logits(LMOutput(logits: lastLogits, state: resumeState))
     }
 
+    /// - Parameter videoTemporalSteps: the temporal position step for each video,
+    ///   `tokens_per_second × seconds per temporal grid`. Images, and videos without a
+    ///   step, advance by 1.
     static func getRopeIndex(
         inputIds: MLXArray,
         imageGridTHW: [THW]?,
@@ -1092,7 +1128,8 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
         videoTokenId: Int,
         visionStartTokenId: Int,
         attentionMask: MLXArray? = nil,
-        positionOffset: Int = 0
+        positionOffset: Int = 0,
+        videoTemporalSteps: [Double]? = nil
     ) -> (MLXArray, MLXArray) {
 
         let (batchSize, seqLength) = (inputIds.dim(0), inputIds.dim(1))
@@ -1150,6 +1187,7 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
                 }
 
                 let (t, h, w, ed): (Int, Int, Int, Int)
+                var temporalStep = 1.0
                 if edImage < edVideo {
                     guard let grid = imageGridTHW, imageIndex < grid.count else { break }
                     (t, h, w) = grid[imageIndex].values
@@ -1159,6 +1197,9 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
                 } else {
                     guard let grid = videoGridTHW, videoIndex < grid.count else { break }
                     (t, h, w) = grid[videoIndex].values
+                    if let steps = videoTemporalSteps, videoIndex < steps.count {
+                        temporalStep = steps[videoIndex]
+                    }
                     videoIndex += 1
                     remainVideos -= 1
                     ed = edVideo
@@ -1184,8 +1225,10 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
                     llmPosIdsList.append(index)
                 }
 
-                // 3D position IDs for visual tokens (temporal, height, width)
-                var tIndex = MLXArray(0 ..< llmGridT).reshaped([llmGridT, 1])
+                // 3D position IDs for visual tokens (temporal, height, width). Temporal ids are
+                // truncated after scaling, as in transformers.
+                let temporalIds = (0 ..< llmGridT).map { Int32(Double($0) * temporalStep) }
+                var tIndex = MLXArray(temporalIds).reshaped([llmGridT, 1])
                 tIndex = broadcast(tIndex, to: [llmGridT, llmGridH * llmGridW])
                 tIndex = tIndex.flattened()
 

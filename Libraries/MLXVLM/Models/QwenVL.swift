@@ -382,8 +382,7 @@ public struct QwenVL {
         // Audio is not part of the Qwen VL prepared-input contract.
         guard input.audio == nil else { return nil }
 
-        // Images only. Both models pass `videoGridTHW: nil` to `getRopeIndex`,
-        // so video positions are degenerate and a split cannot be verified.
+        // Images only: the split attributes image patch rows, not video ones.
         guard input.video == nil else { return nil }
 
         // Only the processor's own `[1, seq]` layout. A rank-1 suffix would route
@@ -461,8 +460,8 @@ public struct QwenVL {
         var rowCounts: [Int] = []
         padCounts.reserveCapacity(frames.count)
         rowCounts.reserveCapacity(frames.count)
-        // Still images only. A `t > 1` grid is a temporal stack, and `getRopeIndex`
-        // is handed `videoGridTHW: nil` for it too, so its positions are degenerate.
+        // Still images only. A `t > 1` grid is a temporal stack, which this split does not
+        // attribute.
         for frame in frames {
             guard frame.t == 1 else { return nil }
             guard frame.product > 0, frame.product % mergeLength == 0 else { return nil }

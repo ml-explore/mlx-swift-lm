@@ -10,8 +10,7 @@ import XCTest
 /// its own media's features.
 ///
 /// Uses the token ids and vision geometry the tiny Qwen VL fixtures share: image 500, video 501,
-/// vision start 502, patch 16, temporal patch 2, merge 2. The model must give video tokens
-/// M-RoPE positions; Qwen2-VL and Qwen2.5-VL give them text positions, so they cannot use it.
+/// vision start 502, patch 16, temporal patch 2, merge 2.
 struct MediaOrderAssertions {
     private let imageTokenId: Int32 = 500
     private let videoTokenId: Int32 = 501

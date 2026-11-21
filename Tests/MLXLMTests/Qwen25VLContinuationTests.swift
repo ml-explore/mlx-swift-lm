@@ -206,6 +206,45 @@ final class Qwen25VLContinuationTests: XCTestCase {
         try assertImagePromptKeepsCacheDtype(makeTinyQwen2VL())
     }
 
+    func testQwen25VLVideoBeforeImageTakesItsOwnFeatures() throws {
+        try MediaOrderAssertions().assertVideoBeforeImageMatchesImageBeforeVideo(
+            makeTinyQwen25VL())
+    }
+
+    func testQwen2VLVideoBeforeImageTakesItsOwnFeatures() throws {
+        try MediaOrderAssertions().assertVideoBeforeImageMatchesImageBeforeVideo(
+            makeTinyQwen2VL())
+    }
+
+    /// The seconds per grid a processor records must reach Qwen2.5-VL's temporal positions:
+    /// a two-grid video at 0.5 s and at 1 s per grid lands its second grid at different ids.
+    func testQwen25VLVideoTimingReachesPositions() throws {
+        try withRandomState(MLXRandom.RandomState(seed: 67)) {
+            let model = try makeTinyQwen25VL()
+            let pixels = MLXRandom.normal([2 * 4 * 4, 3 * 2 * 16 * 16])
+            let videoRun = [Int32(502)] + [Int32](repeating: 501, count: 8)
+            let tokens = MLXArray([Int32](arrayLiteral: 7, 20, 33) + videoRun + [46, 59])
+                .expandedDimensions(axis: 0)
+
+            func lastLogits(secondsPerGrid: [Double]) throws -> MLXArray {
+                let input = LMInput(
+                    text: .init(tokens: tokens),
+                    video: .init(
+                        pixels: pixels, frames: [THW(2, 4, 4)], secondsPerGrid: secondsPerGrid))
+                return try continuation.lastLogits(
+                    model.prepare(
+                        input, cache: try model.newCache(parameters: nil), state: nil,
+                        prefill: .init(chunking: .unchunked))
+                ).0
+            }
+
+            let slow = try lastLogits(secondsPerGrid: [1])
+            let fast = try lastLogits(secondsPerGrid: [0.5])
+            XCTAssertGreaterThan(
+                continuation.maxAbsDiff(fast, slow), MatmulPrecision.splitTolerance)
+        }
+    }
+
     /// `Qwen2VL` vision attention stays inside each image, so the split is exact.
     /// `Qwen2VL` does not conform, so the split runs through `QwenVL` directly.
     func testQwen2VLAppendOnlyMediaSplitMatchesFullPrefill() throws {

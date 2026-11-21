@@ -218,13 +218,18 @@ public struct LMInput {
         public let pixels: MLXArray
         public let positionIds: MLXArray?
         public let frames: [THW]?
+        /// Seconds of video in one temporal grid step, one value per video (transformers'
+        /// `second_per_grid_ts`). Nil when the processor does not record it.
+        public let secondsPerGrid: [Double]?
 
         public init(
-            pixels: MLXArray, positionIds: MLXArray? = nil, frames: [THW]? = nil
+            pixels: MLXArray, positionIds: MLXArray? = nil, frames: [THW]? = nil,
+            secondsPerGrid: [Double]? = nil
         ) {
             self.pixels = pixels
             self.positionIds = positionIds
             self.frames = frames
+            self.secondsPerGrid = secondsPerGrid
         }
     }
 
