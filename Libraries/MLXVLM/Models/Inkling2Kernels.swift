@@ -89,6 +89,10 @@ private final class Inkling2Kernels: Sendable {
     let depthAttention: MLXFast.MLXFastKernel
     let relativeAttention: MLXFast.MLXFastKernel
     let expertRouting: MLXFast.MLXFastKernel
+    let rowConvolution: MLXFast.MLXFastKernel
+    let messagePair: MLXFast.MLXFastKernel
+    let messageBlendNorm: MLXFast.MLXFastKernel
+    let prefillPrologue: MLXFast.MLXFastKernel
 
     private init() {
         depthAttention = MLXFast.metalKernel(
@@ -107,6 +111,28 @@ private final class Inkling2Kernels: Sendable {
             inputNames: ["logits", "bias", "eps", "scale"],
             outputNames: ["inds", "weights"],
             source: expertRoutingSource)
+        rowConvolution = MLXFast.metalKernel(
+            name: "inkling2_row_convolution",
+            inputNames: [
+                "x", "order", "weights", "state", "base", "conv_weight", "taps", "params",
+                "divisor",
+            ],
+            outputNames: ["out", "state_out"], source: rowConvolutionSource,
+            header: rowConvolutionHeader, ensureRowContiguous: false)
+        messagePair = MLXFast.metalKernel(
+            name: "inkling2_message_pair", inputNames: ["input", "messages", "first"],
+            outputNames: ["pair"], source: messagePairSource)
+        messageBlendNorm = MLXFast.metalKernel(
+            name: "inkling2_message_blend_norm",
+            inputNames: ["input", "messages", "first", "f", "g", "norm_weight", "eps"],
+            outputNames: ["out"], source: messageBlendNormSource)
+        prefillPrologue = MLXFast.metalKernel(
+            name: "inkling2_prefill_prologue",
+            inputNames: [
+                "q", "r", "k", "v", "q_scale", "r_scale", "tau_in", "length", "thresholds",
+            ],
+            outputNames: ["q_out", "r_out", "k_out", "v_out"], source: prefillPrologueSource,
+            ensureRowContiguous: false)
     }
 }
 
@@ -333,6 +359,356 @@ func inkling2RelativeAttention(
         outputShapes: [[b, l, hq, d]],
         outputDTypes: [q.dtype]
     )[0]
+}
+
+// MARK: - Prefill attention inputs
+
+/// One simdgroup per head and row: the L2 clip of the queries, relative states and keys, the
+/// log-length scaling of full layers and the RMS norm of the values.
+private let prefillPrologueSource = """
+        constexpr int E = DH / 32;
+        const int unit = threadgroup_position_in_grid.x;
+        const int row = threadgroup_position_in_grid.y;
+        const int L = length[0];
+        const int b = row / L;
+        const int t = row % L;
+        const uint lane = thread_position_in_threadgroup.x;
+        const float tau = FULL ? tau_in[t] : 1.0f;
+
+        if (unit < HQ) {
+            const int h = unit;
+            const auto src = q + b * q_strides[0] + t * q_strides[1];
+            float xv[E];
+            float ss = 0.0f;
+            for (int e = 0; e < E; e++) {
+                const int c = h * DH + lane * E + e;
+                xv[e] = float(src[c * q_strides[2]]) * float(q_scale[c]);
+                ss += xv[e] * xv[e];
+            }
+            const float f = min(thresholds[0] / (sqrt(simd_sum(ss)) + 1e-6f), 1.0f);
+            for (int e = 0; e < E; e++) {
+                T y = T(xv[e] * f);
+                if (FULL) {
+                    y = T(float(y) * tau);
+                }
+                q_out[(size_t(row) * HQ + h) * DH + lane * E + e] = y;
+            }
+            return;
+        }
+        if (unit < 2 * HQ) {
+            const int h = unit - HQ;
+            const auto src = r + b * r_strides[0] + t * r_strides[1];
+            float xv = 0.0f;
+            if (lane < DR) {
+                const int c = h * DR + lane;
+                xv = float(src[c * r_strides[2]]) * float(r_scale[c]);
+            }
+            const float f = min(thresholds[1] / (sqrt(simd_sum(xv * xv)) + 1e-6f), 1.0f);
+            if (lane < DR) {
+                T y = T(xv * f);
+                if (FULL) {
+                    y = T(float(y) * tau);
+                }
+                r_out[(size_t(row) * HQ + h) * DR + lane] = y;
+            }
+            return;
+        }
+        const bool is_key = unit < 2 * HQ + HKV;
+        const int h = unit - 2 * HQ - (is_key ? 0 : HKV);
+        const auto src = is_key ? k + b * k_strides[0] + t * k_strides[1]
+                                : v + b * v_strides[0] + t * v_strides[1];
+        const int stride = is_key ? k_strides[2] : v_strides[2];
+        float xv[E];
+        float ss = 0.0f;
+        for (int e = 0; e < E; e++) {
+            xv[e] = float(src[(h * DH + lane * E + e) * stride]);
+            ss += xv[e] * xv[e];
+        }
+        const float total = simd_sum(ss);
+        const float f = is_key
+            ? min(thresholds[0] / (sqrt(total) + 1e-6f), 1.0f)
+            : metal::precise::rsqrt(total / DH + 1e-6f);
+        device T* out = is_key ? k_out : v_out;
+        for (int e = 0; e < E; e++) {
+            out[(size_t(row) * HKV + h) * DH + lane * E + e] = T(xv[e] * f);
+        }
+    """
+
+/// The attention inputs of a prefill chunk from its projections and convolutions.
+///
+/// - Parameters:
+///   - q: `[B, L, Hq * DH]`; `r`: `[B, L, Hq * DR]`; `k`, `v`: `[B, L, Hkv * DH]`.
+///   - tau: float32 `[L]`, the log-length scaling of full layers.
+/// - Returns: queries `[B, L, Hq, DH]`, relative states `[B, L, Hq, DR]`, keys and values
+///   `[B, L, Hkv, DH]`.
+func inkling2PrefillPrologue(
+    q: MLXArray, r: MLXArray, k: MLXArray, v: MLXArray, qScale: MLXArray, rScale: MLXArray,
+    tau: MLXArray?, heads: Int, kvHeads: Int, headDim: Int, relativeDim: Int,
+    qkThreshold: Float, relativeThreshold: Float
+) -> [MLXArray] {
+    let (b, l) = (q.dim(0), q.dim(1))
+    return Inkling2Kernels.shared.prefillPrologue(
+        [
+            q, r, k, v, qScale, rScale, tau ?? MLXArray([Float(1)]), MLXArray([Int32(l)]),
+            MLXArray([qkThreshold, relativeThreshold]),
+        ],
+        template: [
+            ("T", q.dtype), ("DH", headDim), ("HQ", heads), ("HKV", kvHeads),
+            ("DR", relativeDim), ("FULL", tau != nil),
+        ],
+        grid: ((2 * heads + 2 * kvHeads) * 32, b * l, 1), threadGroup: (32, 1, 1),
+        outputShapes: [
+            [b, l, heads, headDim], [b, l, heads, relativeDim], [b, l, kvHeads, headDim],
+            [b, l, kvHeads, headDim],
+        ],
+        outputDTypes: Array(repeating: q.dtype, count: 4))
+}
+
+// MARK: - Prefill message gates
+
+/// The RMS-normalized input and message of one stream and row, side by side.
+private let messagePairSource = """
+        constexpr int NR = TG / 32;
+        const uint unit = threadgroup_position_in_grid.x;
+        const uint rows = threadgroups_per_grid.x / S;
+        const uint s = unit / rows;
+        const uint row = unit % rows;
+        const uint tid = thread_position_in_threadgroup.x;
+        const uint lane = thread_index_in_simdgroup;
+        const uint sg = simdgroup_index_in_threadgroup;
+        const device float* in = input + (size_t(row) * Q + (Q == 1 ? 0 : s)) * D;
+        const device float* msg = messages + (size_t(row) * MSTRIDE + first + s) * D;
+        float a = 0.0f;
+        float b = 0.0f;
+        for (int d = tid; d < D; d += TG) {
+            a += in[d] * in[d];
+            b += msg[d] * msg[d];
+        }
+        threadgroup float red[2][NR];
+        a = simd_sum(a);
+        b = simd_sum(b);
+        if (lane == 0) {
+            red[0][sg] = a;
+            red[1][sg] = b;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        a = 0.0f;
+        b = 0.0f;
+        for (int i = 0; i < NR; i++) {
+            a += red[0][i];
+            b += red[1][i];
+        }
+        const float ia = metal::precise::rsqrt(a / D + 1e-6f);
+        const float ib = metal::precise::rsqrt(b / D + 1e-6f);
+        device T* out = pair + size_t(unit) * 2 * D;
+        for (int d = tid; d < D; d += TG) {
+            out[d] = T(in[d] * ia);
+            out[D + d] = T(msg[d] * ib);
+        }
+    """
+
+/// `(1 - tanh(f)) * input + tanh(g) * message` of one stream and row, then its RMS norm with
+/// the stream's weight.
+private let messageBlendNormSource = """
+        constexpr int NR = TG / 32;
+        constexpr int PER = (D + TG - 1) / TG;
+        const uint unit = threadgroup_position_in_grid.x;
+        const uint rows = threadgroups_per_grid.x / S;
+        const uint s = unit / rows;
+        const uint row = unit % rows;
+        const uint tid = thread_position_in_threadgroup.x;
+        const uint lane = thread_index_in_simdgroup;
+        const uint sg = simdgroup_index_in_threadgroup;
+        const device float* in = input + (size_t(row) * Q + (Q == 1 ? 0 : s)) * D;
+        const device float* msg = messages + (size_t(row) * MSTRIDE + first + s) * D;
+        float o[PER];
+        float ss = 0.0f;
+        for (int i = 0; i < PER; i++) {
+            const int d = tid + i * TG;
+            o[i] = 0.0f;
+            if (d < D) {
+                const size_t j = size_t(unit) * D + d;
+                o[i] = (1.0f - metal::precise::tanh(f[j])) * in[d]
+                    + metal::precise::tanh(g[j]) * msg[d];
+                ss += o[i] * o[i];
+            }
+        }
+        threadgroup float red[NR];
+        ss = simd_sum(ss);
+        if (lane == 0) {
+            red[sg] = ss;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        ss = 0.0f;
+        for (int i = 0; i < NR; i++) {
+            ss += red[i];
+        }
+        const float inv = metal::precise::rsqrt(ss / D + eps[0]);
+        for (int i = 0; i < PER; i++) {
+            const int d = tid + i * TG;
+            if (d < D) {
+                const float w = float(norm_weight[(NW == 1 ? 0 : s) * D + d]);
+                out[size_t(unit) * D + d] = T(w * (o[i] * inv));
+            }
+        }
+    """
+
+/// The message gates of a prefill chunk as normalized sublayer inputs:
+/// `norm((1 - tanh(h forget)) * input + tanh(h gain) * message)`, with `h` the down projection
+/// of the RMS-normalized input and message.
+///
+/// - Parameters:
+///   - inputs: float32 `[N, Q, D]`; stream `s` reads input `s`, or input 0 when `Q` is 1.
+///   - messages: float32 `[N, M, D]`, the messages of all loop layers.
+///   - first: the message of stream 0.
+///   - down: bfloat16 `[S, R, 2D]`.
+///   - forget: bfloat16 `[S, R, D]`.
+///   - gain: bfloat16 `[S, R, D]`.
+///   - normWeight: `[S or 1, D]`.
+/// - Returns: `[S, N, D]` of `down`'s dtype.
+func inkling2MessageGates(
+    inputs: MLXArray, messages: MLXArray, first: Int, down: MLXArray, forget: MLXArray,
+    gain: MLXArray, normWeight: MLXArray, eps: Float
+) -> MLXArray {
+    let (streams, rows, d) = (down.dim(0), messages.dim(0), messages.dim(2))
+    let threads = 256
+    let template: [(String, any KernelTemplateArg)] = [
+        ("T", down.dtype), ("D", d), ("S", streams), ("Q", inputs.dim(1)), ("TG", threads),
+        ("MSTRIDE", messages.dim(1)), ("NW", normWeight.dim(0)),
+    ]
+    let kernels = Inkling2Kernels.shared
+    let firstArray = MLXArray(Int32(first))
+    let pair = kernels.messagePair(
+        [inputs, messages, firstArray], template: template,
+        grid: (streams * rows * threads, 1, 1), threadGroup: (threads, 1, 1),
+        outputShapes: [[streams, rows, 2 * d]], outputDTypes: [down.dtype])[0]
+    let h = matmul(pair, down.transposed(0, 2, 1)).asType(.float32)
+    let f = matmul(h, forget.asType(.float32))
+    let g = matmul(h, gain.asType(.float32))
+    return kernels.messageBlendNorm(
+        [inputs, messages, firstArray, f, g, normWeight, MLXArray([eps])], template: template,
+        grid: (streams * rows * threads, 1, 1), threadGroup: (threads, 1, 1),
+        outputShapes: [[streams, rows, d]], outputDTypes: [down.dtype])[0]
+}
+
+// MARK: - Prefill convolution
+
+/// The input of a short convolution at row `t` of batch row `b`. Rows before the chunk come from
+/// the state; with `K` experts, a row is the weighted sum of its expert outputs.
+private let rowConvolutionHeader = """
+    template <typename T, int K, bool SORTED, bool HAS_STATE, typename X, typename O, typename W,
+        typename S, typename XS>
+    inline float inkling2_conv_input(
+        X x, XS x_strides, O order, W weights, S state, int b, int t, int L, int C, int d) {
+        if (t < 0) {
+            return HAS_STATE ? float(state[(size_t(b) * 3 + 3 + t) * C + d]) : 0.0f;
+        }
+        if (K == 0) {
+            return float(x[b * x_strides[0] + t * x_strides[1] + d * x_strides[2]]);
+        }
+        const size_t row = size_t(b) * L + t;
+        float m = 0.0f;
+        for (int k = 0; k < K; k++) {
+            const size_t i = row * K + k;
+            m += float(x[size_t(SORTED ? order[i] : i) * C + d]) * float(weights[i]);
+        }
+        return float(T(m));
+    }
+    """
+
+/// One thread per channel and block of `RB` rows: `(conv(x) + x) / divisor`, plus `base` when
+/// set, and the last three inputs as the next state. Dynamic taps add a projection of the layer
+/// input, per row and head, to the static taps, and skip the rounding of the convolution.
+private let rowConvolutionSource = """
+        const int d = thread_position_in_grid.x;
+        const int t0 = thread_position_in_grid.y * RB;
+        const int b = thread_position_in_grid.z;
+        const int L = params[0];
+        if (d >= C || t0 >= L) {
+            return;
+        }
+        #define INPUT(t) inkling2_conv_input<T, K, SORTED, HAS_STATE>( \\
+            x, x_strides, order, weights, state, b, t, L, C, d)
+        if (t0 == 0) {
+            for (int j = 0; j < 3; j++) {
+                state_out[(size_t(b) * 3 + j) * C + d] = T(INPUT(L - 3 + j));
+            }
+        }
+        float w[4];
+        for (int k = 0; k < 4; k++) {
+            w[k] = DYN ? float(conv_weight[k * C + d]) : float(conv_weight[d * 4 + k]);
+        }
+        float p0 = INPUT(t0 - 3);
+        float p1 = INPUT(t0 - 2);
+        float p2 = INPUT(t0 - 1);
+        for (int t = t0; t < min(L, t0 + RB); t++) {
+            const float xt = INPUT(t);
+            float y;
+            if (DYN) {
+                const auto tp = taps + b * taps_strides[0] + t * taps_strides[1]
+                    + (d / (C / HEADS)) * 4 * taps_strides[2];
+                float a = xt * (w[0] + float(tp[0]));
+                a += p2 * (w[1] + float(tp[taps_strides[2]]));
+                a += p1 * (w[2] + float(tp[2 * taps_strides[2]]));
+                a += p0 * (w[3] + float(tp[3 * taps_strides[2]]));
+                y = float(T((a + xt) / divisor[0]));
+            } else {
+                const float a = p0 * w[0] + p1 * w[1] + p2 * w[2] + xt * w[3];
+                y = float(T((float(T(a)) + xt) / divisor[0]));
+            }
+            if (HAS_BASE) {
+                y += float(base[b * base_strides[0] + t * base_strides[1] + d * base_strides[2]]);
+            }
+            out[(size_t(b) * L + t) * C + d] = OT(y);
+            p0 = p1;
+            p1 = p2;
+            p2 = xt;
+        }
+        #undef INPUT
+    """
+
+/// The short convolution `(conv(x) + x) / sqrt(5)` of a prefill chunk, plus `base` when set.
+///
+/// - Parameters:
+///   - x: `[B, L, C]`, or with `experts` the expert outputs `[B * L * K, C]`, whose weighted sum
+///     per row is the input.
+///   - state: the previous three inputs `[B, 3, C]`, or `nil` for zeros.
+///   - weight: `[C, 4, 1]`, or with `dynamicTaps` the static taps `[4, C]`.
+///   - experts: the routing weights `[B, L, K]` and, when the outputs are sorted, the row of
+///     each output.
+///   - dynamicTaps: `[B, L, heads * 4]`, added to the static taps of each head. The output is
+///     then `(conv(x) + x) / 3`.
+/// - Returns: `[B, L, C]` of `outputType`, and the next state `[B, 3, C]`.
+func inkling2RowConvolution(
+    _ x: MLXArray, state: MLXArray?, weight: MLXArray, base: MLXArray? = nil,
+    outputType: DType, experts: (weights: MLXArray, order: MLXArray?)? = nil,
+    dynamicTaps: MLXArray? = nil
+) -> (output: MLXArray, state: MLXArray) {
+    let (b, l, k) =
+        experts.map { ($0.weights.dim(0), $0.weights.dim(1), $0.weights.dim(2)) }
+        ?? (x.dim(0), x.dim(1), 0)
+    let c = x.dim(-1)
+    let dtype = x.dtype
+    let rowsPerThread = 16
+    let placeholder = MLXArray([Float(0)])
+    let out = Inkling2Kernels.shared.rowConvolution(
+        [
+            experts == nil ? x : contiguous(x),
+            experts?.order.map { contiguous($0) } ?? placeholder,
+            experts.map { contiguous($0.weights) } ?? placeholder,
+            state.map { contiguous($0) } ?? placeholder, base ?? placeholder, contiguous(weight),
+            dynamicTaps ?? placeholder, MLXArray([Int32(l)]),
+            MLXArray([Float(dynamicTaps == nil ? 5 : 9).squareRoot()]),
+        ],
+        template: [
+            ("T", dtype), ("OT", outputType), ("C", c), ("K", k),
+            ("SORTED", experts?.order != nil), ("HAS_STATE", state != nil),
+            ("HAS_BASE", base != nil), ("DYN", dynamicTaps != nil),
+            ("HEADS", (dynamicTaps?.dim(-1) ?? 4) / 4), ("RB", rowsPerThread),
+        ],
+        grid: (c, (l + rowsPerThread - 1) / rowsPerThread, b), threadGroup: (256, 1, 1),
+        outputShapes: [[b, l, c], [b, 3, c]], outputDTypes: [outputType, dtype])
+    return (out[0], out[1])
 }
 
 // MARK: - Decode attention

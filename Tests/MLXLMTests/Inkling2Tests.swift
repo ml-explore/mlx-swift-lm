@@ -285,7 +285,8 @@ struct Inkling2KernelTests {
         )
         let expectedActivations = tanh(gate / 4) * 4 * sigmoid(gate) * tanh(up / 25) * 25
         #expect(activations.shape == [rows, k, inner])
-        #expect(maxDifference(activations, expectedActivations) < 2e-2)
+        // One bfloat16 step at the largest activations is 0.03.
+        #expect(maxDifference(activations, expectedActivations) < 5e-2)
 
         let fused = inkling2ExpertDown(
             activations, experts: down, indices: indices, weights: weights, residual: residual,
@@ -295,6 +296,115 @@ struct Inkling2KernelTests {
             residual: residual, state: state, convolutionWeight: convolution)
         #expect(maxDifference(fused.hidden, expected.hidden) < 2e-2)
         #expect(maxDifference(fused.state, expected.state) < 2e-2)
+    }
+
+    @Test(
+        "The prefill convolution matches the causal convolution of its inputs",
+        arguments: [(37, true, false), (2, true, true), (19, false, true), (37, true, true)])
+    func rowConvolution(length l: Int, hasState: Bool, experts: Bool) {
+        MLXRandom.seed(9)
+        let (b, c, k) = (2, 64, 3)
+        let state = hasState ? MLXRandom.normal([b, 3, c]).asType(.bfloat16) : nil
+        let weight = (MLXRandom.normal([c, 4, 1]) * 0.5).asType(.bfloat16)
+        let base = MLXRandom.normal([b, l, c])
+
+        // With experts, each input row is the weighted sum of K outputs stored in shuffled rows.
+        var x = MLXRandom.normal([b, l, c]).asType(.bfloat16)
+        var routing: (weights: MLXArray, order: MLXArray?)?
+        var input = x
+        if experts {
+            let outputs = MLXRandom.normal([b * l * k, c]).asType(.bfloat16)
+            let weights = MLXRandom.uniform(0 ..< 1, [b, l, k])
+            let order = MLXArray((0 ..< (b * l * k)).reversed().map { UInt32($0) })
+            routing = (weights, order)
+            x = outputs
+            input =
+                (outputs[order].reshaped(b, l, k, c).asType(.float32)
+                * weights.expandedDimensions(axis: -1)).sum(axis: 2).asType(.bfloat16)
+        }
+        let (out, nextState) = inkling2RowConvolution(
+            x, state: state, weight: weight, base: base, outputType: .float32, experts: routing)
+
+        let window = concatenated(
+            [state ?? MLXArray.zeros([b, 3, c], dtype: .bfloat16), input], axis: 1)
+        let taps = weight.squeezed(axis: -1).transposed().asType(.float32)
+        var acc = window[0..., 0 ..< l, 0...].asType(.float32) * taps[0]
+        for tap in 1 ..< 4 {
+            acc = acc + window[0..., tap ..< (tap + l), 0...].asType(.float32) * taps[tap]
+        }
+        let y =
+            ((acc.asType(.bfloat16).asType(.float32) + input.asType(.float32))
+            / Float(5).squareRoot()).asType(.bfloat16)
+        #expect(out.shape == [b, l, c])
+        #expect(maxDifference(out, base + y.asType(.float32)) < 2e-2)
+        #expect(maxDifference(nextState, window[0..., l...]) < 2e-2)
+    }
+
+    @Test("The prefill convolution adds the dynamic taps of each head")
+    func dynamicRowConvolution() {
+        MLXRandom.seed(10)
+        let (b, l, c, heads) = (2, 21, 64, 4)
+        let x = MLXRandom.normal([b, l, c]).asType(.bfloat16)
+        let state = MLXRandom.normal([b, 3, c]).asType(.bfloat16)
+        let staticTaps = (MLXRandom.normal([4, c]) * 0.5).asType(.bfloat16)
+        // A strided view, as the projection of the layer input returns it.
+        let taps = (MLXRandom.normal([b, l, heads * 4 + 3]) * 0.5).asType(.bfloat16)[
+            .ellipsis, ..<(heads * 4)]
+        let (out, nextState) = inkling2RowConvolution(
+            x, state: state, weight: staticTaps, outputType: .bfloat16, dynamicTaps: taps)
+
+        let window = concatenated([state, x], axis: 1).asType(.float32)
+        let perChannel = repeated(
+            taps.asType(.float32).reshaped(b, l, heads, 1, 4), count: c / heads, axis: 3
+        )
+        .reshaped(b, l, c, 4)
+        var acc = MLXArray.zeros([b, l, c])
+        for lag in 0 ..< 4 {
+            let weights = staticTaps[lag].asType(.float32) + perChannel[.ellipsis, lag]
+            acc = acc + window[0..., (3 - lag) ..< (3 - lag + l), 0...] * weights
+        }
+        let expected = ((acc + x.asType(.float32)) / 3).asType(.bfloat16)
+        #expect(maxDifference(out, expected) < 2e-2)
+        #expect(maxDifference(nextState, window[0..., l...]) == 0)
+    }
+
+    @Test(
+        "The prefill prologue clips, scales and normalizes the attention inputs",
+        arguments: [false, true])
+    func prefillPrologue(full: Bool) {
+        MLXRandom.seed(11)
+        let (b, l, hq, hkv, dh, dr) = (2, 5, 4, 2, 64, 16)
+        // Strided views, as the fused projection returns them.
+        let projection = (MLXRandom.normal([b, l, hq * (dh + dr) + 8]) * 4).asType(.bfloat16)
+        let q = projection[.ellipsis, ..<(hq * dh)]
+        let r = projection[.ellipsis, (hq * dh) ..< (hq * (dh + dr))]
+        let k = (MLXRandom.normal([b, l, hkv * dh]) * 4).asType(.bfloat16)
+        let v = (MLXRandom.normal([b, l, hkv * dh]) * 4).asType(.bfloat16)
+        let qScale = MLXRandom.uniform(0.5 ..< 1.5, [hq, dh])
+        let rScale = MLXRandom.uniform(0.5 ..< 1.5, [hq, dr])
+        let tau = full ? MLXRandom.uniform(1 ..< 1.5, [l]) : nil
+        let out = inkling2PrefillPrologue(
+            q: q, r: r, k: k, v: v, qScale: qScale, rScale: rScale, tau: tau, heads: hq,
+            kvHeads: hkv, headDim: dh, relativeDim: dr, qkThreshold: 20, relativeThreshold: 8)
+
+        func clipped(_ x: MLXArray, _ scale: MLXArray?, _ threshold: Float) -> MLXArray {
+            var states = x.asType(.float32)
+            if let scale { states = states * scale }
+            let norm = sqrt(states.square().sum(axis: -1, keepDims: true))
+            var y = (states * minimum(threshold / (norm + 1e-6), 1)).asType(.bfloat16)
+            if let tau { y = (y.asType(.float32) * tau.reshaped(1, l, 1, 1)).asType(.bfloat16) }
+            return y
+        }
+        let keys = k.reshaped(b, l, hkv, dh).asType(.float32)
+        let norm = sqrt(keys.square().sum(axis: -1, keepDims: true))
+        let values = v.reshaped(b, l, hkv, dh).asType(.float32)
+        #expect(maxDifference(out[0], clipped(q.reshaped(b, l, hq, dh), qScale, 20)) < 5e-2)
+        #expect(maxDifference(out[1], clipped(r.reshaped(b, l, hq, dr), rScale, 8)) < 5e-2)
+        #expect(maxDifference(out[2], keys * minimum(20 / (norm + 1e-6), 1)) < 5e-2)
+        #expect(
+            maxDifference(
+                out[3], values * rsqrt(values.square().mean(axis: -1, keepDims: true) + 1e-6))
+                < 5e-2)
     }
 
     @Test("Message controllers match the gated blend", arguments: [(3, false), (1, true)])
