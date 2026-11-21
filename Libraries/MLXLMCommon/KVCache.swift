@@ -833,6 +833,17 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         logicalView(tail: .max)
     }
 
+    /// The slot after the newest key when the last ``update(keys:values:)`` returned the
+    /// whole ring out of temporal order, or `nil` when it returned the keys oldest first.
+    ///
+    /// Models with relative position biases use it to find the distance of each key.
+    package var ringWriteIndex: Int? {
+        guard rewindCapacity == 0, keep == 0, wrapped, let keys, idx < keys.dim(2) else {
+            return nil
+        }
+        return idx
+    }
+
     private func updateConcat(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         if self.keys == nil {
             self.keys = keys
