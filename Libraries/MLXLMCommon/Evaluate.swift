@@ -1107,7 +1107,7 @@ public struct TokenIterator: TokenIteratorProtocol {
     var processor: LogitProcessor?
     let sampler: LogitSampler
     let logProbabilityTopK: Int?
-    private var deferredLogProbabilities: DeferredTokenLogProbabilities?
+    var deferredLogProbabilities: DeferredTokenLogProbabilities?
 
     /// Log probabilities for the token returned by the most recent ``next()`` call.
     public private(set) var lastLogProbabilities: DeferredTokenLogProbabilities?
