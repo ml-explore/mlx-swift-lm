@@ -1802,13 +1802,16 @@ public final class ChatSession {
                         func defaultGeneration() throws -> GenerationRun {
                             // Seed the carried state and read back the post-prefill state so the
                             // next turn, or the next tool restart, anchors correctly.
-                            let iterator = try TokenIterator(
+                            let (iterator, prefill) = try makeTokenIterator(
                                 input: input, model: model, cacheStorage: kvCache,
                                 state: lmState,
                                 parameters: generateParameters, components: components,
+                                history: generateParameters.promptLookup.map { _ in
+                                    preparedInput.text.tokens.asArray(Int.self)
+                                },
                                 checkpointAt: checkpointPosition)
                             lmState = iterator.state
-                            if let prefill = iterator.prefillCheckpoint,
+                            if let prefill,
                                 let tokens = conversation?.cachedTokens
                             {
                                 conversation?.checkpoints.record(
