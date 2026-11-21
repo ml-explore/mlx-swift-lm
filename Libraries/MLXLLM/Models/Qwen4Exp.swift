@@ -271,10 +271,11 @@ private final class Qwen4ExpRMSNormGated: Module {
 
 // MARK: - QSA sparse attention
 
-/// The raw indexer keys of one attention layer.
+/// The raw indexer keys of one attention layer, and the pooled keys of their complete blocks.
 ///
 /// Cache policy skips it: KV quantization and capacity would break the block indices,
-/// and the Python model never quantizes these layers' caches.
+/// and the Python model never quantizes these layers' caches. The pooled blocks are not
+/// saved: they are rebuilt from the raw keys.
 private final class Qwen4ExpIndexerKeyCache: BaseKVCache, AuxiliaryKVCache {
     override class var serializedClassName: String? { "MLXLLM.Qwen4ExpIndexerKeyCache" }
 
@@ -304,6 +305,9 @@ private final class Qwen4ExpIndexerKeyCache: BaseKVCache, AuxiliaryKVCache {
     }
 
     private var keys: MLXArray?
+    private var pooled: MLXArray?
+    private var pooledCount = 0
+    private var pooledRatio = 1
     private let step = 256
 
     override init() {
@@ -311,29 +315,56 @@ private final class Qwen4ExpIndexerKeyCache: BaseKVCache, AuxiliaryKVCache {
         super.init()
     }
 
+    /// `buffer` with room for `new` after its first `used` rows.
+    private func reserve(_ buffer: MLXArray?, used: Int, for new: MLXArray) -> MLXArray {
+        if let buffer, used + new.dim(1) <= buffer.dim(1) {
+            return buffer
+        }
+        let steps = (step + new.dim(1) - 1) / step
+        let grown = MLXArray.zeros([new.dim(0), steps * step, new.dim(2)], dtype: new.dtype)
+        guard var current = buffer else {
+            return grown
+        }
+        if used % step != 0 {
+            current = current[0..., ..<used, 0...]
+        }
+        return concatenated([current, grown], axis: 1)
+    }
+
     /// Append `newKeys` `[B, S, D]` and return every key so far.
     func append(_ newKeys: MLXArray) -> MLXArray {
         let previous = offset
-        if keys == nil || previous + newKeys.dim(1) > keys!.dim(1) {
-            let steps = (step + newKeys.dim(1) - 1) / step
-            let grown = MLXArray.zeros(
-                [newKeys.dim(0), steps * step, newKeys.dim(2)], dtype: newKeys.dtype)
-            if var current = keys {
-                if previous % step != 0 {
-                    current = current[0..., ..<previous, 0...]
-                }
-                keys = concatenated([current, grown], axis: 1)
-            } else {
-                keys = grown
-            }
-        }
+        keys = reserve(keys, used: previous, for: newKeys)
         offset += newKeys.dim(1)
         keys![0..., previous ..< offset, 0...] = newKeys
         return keys![0..., ..<offset, 0...]
     }
 
+    /// The pooled keys `[B, offset / ratio, D]` of every complete block.
+    ///
+    /// `pool(keys, first)` pools the raw keys of the blocks from `first` on. It runs only
+    /// on blocks completed since the last call.
+    func pooledBlocks(ratio: Int, pool: (MLXArray, Int) -> MLXArray) -> MLXArray {
+        if ratio != pooledRatio {
+            pooledRatio = ratio
+            pooledCount = 0
+        }
+        let blockCount = offset / ratio
+        if blockCount > pooledCount, let keys {
+            let first = pooledCount
+            let new = pool(keys[0..., (first * ratio) ..< (blockCount * ratio), 0...], first)
+            pooled = reserve(pooled, used: first, for: new)
+            pooled![0..., first ..< blockCount, 0...] = new
+            pooledCount = blockCount
+        }
+        guard let pooled else {
+            preconditionFailure("Qwen4ExpIndexerKeyCache has no complete block")
+        }
+        return pooled[0..., ..<blockCount, 0...]
+    }
+
     override func innerState() -> [MLXArray] {
-        keys.map { [$0] } ?? []
+        [keys, pooled].compactMap { $0 }
     }
 
     override var state: [MLXArray] {
@@ -345,15 +376,19 @@ private final class Qwen4ExpIndexerKeyCache: BaseKVCache, AuxiliaryKVCache {
             precondition(newValue.count <= 1, "Qwen4ExpIndexerKeyCache state holds one array")
             keys = newValue.first
             offset = keys?.dim(1) ?? 0
+            pooled = nil
+            pooledCount = 0
         }
     }
 
     override var isTrimmable: Bool { true }
 
+    // A block that loses a token is pooled again once it is complete.
     @discardableResult
     override func trim(_ n: Int) -> Int {
         let trimmed = Swift.min(Swift.max(n, 0), offset)
         offset -= trimmed
+        pooledCount = Swift.min(pooledCount, offset / pooledRatio)
         return trimmed
     }
 
@@ -362,6 +397,11 @@ private final class Qwen4ExpIndexerKeyCache: BaseKVCache, AuxiliaryKVCache {
         let s = state
         if !s.isEmpty {
             new.state = s.map { $0[.ellipsis] }
+        }
+        if let pooled, pooledCount > 0 {
+            new.pooled = pooled[0..., ..<pooledCount, 0...]
+            new.pooledCount = pooledCount
+            new.pooledRatio = pooledRatio
         }
         return new
     }
@@ -402,6 +442,13 @@ private final class Qwen4ExpQSAIndexer: Module {
         super.init()
     }
 
+    /// Pool raw keys `[B, n * ratio, D]` into `[B, n, D]` blocks, the first being block `first`.
+    private func pool(_ keys: MLXArray, first: Int) -> MLXArray {
+        let blocks = keys.reshaped(keys.dim(0), -1, compressRatio, headDim)
+        let pooled = blocks.asType(.float32).mean(axis: 2).asType(keys.dtype)
+        return blockRope(kLayerNorm(pooled), offset: first)
+    }
+
     /// A boolean mask `[B, 1, S, keys]`, or `nil` when the causal mask is enough.
     func callAsFunction(_ x: MLXArray, cache: Qwen4ExpIndexerKeyCache?) -> MLXArray? {
         let B = x.dim(0)
@@ -426,10 +473,9 @@ private final class Qwen4ExpQSAIndexer: Module {
 
         // Left padding is not supported, so each row's blocks start at position 0.
         let blockCount = kvLength / r
-        let blocks = rawK[0..., ..<(blockCount * r), 0...]
-        var pooled = blocks.reshaped(B, blockCount, r, headDim)
-        pooled = pooled.asType(.float32).mean(axis: 2).asType(rawK.dtype)
-        pooled = blockRope(kLayerNorm(pooled), offset: 0)
+        let pooled =
+            cache?.pooledBlocks(ratio: r, pool: pool)
+            ?? pool(rawK[0..., ..<(blockCount * r), 0...], first: 0)
 
         let queries = rope(qLayerNorm(q).transposed(0, 2, 1, 3), offset: offset)
 

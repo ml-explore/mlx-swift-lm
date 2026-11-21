@@ -476,6 +476,57 @@ final class Qwen4ExpTests: XCTestCase {
         XCTAssertTrue((restored[3] as? CacheList)?[1] is any AuxiliaryKVCache)
     }
 
+    /// Each block is pooled once, and matches pooling every block again at each step,
+    /// also after a trim and a copy.
+    func testPooledBlocksMatchPoolingEveryStep() throws {
+        let model = try referenceModel()
+        let tokens = referenceTokens
+        let ratio = 4
+
+        func indexerKeys(_ cache: [KVCache]) throws -> KVCache {
+            try XCTUnwrap((cache[3] as? CacheList)?[1])
+        }
+        // innerState() holds the raw keys, then the pooled blocks.
+        func pooled(_ cache: [KVCache]) throws -> MLXArray {
+            let keys = try indexerKeys(cache)
+            return keys.innerState()[1][0..., ..<(keys.offset / ratio)]
+        }
+
+        var cached = try model.newCache(parameters: nil)
+        let repooled = try model.newCache(parameters: nil)
+        func step(_ inputs: MLXArray, _ label: String) throws {
+            // Setting the state drops the pooled blocks.
+            var keys = try indexerKeys(repooled)
+            keys.state = keys.state
+            let expected = model(inputs, cache: repooled)
+            let actual = model(inputs, cache: cached)
+            XCTAssertTrue(arrayEqual(actual, expected).item(Bool.self), label)
+        }
+
+        // The budget is 8 tokens: every step after the prefill uses the pooled blocks.
+        try step(tokens[0..., ..<9], "prefill")
+        for t in 9 ..< tokens.dim(1) {
+            try step(tokens[0..., t ..< (t + 1)], "token \(t)")
+        }
+
+        // Drop the last block's final token, then write other tokens in its place.
+        for cache in [cached, repooled] {
+            let attention = try XCTUnwrap(cache[3] as? CacheList)
+            attention[0].trim(3)
+            attention[1].trim(3)
+        }
+        for t in 0 ..< 3 {
+            try step(tokens[0..., t ..< (t + 1)], "after trim, token \(t)")
+        }
+        XCTAssertTrue(arrayEqual(try pooled(cached), try pooled(repooled)).item(Bool.self))
+
+        cached = cached.map { $0.copy() }
+        for t in 3 ..< 7 {
+            try step(tokens[0..., t ..< (t + 1)], "copy, token \(t)")
+        }
+        XCTAssertTrue(arrayEqual(try pooled(cached), try pooled(repooled)).item(Bool.self))
+    }
+
     // MARK: - Consistency
 
     func testChunkedPrefillMatchesOneShot() throws {
