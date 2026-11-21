@@ -567,36 +567,24 @@ public final class Qwen3VLMoE: Module, VLMModel, KVCacheDimensionProvider {
         inputIds: MLXArray,
         imageTokenIndex: Int,
         videoTokenIndex: Int
-    ) throws -> (MLXArray, [Int]) {
-        let imageMask = (inputIds .== MLXArray(imageTokenIndex))
-        let videoMask = (inputIds .== MLXArray(videoTokenIndex))
-        let specialMask = (imageMask .|| videoMask)
-
-        // Read back one bool per token, not per hidden element, and scatter whole rows.
-        let visualIndices = nonZero(specialMask)
+    ) throws -> (MLXArray, QwenVL.VisualTokenLayout) {
+        // Read back one token id per position, not per hidden element, and scatter whole rows.
+        let layout = QwenVL.VisualTokenLayout(
+            inputIds: inputIds, imageTokenId: imageTokenIndex, videoTokenId: videoTokenIndex)
+        let visualIndices = layout.indices
 
         let hiddenSize = inputEmbeds.dim(-1)
         guard visualIndices.count * hiddenSize == imageFeatures.size else {
             throw Qwen3VLMoEError.featureTokenMismatch(
                 expected: visualIndices.count, actual: imageFeatures.dim(0))
         }
-        guard !visualIndices.isEmpty else { return (inputEmbeds, visualIndices) }
+        guard !visualIndices.isEmpty else { return (inputEmbeds, layout) }
 
         let result = inputEmbeds.reshaped([-1, hiddenSize])
         result[MLXArray(visualIndices.map { Int32($0) }), 0...] =
-            imageFeatures.reshaped([visualIndices.count, hiddenSize])
+            layout.tokenOrdered(imageFeatures.reshaped([visualIndices.count, hiddenSize]))
 
-        return (result.reshaped(inputEmbeds.shape), visualIndices)
-    }
-
-    private func nonZero(_ mask: MLXArray) -> [Int] {
-        let values = mask.asArray(Bool.self)
-        var indices: [Int] = []
-        indices.reserveCapacity(values.count)
-        for (idx, value) in values.enumerated() where value {
-            indices.append(idx)
-        }
-        return indices
+        return (result.reshaped(inputEmbeds.shape), layout)
     }
 
     private func combinedFrames(
@@ -662,7 +650,7 @@ public final class Qwen3VLMoE: Module, VLMModel, KVCacheDimensionProvider {
             let featureSlices = visionHidden.split(indices: splitIndices)
             let flattenedFeatures = concatenated(featureSlices).asType(textEmbeds.dtype)
 
-            let (mergedEmbeds, indices) = try mergeInputIdsWithImageFeatures(
+            let (mergedEmbeds, layout) = try mergeInputIdsWithImageFeatures(
                 imageFeatures: flattenedFeatures,
                 inputEmbeds: textEmbeds,
                 inputIds: inputIds,
@@ -670,12 +658,12 @@ public final class Qwen3VLMoE: Module, VLMModel, KVCacheDimensionProvider {
                 videoTokenIndex: config.videoTokenIndex)
 
             inputEmbeddings = mergedEmbeds
-            visualIndices = indices
+            visualIndices = layout.indices
 
             if !deepstackOutputs.isEmpty {
                 deepstackEmbeds = deepstackOutputs.map { layerFeatures in
                     let slices = layerFeatures.split(indices: splitIndices)
-                    return concatenated(slices).asType(textEmbeds.dtype)
+                    return layout.tokenOrdered(concatenated(slices).asType(textEmbeds.dtype))
                 }
             }
         }

@@ -226,6 +226,11 @@ final class Qwen3VLMoEContinuationTests: XCTestCase {
         try continuation.assertWarmImageContinuation(try makeTinyModel())
     }
 
+    func testVideoBeforeImageTakesItsOwnFeatures() throws {
+        try MediaOrderAssertions().assertVideoBeforeImageMatchesImageBeforeVideo(
+            try makeTinyModel())
+    }
+
     /// More image features than placeholder tokens must throw, not trap in the scatter.
     func testImageFeatureTokenMismatchThrows() throws {
         let model = try makeTinyModel()

@@ -318,6 +318,13 @@ final class Qwen3VLContinuationTests: XCTestCase {
         try continuation.assertWindowedImagePrefill(try makeTinyModel())
     }
 
+    /// The windowed path slices deepstack rows by visual-token count, so the rows must
+    /// already be in token order when a video comes before an image.
+    func testVideoBeforeImageTakesItsOwnFeatures() throws {
+        try MediaOrderAssertions().assertVideoBeforeImageMatchesImageBeforeVideo(
+            try makeTinyModel())
+    }
+
     /// Windowing must not change M-RoPE semantics just because an input carries
     /// a padding mask: Qwen3-VL's baseline forwards no attention mask.
     func testPaddedWindowedImagePrefillMatchesSingleShot() throws {

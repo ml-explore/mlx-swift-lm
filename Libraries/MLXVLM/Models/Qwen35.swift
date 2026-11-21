@@ -1683,12 +1683,10 @@ public class Qwen35: Module, VLMModel {
         imageTokenIndex: Int,
         videoTokenIndex: Int
     ) throws -> MLXArray {
-        let imageMask = (inputIds .== MLXArray(imageTokenIndex))
-        let videoMask = (inputIds .== MLXArray(videoTokenIndex))
-        let specialMask = imageMask .|| videoMask
-
-        // Read back one bool per token, not per hidden element, and scatter whole rows.
-        let visualIndices = nonZero(specialMask)
+        // Read back one token id per position, not per hidden element, and scatter whole rows.
+        let layout = QwenVL.VisualTokenLayout(
+            inputIds: inputIds, imageTokenId: imageTokenIndex, videoTokenId: videoTokenIndex)
+        let visualIndices = layout.indices
 
         let hiddenSize = inputEmbeds.dim(-1)
         guard visualIndices.count * hiddenSize == imageFeatures.size else {
@@ -1699,19 +1697,9 @@ public class Qwen35: Module, VLMModel {
 
         let result = inputEmbeds.reshaped([-1, hiddenSize])
         result[MLXArray(visualIndices.map { Int32($0) }), 0...] =
-            imageFeatures.reshaped([visualIndices.count, hiddenSize])
+            layout.tokenOrdered(imageFeatures.reshaped([visualIndices.count, hiddenSize]))
 
         return result.reshaped(inputEmbeds.shape)
-    }
-
-    private func nonZero(_ mask: MLXArray) -> [Int] {
-        let values = mask.asArray(Bool.self)
-        var indices: [Int] = []
-        indices.reserveCapacity(values.count)
-        for (idx, value) in values.enumerated() where value {
-            indices.append(idx)
-        }
-        return indices
     }
 
     private func combinedFrames(imageFrames: [THW]?, videoFrames: [THW]?) -> [THW] {

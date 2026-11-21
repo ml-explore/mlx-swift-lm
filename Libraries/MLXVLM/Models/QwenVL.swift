@@ -64,12 +64,10 @@ public struct QwenVL {
         inputIds: MLXArray, inputEmbeds: MLXArray, imageFeatures: MLXArray,
         imageTokenId: Int, videoTokenId: Int
     ) -> MLXArray {
-        var imageIndices = [Int]()
-        for (i, v) in inputIds.asArray(Int.self).enumerated() {
-            if v == imageTokenId || v == videoTokenId {
-                imageIndices.append(i)
-            }
-        }
+        let layout = VisualTokenLayout(
+            inputIds: inputIds, imageTokenId: imageTokenId, videoTokenId: videoTokenId)
+        let imageIndices = layout.indices
+        let features = layout.tokenOrdered(imageFeatures, axis: imageFeatures.ndim - 2)
 
         // Make sure shapes match before assignment
         var result = inputEmbeds
@@ -77,14 +75,64 @@ public struct QwenVL {
             result = result[.newAxis, 0..., 0...]
         }
 
-        if imageFeatures.ndim == 2 {
-            let reshapedFeatures = imageFeatures[.newAxis, 0..., 0...]
+        if features.ndim == 2 {
+            let reshapedFeatures = features[.newAxis, 0..., 0...]
             result[0..., MLXArray(imageIndices), 0...] = reshapedFeatures
         } else {
-            result[0..., MLXArray(imageIndices), 0...] = imageFeatures
+            result[0..., MLXArray(imageIndices), 0...] = features
         }
 
         return result
+    }
+
+    /// Where the image and video placeholder tokens sit, and which vision feature row each takes.
+    ///
+    /// The vision tower emits every image row before every video row, but a prompt can put a
+    /// video first, for example a video in one turn and an image in a later one.
+    struct VisualTokenLayout {
+        /// Flat positions of the image and video tokens, ascending.
+        let indices: [Int]
+
+        /// The feature row for each position, or nil when the rows already follow token order.
+        let featureRows: MLXArray?
+
+        init(inputIds: MLXArray, imageTokenId: Int, videoTokenId: Int) {
+            let tokens = inputIds.asType(.int32).asArray(Int32.self)
+            var indices = [Int]()
+            var isImage = [Bool]()
+            for (position, token) in tokens.enumerated() {
+                if token == imageTokenId {
+                    indices.append(position)
+                    isImage.append(true)
+                } else if token == videoTokenId {
+                    indices.append(position)
+                    isImage.append(false)
+                }
+            }
+            self.indices = indices
+
+            var nextImage = 0
+            var nextVideo = isImage.filter { $0 }.count
+            var rows = [Int32]()
+            rows.reserveCapacity(indices.count)
+            for image in isImage {
+                if image {
+                    rows.append(Int32(nextImage))
+                    nextImage += 1
+                } else {
+                    rows.append(Int32(nextVideo))
+                    nextVideo += 1
+                }
+            }
+            let inOrder = rows.enumerated().allSatisfy { Int32($0.offset) == $0.element }
+            self.featureRows = inOrder ? nil : MLXArray(rows)
+        }
+
+        /// `features`, with its rows along `axis` moved into token order.
+        func tokenOrdered(_ features: MLXArray, axis: Int = 0) -> MLXArray {
+            guard let featureRows else { return features }
+            return take(features, featureRows, axis: axis)
+        }
     }
 
     public class VisionRotaryEmbedding {

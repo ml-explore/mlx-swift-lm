@@ -310,6 +310,11 @@ final class Qwen35ContinuationTests: XCTestCase {
         try continuation.assertWindowedImagePrefill(try makeTinyModel())
     }
 
+    func testVideoBeforeImageTakesItsOwnFeatures() throws {
+        try MediaOrderAssertions().assertVideoBeforeImageMatchesImageBeforeVideo(
+            try makeTinyModel())
+    }
+
     /// With a capacity-limited cache, the attention mask must span the keys
     /// the cache still presents, not the absolute offset: eviction begins once
     /// the prompt exceeds `maxTokens`, and a warm multi-token continuation is
