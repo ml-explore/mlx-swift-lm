@@ -39,6 +39,7 @@ mlx-swift-lm supports function calling / tool use with multiple model-specific f
 | `.minimaxM2` | MiniMax M2 | `<invoke name="f"><parameter name="k">v</parameter></invoke>` |
 | `.miniCPM5` | MiniCPM5 | `<function name="f"><param name="k">v</param></function>` |
 | `.atem` | Muse Glimmer (Onyx ATEM) | `<atem:function_calls><atem:invoke name="f">...</atem:invoke></atem:function_calls>` |
+| `.inkling` | Inkling 2 | Message frames, not a JSON dialect: thinking, text and tool calls each arrive in a `<\|message_model\|>` frame, e.g. `<\|message_model\|>f<\|content_invoke_tool_json\|>{"name":"f","args":{...}}<\|end_message\|>` |
 | `.mistral` | Mistral3 | `[TOOL_CALLS]get_weather [ARGS]{"location":"Tokyo"}` |
 | `.llama3` | Llama 3 | `<\|python_tag\|>{"name":"func","parameters":{...}}` |
 | `.gptOSS` | GPT-OSS | Full Harmony protocol, not a JSON dialect: `<\|channel\|>commentary to=functions.get_weather<\|message\|>{...}<\|call\|>` |

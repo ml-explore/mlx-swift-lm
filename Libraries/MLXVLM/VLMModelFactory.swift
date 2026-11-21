@@ -111,6 +111,8 @@ public enum VLMTypeRegistry {
         "lfm2-vl": create(LFM2VLConfiguration.self, LFM2VL.init),
         "glm_ocr": create(GlmOcrConfiguration.self, GlmOcr.init),
         "muse_glimmer": create(MuseGlimmerConfiguration.self, MuseGlimmer.init),
+        "inkling2": create(Inkling2Configuration.self, Inkling2.init),
+        "inkling2_loop": create(Inkling2Configuration.self, Inkling2.init),
     ])
 }
 
@@ -158,6 +160,8 @@ public enum VLMProcessorTypeRegistry {
             GlmOcrProcessorConfiguration.self, GlmOcrProcessor.init),
         "MuseGlimmerProcessor": create(
             MuseGlimmerProcessorConfiguration.self, MuseGlimmerProcessor.init),
+        "Inkling2Processor": create(
+            Inkling2ProcessorConfiguration.self, Inkling2Processor.init),
     ])
 }
 

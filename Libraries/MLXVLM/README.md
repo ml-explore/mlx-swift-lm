@@ -72,6 +72,7 @@ The following models have been tried:
 - mlx-community/gemma-3-27b-it-qat-4bit
 - HuggingFaceTB/SmolVLM2-500M-Video-Instruct-mlx
 - mlx-community/Muse-Glimmer-30B-4bit
+- mlx-community/Inkling-2-Mini-4bit
 
 Currently supported model types are:
 
@@ -83,6 +84,7 @@ Currently supported model types are:
 - gemma3
 - smolvlm
 - muse_glimmer
+- inkling2, inkling2_loop
 - diffusion_gemma
 
 ## DiffusionGemma
@@ -105,6 +107,24 @@ Checkpoint preparation maps text and vision tensors together with their file
 metadata and per-layer quantization settings. Conflicting aliases fail loading,
 and unknown tensors remain visible to strict parameter validation. Untied output
 projections require their own checkpoint weights.
+
+## Inkling 2
+
+Inkling 2 Mini (`inkling2_loop`) runs its middle 12 layers three times per token, and
+Inkling 2 Small (`inkling2`) runs each layer once. Both load through `VLMModelFactory`.
+The vision tower loads on the first image, so text-only use does not pay for it.
+
+The chat template sets the thinking effort, 0.9 by default. Pass another one in
+`additionalContext`, for example `["reasoning_effort": "low"]`: a name (`none`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max`) or a number from 0 to 0.99.
+Thinking, answers and tool calls stream as reasoning, text and `ToolCall` events
+through the `.inkling` tool-call format.
+
+Images keep their native resolution, padded to 40-pixel blocks, and each block is
+one image token. Set `UserInput.Processing.maxPixels` to bound the image tokens.
+KV caches can be full precision or affine quantized (`kvBits`); TurboQuant and the
+variance-normalized caches are not supported. Rotating capacity can retain a tail,
+but not a pinned prefix.
 
 See [llm-tool](../../Tools/llm-tool)
 
