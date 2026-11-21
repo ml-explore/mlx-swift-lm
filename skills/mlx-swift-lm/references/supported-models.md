@@ -112,6 +112,7 @@ LLMRegistry.mellum2_1_12b_a2_5b_thinking_6bit  // mlx-community/Mellum2.1-12B-A2
 | `bailing_moe` | Bailing MoE |
 | `gpt_oss` | GPT OSS |
 | `minicpm` | MiniCPM |
+| `qwen4_exp` | Qwen3.8-Flash-Next (text only; no MTP or vision tower) |
 
 ### LFM3 tokenizer requirements
 
