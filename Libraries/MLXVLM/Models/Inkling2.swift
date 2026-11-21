@@ -1801,6 +1801,8 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
     /// Thinking, answers and tool calls arrive in their own message frames.
     public var toolCallFormat: ToolCallFormat? { .inkling }
 
+    public var reasoningConfig: ReasoningConfig? { InklingReasoningProtocol.inkling2 }
+
     public var kvHeads: [Int] {
         let text = config.textConfiguration
         return text.layerVisits.map { text.isSliding($0) ? text.slidingKVHeads : text.kvHeads }

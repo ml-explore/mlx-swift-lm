@@ -118,7 +118,8 @@ The chat template sets the thinking effort, 0.9 by default. Pass another one in
 `additionalContext`, for example `["reasoning_effort": "low"]`: a name (`none`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) or a number from 0 to 0.99.
 Thinking, answers and tool calls stream as reasoning, text and `ToolCall` events
-through the `.inkling` tool-call format.
+through the `.inkling` tool-call format. A thinking budget closes the thinking frame
+with `<|end_message|>`, and the model answers in its next frame.
 
 Images keep their native resolution, padded to 40-pixel blocks, and each block is
 one image token. Set `UserInput.Processing.maxPixels` to bound the image tokens.

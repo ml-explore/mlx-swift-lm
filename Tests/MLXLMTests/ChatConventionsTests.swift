@@ -184,6 +184,12 @@ struct ChatConventionsTests {
         #expect(glimmerWithoutTransition == OnyxReasoningProtocol.frames)
         #expect(OnyxReasoningProtocol.glimmer.budgetTransition == .immediate)
         #expect(OnyxReasoningProtocol.frames.budgetTransition == nil)
+
+        var inklingWithoutTransition = InklingReasoningProtocol.inkling2
+        inklingWithoutTransition.budgetTransition = nil
+        #expect(inklingWithoutTransition == InklingReasoningProtocol.frames)
+        #expect(InklingReasoningProtocol.inkling2.budgetTransition == .immediate)
+        #expect(InklingReasoningProtocol.frames.budgetTransition == nil)
     }
 
     @Test func alwaysOnPreset() {

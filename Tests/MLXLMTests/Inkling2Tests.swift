@@ -800,6 +800,26 @@ struct Inkling2StreamProtocolTests {
                     #"{"name":"get_weather","#)) == .incompleteOutput)
     }
 
+    /// A budget cut must force the frame boundary and nothing else: the model opens its own
+    /// answer frame, and `<|end_message|>` does not end the turn.
+    @Test("A thinking budget closes only the thinking frame")
+    func budgetTransitionClosesTheFrame() throws {
+        let config = try JSONDecoder().decode(
+            Inkling2Configuration.self, from: Data(Inkling2ModelTests.tinyJSON.utf8))
+        #expect(Inkling2(config).reasoningConfig == InklingReasoningProtocol.inkling2)
+
+        let tokenizer = InklingTestTokenizer()
+        let plan = try ThinkingBudgetPlan(
+            configuration: ThinkingBudgetConfiguration(maximumTokenCount: 8),
+            reasoning: InklingReasoningProtocol.inkling2,
+            tokenizer: tokenizer)
+        #expect(plan.forcedTransitionTokenIDs == tokenizer.ids("<|end_message|>"))
+        let decoder = try #require(
+            ToolCallFormat.inkling.makeProtocolTokenStreamDecoder(
+                tokenizer: tokenizer, tools: nil, stopStrings: []))
+        #expect(!decoder.additionalStopTokenIDs.contains(tokenizer.id("<|end_message|>")))
+    }
+
     @Test("The text parser reads a tool frame")
     func textParser() {
         let call = InklingToolCallParser().parse(
