@@ -184,6 +184,7 @@ struct Inkling2KernelTests {
             (keys: 37, ring: true, window: 0),
             (keys: 64, ring: true, window: 48),
             (keys: 3000, ring: false, window: 0),
+            (keys: 1500, ring: true, window: 1100),
         ])
     func decodeAttention(keys s: Int, ring: Bool, window: Int) {
         MLXRandom.seed(3)
@@ -240,6 +241,60 @@ struct Inkling2KernelTests {
         #expect(
             indices.asType(.int32).asArray(Int32.self) == order.asType(.int32).asArray(Int32.self))
         #expect(maxDifference(weights, expected) < 1e-5)
+    }
+
+    @Test(
+        "The fused expert kernels match the gathered quantized matmuls",
+        arguments: [
+            (QuantizationMode.nvfp4, 4, 16), (.mxfp8, 8, 32), (.affine, 4, 64), (.affine, 8, 32),
+        ])
+    func fusedExperts(mode: QuantizationMode, bits: Int, groupSize: Int) {
+        MLXRandom.seed(8)
+        let (rows, d, inner, experts, k) = (2, 128, 64, 6, 3)
+        func quantize(_ shape: [Int]) -> Inkling2ExpertTensors {
+            let dense = (MLXRandom.normal(shape) * 0.1).asType(.bfloat16)
+            let (weight, scales, biases) = MLX.quantized(
+                dense, groupSize: groupSize, bits: bits, mode: mode)
+            let global = mode == .nvfp4 ? MLXRandom.uniform(2000 ..< 3000, [experts]) : nil
+            return .init(
+                weight: weight, scales: scales, biases: biases, globalScale: global,
+                format: .init(
+                    mode: mode, bits: bits, groupSize: groupSize, hasGlobalScale: global != nil))
+        }
+        let gateUp = quantize([experts, 2 * inner, d])
+        let down = quantize([experts, d, inner])
+        let x = MLXRandom.normal([rows, d]).asType(.bfloat16)
+        let indices = MLXArray([0, 4, 2, 5, 1, 4] as [UInt32]).reshaped(rows, k)
+        let weights = MLXRandom.uniform(0 ..< 1, [rows, k])
+        let residual = MLXRandom.normal([rows, d])
+        let state = MLXRandom.normal([rows, 3, d]).asType(.bfloat16)
+        let convolution = (MLXRandom.normal([d, 4, 1]) * 0.5).asType(.bfloat16)
+        func gathered(_ x: MLXArray, _ experts: Inkling2ExpertTensors) -> MLXArray {
+            gatherQuantizedMM(
+                x, experts.weight, scales: experts.scales, biases: experts.biases,
+                rhsIndices: indices, transpose: true, groupSize: groupSize, bits: bits,
+                mode: mode, globalScale: experts.globalScale
+            ).squeezed(axis: -2)
+        }
+
+        let activations = inkling2ExpertGateUp(
+            x, experts: gateUp, indices: indices, softcaps: MLXArray([Float(4), 25]))
+        let g = gathered(x.reshaped(rows, 1, 1, d), gateUp).asType(.float32)
+        let (gate, up) = (
+            g[.ellipsis, .stride(from: 0, by: 2)], g[.ellipsis, .stride(from: 1, by: 2)]
+        )
+        let expectedActivations = tanh(gate / 4) * 4 * sigmoid(gate) * tanh(up / 25) * 25
+        #expect(activations.shape == [rows, k, inner])
+        #expect(maxDifference(activations, expectedActivations) < 2e-2)
+
+        let fused = inkling2ExpertDown(
+            activations, experts: down, indices: indices, weights: weights, residual: residual,
+            state: state, convolutionWeight: convolution)
+        let expected = inkling2ExpertEpilogue(
+            outputs: gathered(activations.reshaped(rows, k, 1, inner), down), weights: weights,
+            residual: residual, state: state, convolutionWeight: convolution)
+        #expect(maxDifference(fused.hidden, expected.hidden) < 2e-2)
+        #expect(maxDifference(fused.state, expected.state) < 2e-2)
     }
 
     @Test("Message controllers match the gated blend", arguments: [(3, false), (1, true)])

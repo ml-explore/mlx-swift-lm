@@ -337,13 +337,11 @@ func inkling2RelativeAttention(
 
 // MARK: - Decode attention
 
-/// One query per head over one split of the keys. The bias of each distance comes from the
-/// head's relative state and the projection table; the output is gated by `sigmoid(gate)`.
-private func relativeDecodeSource(final: Bool) -> String {
-    """
+/// One query per head over all keys. The bias of each distance comes from the head's relative
+/// state and the projection table; the output is gated by `sigmoid(gate)`.
+private let relativeDecodeSource = """
         constexpr int E = D / 32;
         const int bh = threadgroup_position_in_grid.x;
-        const int split = threadgroup_position_in_grid.y;
         const int b = bh / HQ;
         const int h = bh % HQ;
         const int kv_head = h / (HQ / HKV);
@@ -368,9 +366,6 @@ private func relativeDecodeSource(final: Bool) -> String {
         for (int i = 0; i < E; i++) {
             qv[i] = float(q[size_t(bh) * D + lane * E + i]) * scale;
         }
-        const int per = (S + SPLITS - 1) / SPLITS;
-        const int k0 = split * per;
-        const int k1 = min(S, k0 + per);
         const device T* k_head = k + b * k_strides[0] + kv_head * k_strides[1] + lane * E;
         const device T* v_head = v + b * v_strides[0] + kv_head * v_strides[1] + lane * E;
 
@@ -380,7 +375,7 @@ private func relativeDecodeSource(final: Bool) -> String {
         for (int i = 0; i < E; i++) {
             acc[i] = 0.0f;
         }
-        for (int j = k0 + int(sg); j < k1; j += NSG) {
+        for (int j = int(sg); j < S; j += NSG) {
             // A wrapped ring holds the newest key at ring - 1.
             const int d = ring >= 0 ? (ring - 1 - j + S) % S : S - 1 - j;
             if (WINDOW > 0 && d >= WINDOW) {
@@ -422,42 +417,136 @@ private func relativeDecodeSource(final: Bool) -> String {
         if (t >= D) {
             return;
         }
-        float big = -INFINITY;
+        const float sink = float(sinks[b * sinks_strides[0] + h]);
+        float big = sink;
         for (int g = 0; g < NSG; g++) {
             big = max(big, tm[g]);
         }
+        float total = fast::exp(sink - big);
+        float o = 0.0f;
+        for (int g = 0; g < NSG; g++) {
+            const float w = fast::exp(tm[g] - big);
+            total += tl[g] * w;
+            o += tacc[g * D + t] * w;
+        }
+        const float x = float(gate[b * gate_strides[0] + h * D + t]);
+        const float y = 1.0f / (1.0f + metal::precise::exp(metal::abs(x)));
+        out[size_t(bh) * D + t] = T(float(T(o / total)) * (x < 0 ? y : 1.0f - y));
     """
-        + (final
-            ? """
-                const float sink = float(sinks[b * sinks_strides[0] + h]);
-                big = max(big, sink);
-                float total = fast::exp(sink - big);
-                float o = 0.0f;
-                for (int g = 0; g < NSG; g++) {
-                    const float w = fast::exp(tm[g] - big);
-                    total += tl[g] * w;
-                    o += tacc[g * D + t] * w;
+
+/// All query heads of one key head over one split of `PER` keys, so each key is read once.
+/// The relative bias is computed only for the split's keys.
+private let groupedDecodeSplitSource = """
+        constexpr int E = D / 32;
+        constexpr int G = HQ / HKV;
+        const int bk = threadgroup_position_in_grid.x;
+        const int split = threadgroup_position_in_grid.y;
+        const int b = bk / HKV;
+        const int kv_head = bk % HKV;
+        const uint tid = thread_position_in_threadgroup.x;
+        const uint lane = thread_index_in_simdgroup;
+        const uint sg = simdgroup_index_in_threadgroup;
+        const int S = params[0];
+        const int ring = params[1];
+        const int k0 = split * PER;
+        const int k1 = min(S, k0 + PER);
+
+        threadgroup float bias[G * PER];
+        for (int t = tid; t < G * PER; t += NSG * 32) {
+            const int j = k0 + t % PER;
+            const int d = ring >= 0 ? (ring - 1 - j + S) % S : S - 1 - j;
+            if (j < k1 && d < R) {
+                const device T* rq = rel + (size_t(b) * HQ + kv_head * G + t / PER) * DR;
+                float s = 0.0f;
+                for (int r = 0; r < DR; r++) {
+                    s += float(rq[r]) * float(table[r * R + d]);
                 }
-                const float x = float(gate[b * gate_strides[0] + h * D + t]);
-                const float y = 1.0f / (1.0f + metal::precise::exp(metal::abs(x)));
-                out[size_t(bh) * D + t] = T(float(T(o / total)) * (x < 0 ? y : 1.0f - y));
-            """
-            : """
+                bias[t] = float(T(s));
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        float qv[G][E];
+        float m[G];
+        float l[G];
+        float acc[G][E];
+        for (int g = 0; g < G; g++) {
+            m[g] = -INFINITY;
+            l[g] = 0.0f;
+            for (int i = 0; i < E; i++) {
+                qv[g][i] = float(q[(size_t(b) * HQ + kv_head * G + g) * D + lane * E + i]) * scale;
+                acc[g][i] = 0.0f;
+            }
+        }
+        const device T* k_head = k + b * k_strides[0] + kv_head * k_strides[1] + lane * E;
+        const device T* v_head = v + b * v_strides[0] + kv_head * v_strides[1] + lane * E;
+        for (int j = k0 + int(sg); j < k1; j += NSG) {
+            const int d = ring >= 0 ? (ring - 1 - j + S) % S : S - 1 - j;
+            if (WINDOW > 0 && d >= WINDOW) {
+                continue;
+            }
+            float kf[E];
+            float vf[E];
+            for (int i = 0; i < E; i++) {
+                kf[i] = float(k_head[j * k_strides[2] + i]);
+                vf[i] = float(v_head[j * v_strides[2] + i]);
+            }
+            for (int g = 0; g < G; g++) {
+                float s = 0.0f;
+                for (int i = 0; i < E; i++) {
+                    s += qv[g][i] * kf[i];
+                }
+                s = simd_sum(s);
+                if (d < R) {
+                    s += bias[g * PER + j - k0];
+                }
+                const float mn = max(m[g], s);
+                const float f = fast::exp(m[g] - mn);
+                const float p = fast::exp(s - mn);
+                l[g] = l[g] * f + p;
+                for (int i = 0; i < E; i++) {
+                    acc[g][i] = acc[g][i] * f + p * vf[i];
+                }
+                m[g] = mn;
+            }
+        }
+
+        threadgroup float tm[NSG];
+        threadgroup float tl[NSG];
+        threadgroup float tacc[NSG * D];
+        for (int g = 0; g < G; g++) {
+            if (g > 0) {
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            if (lane == 0) {
+                tm[sg] = m[g];
+                tl[sg] = l[g];
+            }
+            for (int i = 0; i < E; i++) {
+                tacc[sg * D + lane * E + i] = acc[g][i];
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (tid < D) {
+                float big = -INFINITY;
+                for (int n = 0; n < NSG; n++) {
+                    big = max(big, tm[n]);
+                }
                 float total = 0.0f;
                 float o = 0.0f;
-                for (int g = 0; g < NSG; g++) {
-                    const float w = big == -INFINITY ? 0.0f : fast::exp(tm[g] - big);
-                    total += tl[g] * w;
-                    o += tacc[g * D + t] * w;
+                for (int n = 0; n < NSG; n++) {
+                    const float w = big == -INFINITY ? 0.0f : fast::exp(tm[n] - big);
+                    total += tl[n] * w;
+                    o += tacc[n * D + tid] * w;
                 }
-                const size_t row = size_t(bh) * SPLITS + split;
-                partial[row * D + t] = o;
-                if (t == 0) {
+                const size_t row = (size_t(b) * HQ + kv_head * G + g) * SPLITS + split;
+                partial[row * D + tid] = o;
+                if (tid == 0) {
                     stats[row * 2] = big;
                     stats[row * 2 + 1] = total;
                 }
-            """)
-}
+            }
+        }
+    """
 
 private let relativeDecodeReduceSource = """
         const int bh = threadgroup_position_in_grid.x;
@@ -502,25 +591,28 @@ func inkling2DecodeAttention(
     let (b, hq, d) = (q.dim(0), q.dim(1), q.dim(2))
     let (hkv, s) = (k.dim(1), k.dim(2))
     let kernels = Inkling2DecodeKernels.shared
-    let splits = s <= 2048 ? 1 : min(32, (s + 1023) / 1024)
-    let simdgroups = 32
     let params = MLXArray([Int32(s), Int32(ringIndex ?? -1)])
     let inputs: [MLXArray] = [
         q, k, v, relative, table, sinks, gate, params, MLXArray(scale),
     ]
-    let template: [(String, any KernelTemplateArg)] = [
+    var template: [(String, any KernelTemplateArg)] = [
         ("T", q.dtype), ("D", d), ("HQ", hq), ("HKV", hkv), ("R", table.dim(1)),
-        ("DR", table.dim(0)), ("WINDOW", window), ("NSG", simdgroups), ("SPLITS", splits),
+        ("DR", table.dim(0)), ("WINDOW", window),
     ]
-    if splits == 1 {
+    // Up to a sliding window, one threadgroup per head is fastest; longer caches are split.
+    if s <= 1024 {
+        let simdgroups = 32
         return kernels.single(
-            inputs, template: template, grid: (b * hq * simdgroups * 32, 1, 1),
-            threadGroup: (simdgroups * 32, 1, 1), outputShapes: [[b, hq * d]],
-            outputDTypes: [q.dtype]
+            inputs, template: template + [("NSG", simdgroups)],
+            grid: (b * hq * simdgroups * 32, 1, 1), threadGroup: (simdgroups * 32, 1, 1),
+            outputShapes: [[b, hq * d]], outputDTypes: [q.dtype]
         )[0]
     }
+    let (simdgroups, keysPerSplit) = (8, 256)
+    let splits = (s + keysPerSplit - 1) / keysPerSplit
+    template += [("NSG", simdgroups), ("PER", keysPerSplit), ("SPLITS", splits)]
     let partial = kernels.split(
-        inputs, template: template, grid: (b * hq * simdgroups * 32, splits, 1),
+        inputs, template: template, grid: (b * hkv * simdgroups * 32, splits, 1),
         threadGroup: (simdgroups * 32, 1, 1),
         outputShapes: [[b * hq * splits, d], [b * hq * splits, 2]],
         outputDTypes: [.float32, .float32])
@@ -1066,29 +1158,34 @@ func inkling2MessageControllers(
 
 // MARK: - Expert epilogue
 
-/// The weighted sum of the experts, its short convolution and the residual add.
-private let expertEpilogueSource = """
-        const uint i = thread_position_in_grid.x;
-        const uint row = i / D;
-        const uint d = i % D;
-        float m = 0.0f;
-        for (int j = 0; j < KE; j++) {
-            m += float(outputs[(size_t(row) * KE + j) * D + d]) * weights[row * KE + j];
-        }
+/// The short convolution of the expert sum `m` of `row` at channel `d`, and the residual add.
+private let expertEpilogueTail = """
         const T mb = T(m);
         const size_t sb = size_t(row) * 3 * D + d;
         const float s0 = float(state[sb]);
         const float s1 = float(state[sb + D]);
         const float s2 = float(state[sb + 2 * D]);
-        const device T* w = conv_weight + size_t(d) * 4;
-        const float a = s0 * float(w[0]) + s1 * float(w[1]) + s2 * float(w[2])
-            + float(mb) * float(w[3]);
+        const device T* cw = conv_weight + size_t(d) * 4;
+        const float a = s0 * float(cw[0]) + s1 * float(cw[1]) + s2 * float(cw[2])
+            + float(mb) * float(cw[3]);
         const float y = float(T((float(T(a)) + float(mb)) / divisor[0]));
+        const size_t i = size_t(row) * D + d;
         hidden[i] = T(residual[i] + y);
         state_out[sb] = state[sb + D];
         state_out[sb + D] = state[sb + 2 * D];
         state_out[sb + 2 * D] = mb;
     """
+
+/// The weighted sum of the experts, its short convolution and the residual add.
+private let expertEpilogueSource =
+    """
+        const uint row = thread_position_in_grid.x / D;
+        const uint d = thread_position_in_grid.x % D;
+        float m = 0.0f;
+        for (int j = 0; j < KE; j++) {
+            m += float(outputs[(size_t(row) * KE + j) * D + d]) * weights[row * KE + j];
+        }
+    """ + expertEpilogueTail
 
 /// The layer output `residual + conv(sum(weights * outputs))` and the next convolution state.
 ///
@@ -1109,6 +1206,219 @@ func inkling2ExpertEpilogue(
     return (out[0], out[1])
 }
 
+// MARK: - Routed experts
+
+/// Dot products of quantized rows with a vector, 16 weights per lane and step. The fp modes
+/// decode e2m1 and e4m3 through `half`, as MLX does.
+private let expertHeader = """
+    template <int GS, bool AFFINE, typename S>
+    inline float inkling2_group_scale(S s) {
+        if (AFFINE) {
+            return float(s);
+        }
+        const uint8_t b = uint8_t(s);
+        if (GS == 16) {
+            const ushort v = b & 127;
+            const ushort u = (v << 7) | (((v + 1) >> 7) << 14) | (ushort(b & 128) << 8);
+            return float(as_type<half>(u)) * 256.0f;
+        }
+        return as_type<float>(b == 0 ? 0x400000u : (uint(b) << 23));
+    }
+
+    // The dot product of 16 weights with x, before the group scale.
+    template <int BITS, bool AFFINE>
+    inline float inkling2_unit_dot(const device uint8_t* w, thread const float* x) {
+        float s = 0.0f;
+        if (BITS == 4) {
+            const uint2 q = *(const device uint2*)w;
+            for (int i = 0; i < 8; i++) {
+                const uint n = (i < 4 ? q.x : q.y) >> ((i % 4) * 8);
+                if (AFFINE) {
+                    s += x[2 * i] * float(n & 15) + x[2 * i + 1] * float((n >> 4) & 15);
+                } else {
+                    const half lo = as_type<half>(ushort(((n & 8) << 12) | ((n & 7) << 9)));
+                    const half hi = as_type<half>(ushort(((n & 128) << 8) | ((n & 112) << 5)));
+                    s += x[2 * i] * float(lo) + x[2 * i + 1] * float(hi);
+                }
+            }
+            return AFFINE ? s : s * 16384.0f;
+        }
+        const uint4 q = *(const device uint4*)w;
+        for (int i = 0; i < 16; i++) {
+            const uint b = (q[i / 4] >> ((i % 4) * 8)) & 255;
+            if (AFFINE) {
+                s += x[i] * float(b);
+            } else {
+                const ushort v = b & 127;
+                const ushort u = (v << 7) | (((v + 1) >> 7) << 14) | (ushort(b & 128) << 8);
+                s += x[i] * float(as_type<half>(u));
+            }
+        }
+        return AFFINE ? s : s * 256.0f;
+    }
+
+    // Each lane's share of the dot products of R consecutive rows with x.
+    template <int BITS, int GS, bool AFFINE, int K, int R, typename T, typename S, typename B>
+    inline void inkling2_rows_dot(
+        const device uint8_t* w, const device S* scales, B biases, const device T* x, uint lane,
+        thread float* acc) {
+        for (int u = lane; u < K / 16; u += 32) {
+            float xv[16];
+            float xs = 0.0f;
+            for (int i = 0; i < 16; i++) {
+                xv[i] = float(x[u * 16 + i]);
+                xs += xv[i];
+            }
+            const int g = u * 16 / GS;
+            for (int r = 0; r < R; r++) {
+                const float dot = inkling2_unit_dot<BITS, AFFINE>(w + (r * K + u * 16) * BITS / 8, xv);
+                acc[r] += inkling2_group_scale<GS, AFFINE>(scales[r * (K / GS) + g]) * dot;
+                if (AFFINE) {
+                    acc[r] += float(biases[r * (K / GS) + g]) * xs;
+                }
+            }
+        }
+    }
+    """
+
+/// One simdgroup per channel of one routed expert: its gate and up rows, then the softcapped
+/// SwiGLU. Each expert output rounds to `T` before the activation.
+private let expertGateUpSource = """
+        const uint lane = thread_index_in_simdgroup;
+        const int bj = threadgroup_position_in_grid.y;
+        const int c = threadgroup_position_in_grid.x * NSG + simdgroup_index_in_threadgroup;
+        const uint e = indices[bj];
+        const size_t row = size_t(e) * 2 * I + 2 * c;
+        float acc[2] = {0.0f, 0.0f};
+        inkling2_rows_dot<BITS, GS, AFFINE, DIN, 2>(
+            (const device uint8_t*)w + row * (DIN * BITS / 8), scales + row * (DIN / GS),
+            biases + (AFFINE ? row * (DIN / GS) : 0), x + size_t(bj / KE) * DIN, lane, acc);
+        const float g = simd_sum(acc[0]);
+        const float u = simd_sum(acc[1]);
+        if (lane == 0) {
+            const float s = HAS_GS ? global_scale[e] / (448.0f * 6.0f) : 1.0f;
+            const float gate = float(T(g * s));
+            const float up = float(T(u * s));
+            const float y = 1.0f / (1.0f + metal::precise::exp(metal::abs(gate)));
+            const float sig = gate < 0 ? y : 1.0f - y;
+            const float gc = metal::precise::tanh(gate / caps[0]) * caps[0];
+            const float uc = metal::precise::tanh(up / caps[1]) * caps[1];
+            act[size_t(bj) * I + c] = T(gc * sig * uc);
+        }
+    """
+
+/// One simdgroup per routed expert over `ROWS` output channels, then the weighted sum of the
+/// experts, its short convolution and the residual add.
+private let expertDownSource =
+    """
+        const uint lane = thread_index_in_simdgroup;
+        const uint j = simdgroup_index_in_threadgroup;
+        const int row = threadgroup_position_in_grid.y;
+        const int d0 = threadgroup_position_in_grid.x * ROWS;
+        const uint e = indices[row * KE + j];
+        const float s = HAS_GS ? global_scale[e] / (448.0f * 6.0f) : 1.0f;
+        threadgroup float outputs[KE * ROWS];
+        for (int r = 0; r < ROWS; r++) {
+            const size_t n = size_t(e) * D + d0 + r;
+            float acc[1] = {0.0f};
+            inkling2_rows_dot<BITS, GS, AFFINE, K, 1>(
+                (const device uint8_t*)w + n * (K * BITS / 8), scales + n * (K / GS),
+                biases + (AFFINE ? n * (K / GS) : 0), act + size_t(row * KE + j) * K, lane, acc);
+            const float o = simd_sum(acc[0]);
+            if (lane == 0) {
+                outputs[j * ROWS + r] = float(T(o * s));
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const uint t = thread_position_in_threadgroup.x;
+        if (t >= ROWS) {
+            return;
+        }
+        const int d = d0 + t;
+        float m = 0.0f;
+        for (int k = 0; k < KE; k++) {
+            m += outputs[k * ROWS + t] * weights[row * KE + k];
+        }
+    """ + expertEpilogueTail
+
+/// A quantized projection of all experts, `[E, N, K * bits / 32]`.
+struct Inkling2ExpertTensors {
+    let weight: MLXArray
+    let scales: MLXArray
+    let biases: MLXArray?
+    let globalScale: MLXArray?
+    let format: Inkling2ExpertFormat
+
+    /// Whether the fused expert kernels read this format with `inputDims` per row.
+    func supportsFusedDecode(inputDims: Int) -> Bool {
+        let modes: [QuantizationMode] = [.affine, .nvfp4, .mxfp4, .mxfp8]
+        return modes.contains(format.mode) && [4, 8].contains(format.bits)
+            && format.groupSize % 16 == 0 && inputDims % 16 == 0
+            && (format.mode == .affine) == (biases != nil)
+    }
+
+    fileprivate func inputs() -> [MLXArray] {
+        [weight, scales, biases ?? MLXArray([Float(0)]), globalScale ?? MLXArray([Float(1)])]
+    }
+
+    fileprivate func template(_ dtype: DType) -> [(String, any KernelTemplateArg)] {
+        [
+            ("T", dtype), ("BITS", format.bits), ("GS", format.groupSize),
+            ("AFFINE", format.mode == .affine), ("HAS_GS", globalScale != nil),
+        ]
+    }
+}
+
+/// The softcapped SwiGLU of the gate and up rows of each routed expert, which alternate.
+///
+/// - Parameters:
+///   - x: `[B, D]`.
+///   - indices: uint32 `[B, K]`.
+///   - softcaps: float32 `[2]`, the gate and up softcaps.
+/// - Returns: `[B, K, I]`.
+func inkling2ExpertGateUp(
+    _ x: MLXArray, experts: Inkling2ExpertTensors, indices: MLXArray, softcaps: MLXArray
+) -> MLXArray {
+    let (rows, k) = (indices.dim(0), indices.dim(1))
+    let (din, channels) = (x.dim(-1), experts.weight.dim(1) / 2)
+    let simdgroups = 4
+    return Inkling2DecodeKernels.shared.expertGateUp(
+        [x] + experts.inputs() + [indices, softcaps],
+        template: experts.template(x.dtype) + [
+            ("DIN", din), ("I", channels), ("KE", k), ("NSG", simdgroups),
+        ],
+        grid: (channels * 32, rows * k, 1), threadGroup: (simdgroups * 32, 1, 1),
+        outputShapes: [[rows, k, channels]], outputDTypes: [x.dtype])[0]
+}
+
+/// ``inkling2ExpertEpilogue(outputs:weights:residual:state:convolutionWeight:)`` of the down
+/// projections of `activations`, without materializing the expert outputs.
+///
+/// - Parameters:
+///   - activations: `[B, K, I]`.
+///   - weights: float32 `[B, K]`.
+///   - residual: float32 `[B, D]`.
+func inkling2ExpertDown(
+    _ activations: MLXArray, experts: Inkling2ExpertTensors, indices: MLXArray,
+    weights: MLXArray, residual: MLXArray, state: MLXArray, convolutionWeight: MLXArray
+) -> (hidden: MLXArray, state: MLXArray) {
+    let (rows, k, inner) = (activations.dim(0), activations.dim(1), activations.dim(2))
+    let d = experts.weight.dim(1)
+    let tile = 2
+    let out = Inkling2DecodeKernels.shared.expertDown(
+        [activations] + experts.inputs() + [
+            indices, weights, residual, state, convolutionWeight,
+            MLXArray([Float(5).squareRoot()]),
+        ],
+        template: experts.template(activations.dtype) + [
+            ("K", inner), ("D", d), ("KE", k), ("ROWS", tile),
+        ],
+        grid: (d / tile * k * 32, rows, 1), threadGroup: (k * 32, 1, 1),
+        outputShapes: [[rows, d], [rows, 3, d]],
+        outputDTypes: [activations.dtype, activations.dtype])
+    return (out[0], out[1])
+}
+
 private final class Inkling2DecodeKernels: @unchecked Sendable {
     static let shared = Inkling2DecodeKernels()
 
@@ -1117,6 +1427,8 @@ private final class Inkling2DecodeKernels: @unchecked Sendable {
     let reduce: MLXFast.MLXFastKernel
     let attentionPrologue: MLXFast.MLXFastKernel
     let expertEpilogue: MLXFast.MLXFastKernel
+    let expertGateUp: MLXFast.MLXFastKernel
+    let expertDown: MLXFast.MLXFastKernel
     let depthMix: MLXFast.MLXFastKernel
     let messageDown: MLXFast.MLXFastKernel
     let messageBlend: MLXFast.MLXFastKernel
@@ -1126,10 +1438,10 @@ private final class Inkling2DecodeKernels: @unchecked Sendable {
         let inputs = ["q", "k", "v", "rel", "table", "sinks", "gate", "params", "scale"]
         single = MLXFast.metalKernel(
             name: "inkling2_decode_attention", inputNames: inputs, outputNames: ["out"],
-            source: relativeDecodeSource(final: true), ensureRowContiguous: false)
+            source: relativeDecodeSource, ensureRowContiguous: false)
         split = MLXFast.metalKernel(
             name: "inkling2_decode_attention_split", inputNames: inputs,
-            outputNames: ["partial", "stats"], source: relativeDecodeSource(final: false),
+            outputNames: ["partial", "stats"], source: groupedDecodeSplitSource,
             ensureRowContiguous: false)
         reduce = MLXFast.metalKernel(
             name: "inkling2_decode_attention_reduce",
@@ -1147,6 +1459,16 @@ private final class Inkling2DecodeKernels: @unchecked Sendable {
             name: "inkling2_expert_epilogue",
             inputNames: ["outputs", "weights", "residual", "state", "conv_weight", "divisor"],
             outputNames: ["hidden", "state_out"], source: expertEpilogueSource)
+        let experts = ["w", "scales", "biases", "global_scale", "indices"]
+        expertGateUp = MLXFast.metalKernel(
+            name: "inkling2_expert_gate_up", inputNames: ["x"] + experts + ["caps"],
+            outputNames: ["act"], source: expertGateUpSource, header: expertHeader)
+        expertDown = MLXFast.metalKernel(
+            name: "inkling2_expert_down",
+            inputNames: ["act"] + experts + [
+                "weights", "residual", "state", "conv_weight", "divisor",
+            ],
+            outputNames: ["hidden", "state_out"], source: expertDownSource, header: expertHeader)
         depthMix = MLXFast.metalKernel(
             name: "inkling2_depth_mix",
             inputNames: [

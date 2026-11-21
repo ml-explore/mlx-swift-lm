@@ -1018,6 +1018,12 @@ private final class Inkling2ExpertProjection: Module {
         freeze()
     }
 
+    var tensors: Inkling2ExpertTensors {
+        .init(
+            weight: weight, scales: scales, biases: biases, globalScale: globalScale,
+            format: format)
+    }
+
     func callAsFunction(_ x: MLXArray, _ indices: MLXArray, sorted: Bool) -> MLXArray {
         gatherQuantizedMM(
             x, weight, scales: scales, biases: biases, rhsIndices: indices, transpose: true,
@@ -1073,6 +1079,7 @@ private final class Inkling2Experts: Module {
     @ModuleInfo(key: "down_proj") var downProj: Inkling2ExpertProjection
 
     private let activation: @Sendable (MLXArray, MLXArray) -> MLXArray
+    private let softcaps: ConstantBox
 
     init(
         _ config: Inkling2TextConfiguration, gateUp: Inkling2ExpertFormat,
@@ -1084,6 +1091,7 @@ private final class Inkling2Experts: Module {
         _downProj.wrappedValue = Inkling2ExpertProjection(
             experts: config.experts, inputDims: hidden, outputDims: dims, format: down)
         activation = softcappedSwiGLU(gateSoftcap: config.gateSoftcap, upSoftcap: config.upSoftcap)
+        softcaps = ConstantBox(MLXArray([config.gateSoftcap, config.upSoftcap]))
         super.init()
     }
 
@@ -1104,6 +1112,29 @@ private final class Inkling2Experts: Module {
             out = scatterUnsort(x: out, invOrder: inverseOrder, shape: indices.shape)
         }
         return out.squeezed(axis: -2)
+    }
+
+    /// The layer output `residual + conv(sum(weights * experts(x)))` of one token per row and
+    /// the next convolution state. Few rows run through the fused expert kernels.
+    func decode(
+        _ x: MLXArray, indices: MLXArray, weights: MLXArray, residual: MLXArray, state: MLXArray,
+        convolutionWeight: MLXArray
+    ) -> (MLXArray, MLXArray) {
+        let (gateUp, down) = (gateUpProj.tensors, downProj.tensors)
+        let (dims, hidden) = (down.weight.dim(1), gateUp.weight.dim(1) / 2)
+        if indices.size < 64, indices.dim(-1) <= 32, hidden % 4 == 0, dims % 2 == 0,
+            gateUp.supportsFusedDecode(inputDims: dims),
+            down.supportsFusedDecode(inputDims: hidden)
+        {
+            let activations = inkling2ExpertGateUp(
+                x, experts: gateUp, indices: indices, softcaps: softcaps.value)
+            return inkling2ExpertDown(
+                activations, experts: down, indices: indices, weights: weights,
+                residual: residual, state: state, convolutionWeight: convolutionWeight)
+        }
+        return inkling2ExpertEpilogue(
+            outputs: self(x, indices), weights: weights, residual: residual, state: state,
+            convolutionWeight: convolutionWeight)
     }
 }
 
@@ -1152,11 +1183,16 @@ private final class Inkling2SparseMoE: Module {
         return weightedExperts(experts(x, indices), weights[.ellipsis, .newAxis])
     }
 
-    /// The outputs `[B, K, D]` of the experts of each row and their weights, routed from the
-    /// float32 copy of the input.
-    func routed(_ x: MLXArray, routerInput: MLXArray) -> (outputs: MLXArray, weights: MLXArray) {
+    /// ``Inkling2Experts/decode(_:indices:weights:residual:state:convolutionWeight:)``, routed
+    /// from the float32 copy of the input.
+    func decode(
+        _ x: MLXArray, routerInput: MLXArray, residual: MLXArray, state: MLXArray,
+        convolutionWeight: MLXArray
+    ) -> (MLXArray, MLXArray) {
         let (indices, weights) = router(routerInput)
-        return (experts(x, indices), weights)
+        return experts.decode(
+            x, indices: indices, weights: weights, residual: residual, state: state,
+            convolutionWeight: convolutionWeight)
     }
 }
 
@@ -1417,9 +1453,8 @@ private final class Inkling2DecoderLayer: Module {
             expertInput = out.reshaped(rows, dims)
             routerInput = f32!.reshaped(rows, dims)
         }
-        let (outputs, weights) = mlp.routed(expertInput, routerInput: routerInput!)
-        let (output, mlpState) = inkling2ExpertEpilogue(
-            outputs: outputs, weights: weights, residual: mix.residual, state: state(3, dims),
+        let (output, mlpState) = mlp.decode(
+            expertInput, routerInput: routerInput!, residual: mix.residual, state: state(3, dims),
             convolutionWeight: postMLPConvolution.conv1d.weight)
 
         convolutionCache[0] = keyState
