@@ -1804,6 +1804,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         let positionOffset = try QwenVL.continuationAnchor(
             model: "Qwen3VL", key: ropeDeltasKey, cacheOffset: cacheOffset,
             batchSize: inputIds2D.dim(0), state: state)
+        try QwenVL.requireSingleSequenceForMedia(input, model: "Qwen3VL")
 
         let window = prefill.resolvedStepSize()
         if inputIds2D.dim(0) == 1, inputIds2D.dim(-1) > 0,

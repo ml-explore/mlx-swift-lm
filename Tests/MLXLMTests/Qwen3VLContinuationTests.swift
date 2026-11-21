@@ -251,6 +251,10 @@ final class Qwen3VLContinuationTests: XCTestCase {
         try continuation.assertWarmImageContinuation(try makeTinyModel())
     }
 
+    func testBatchedMediaThrows() throws {
+        try continuation.assertBatchedMediaThrows(try makeTinyModel())
+    }
+
     /// The only test that exercises deepstack across a split boundary: the suffix's vision
     /// run must regenerate per-layer deepstack rows for exactly the retained image.
     func testSplitMediaSuffixContinuationMatchesFullPrefill() throws {

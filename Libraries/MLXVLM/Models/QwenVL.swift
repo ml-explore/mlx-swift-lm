@@ -39,6 +39,17 @@ public struct QwenVL {
         return cacheOffset + anchor.asType(.int32).item(Int.self)
     }
 
+    /// M-RoPE positions for images and videos are built for one sequence, so a batch with media
+    /// cannot be positioned. Throws a clear error instead of failing later inside attention.
+    static func requireSingleSequenceForMedia(_ input: LMInput, model: String) throws {
+        let tokens = input.text.tokens
+        let batchSize = tokens.ndim > 1 ? tokens.dim(0) : 1
+        guard batchSize > 1, input.image != nil || input.video != nil else { return }
+        throw VLMError.processing(
+            "\(model) supports image and video input for one sequence at a time, "
+                + "but received a batch of \(batchSize)")
+    }
+
     /// The state a continuation hands back so the next turn re-anchors correctly.
     ///
     /// `getRopeIndex` returns a delta in the offset frame; the next turn adds its own cache

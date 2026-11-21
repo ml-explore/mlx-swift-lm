@@ -150,6 +150,10 @@ final class Qwen25VLContinuationTests: XCTestCase {
         try continuation.assertWarmImageContinuation(makeTinyQwen25VL())
     }
 
+    func testQwen25VLBatchedMediaThrows() throws {
+        try continuation.assertBatchedMediaThrows(makeTinyQwen25VL())
+    }
+
     func testQwen25VLSplitMediaSuffixContinuationMatchesFullPrefill() throws {
         try continuation.assertSplitMediaSuffixContinuation(makeTinyQwen25VL())
     }
@@ -188,6 +192,10 @@ final class Qwen25VLContinuationTests: XCTestCase {
 
     func testQwen2VLWarmImageContinuationMatchesFullPrefill() throws {
         try continuation.assertWarmImageContinuation(makeTinyQwen2VL())
+    }
+
+    func testQwen2VLBatchedMediaThrows() throws {
+        try continuation.assertBatchedMediaThrows(makeTinyQwen2VL())
     }
 
     func testQwen2VLImageMidContinuationResumeState() throws {

@@ -1001,6 +1001,7 @@ public class Qwen2VL: Module, VLMModel, KVCacheDimensionProvider {
         -> PrepareResult
     {
         let inputIds = input.text.tokens
+        try QwenVL.requireSingleSequenceForMedia(input, model: "Qwen2VL")
 
         let window = prefill.resolvedStepSize()
         if inputIds.ndim == 2, inputIds.dim(0) == 1, inputIds.dim(-1) > 0,

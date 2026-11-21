@@ -226,6 +226,10 @@ final class Qwen3VLMoEContinuationTests: XCTestCase {
         try continuation.assertWarmImageContinuation(try makeTinyModel())
     }
 
+    func testBatchedMediaThrows() throws {
+        try continuation.assertBatchedMediaThrows(try makeTinyModel())
+    }
+
     func testVideoBeforeImageTakesItsOwnFeatures() throws {
         try MediaOrderAssertions().assertVideoBeforeImageMatchesImageBeforeVideo(
             try makeTinyModel())

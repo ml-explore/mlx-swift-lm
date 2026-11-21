@@ -1772,6 +1772,7 @@ public class Qwen35: Module, VLMModel {
         let positionOffset = try QwenVL.continuationAnchor(
             model: "Qwen35", key: ropeDeltasKey, cacheOffset: cacheOffset,
             batchSize: inputIds2D.dim(0), state: state)
+        try QwenVL.requireSingleSequenceForMedia(input, model: "Qwen35")
 
         // Windowed (chunked) prefill — the remaining #344 deferred item for
         // Qwen3.5 — with the same default as the sibling chunked prefills

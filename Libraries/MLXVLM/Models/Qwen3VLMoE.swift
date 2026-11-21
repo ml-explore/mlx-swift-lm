@@ -612,6 +612,7 @@ public final class Qwen3VLMoE: Module, VLMModel, KVCacheDimensionProvider {
         prefill: PrefillParameters
     ) throws -> PrepareResult {
         let inputIds = input.text.tokens
+        try QwenVL.requireSingleSequenceForMedia(input, model: "Qwen3VLMoE")
 
         var pixelValues: MLXArray?
         var imageFrames: [THW]? = nil

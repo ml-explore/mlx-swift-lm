@@ -199,6 +199,10 @@ final class Qwen35ContinuationTests: XCTestCase {
         try continuation.assertWarmImageContinuation(try makeTinyModel())
     }
 
+    func testBatchedMediaThrows() throws {
+        try continuation.assertBatchedMediaThrows(try makeTinyModel())
+    }
+
     func testImageStateSurvivesPromptCacheRoundTrip() throws {
         try withRandomState(MLXRandom.RandomState(seed: 17)) {
             let model = try makeTinyModel()
