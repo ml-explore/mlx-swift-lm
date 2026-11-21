@@ -116,6 +116,37 @@ final class Qwen3NextCompiledDecodeTests: XCTestCase {
         }
     }
 
+    func testRightPaddedBatchKeepsEachRowsLinearState() throws {
+        MLXRandom.seed(43)
+        let model = Qwen3NextModel(try configuration())
+        let rows: [[Int32]] = [[1, 7, 3, 9, 2, 5], [4, 8, 6]]
+        let width = rows.map(\.count).max()!
+        let padded = rows.flatMap { $0 + Array(repeating: 0, count: width - $0.count) }
+
+        let cache = try model.newCache(parameters: nil)
+        let batched = withPreparedCache(cache, lengths: rows.map(\.count)) {
+            model(MLXArray(padded).reshaped(rows.count, width), cache: cache)
+        }
+
+        for (row, tokens) in rows.enumerated() {
+            let alone = try model.newCache(parameters: nil)
+            let expected = model(MLXArray(tokens).reshaped(1, -1), cache: alone)
+            assertClose(
+                batched[row ..< (row + 1), ..<tokens.count], expected,
+                atol: 1e-5, reducedAtol: 1e-3, "logits, row \(row)")
+            for (layer, (batchedCache, aloneCache)) in zip(cache, alone).enumerated() {
+                guard let batchedCache = batchedCache as? MambaCache,
+                    let aloneCache = aloneCache as? MambaCache
+                else { continue }
+                for slot in 0 ..< 2 {
+                    assertClose(
+                        batchedCache[slot]![row ..< (row + 1)], aloneCache[slot]!,
+                        atol: 1e-5, reducedAtol: 1e-3, "layer \(layer), slot \(slot), row \(row)")
+                }
+            }
+        }
+    }
+
     func testCompiledDecodeMatchesGeneralPathExactly() throws {
         for dtype in [DType.float16, DType.bfloat16] {
             MLXRandom.seed(31)

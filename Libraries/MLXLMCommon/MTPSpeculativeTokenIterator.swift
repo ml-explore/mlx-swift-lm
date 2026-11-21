@@ -286,11 +286,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         let prefillStart = Date.timeIntervalSinceReferenceDate
         var mtpPrefill = parameters.prefill
-        if drafter.requiresPromptPrefill || continuationToResume != nil {
+        if (drafter.requiresPromptPrefill || continuationToResume != nil)
+            && !(mainModel is any MTPChunkedPrefillModel)
+        {
             // The target must expose one hidden row per prompt token so a
             // private MTP cache can be filled or resumed over the suffix.
-            // Until model-specific chunk aggregation is available, use the
-            // reference single-forward computation for this architecture.
+            // A target that cannot gather them across chunks runs the
+            // reference single-forward computation.
             mtpPrefill.stepSize = Int.max
             mtpPrefill.chunking = .unchunked
         }
@@ -799,6 +801,16 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // shared K/V and the next round transitions to passthrough.
         kvCachePlan.apply(to: mainCacheStorage)
 
+        // Settle the cache writes and start the head's next seed while the next verify graph
+        // is built, as TokenIterator does: an unevaluated chain of cache updates keeps every
+        // earlier round's inputs alive.
+        var settled = mainCache.flatMap(\.state)
+        if let drafterState {
+            settled += drafterState.cache.flatMap(\.state)
+            if let seed = drafterState.seedToken { settled.append(seed) }
+        }
+        asyncEval(settled)
+
         y = .init(tokens: emittedFinalToken)
     }
 
@@ -823,6 +835,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         mainState?[mtpSharedKVSourceIndicesKey] = nil
         mainState?[mtpSharedKVOffsetsKey] = nil
         mainState?[mtpPositionDeltasKey] = nil
+        // No continuation leaves a passthrough stream, so free the prompt's hidden rows.
+        drafterState = nil
+        targetBoundaryHidden = nil
+        lastVerifyHidden = nil
     }
 
     /// One single-token forward step against the main model.
@@ -847,7 +863,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         logits = processor?.process(logits: logits) ?? logits
         let token = sampler.sample(logits: logits)
         processor?.didSample(token: token)
-        eval(token)
+        eval([token] + mainCache.flatMap(\.state))
         let tokenInt = token.item(Int.self)
 
         if maintainingDrafterState,

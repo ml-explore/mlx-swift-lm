@@ -759,7 +759,7 @@ public enum Qwen35Language {
                 cache?[0] ?? zeroStates(batch: inputs.dim(0), dtype: inputs.dtype).conv
             let result = forward(
                 inputs, convState: convState, recState: cache?[1], mask: mask,
-                checkpointAfter: checkpointAfter)
+                lengths: cache?.currentLengths, checkpointAfter: checkpointAfter)
             if let cache {
                 if convKernelSize > 1 {
                     cache[0] = result.convState
@@ -786,11 +786,13 @@ public enum Qwen35Language {
         }
 
         /// The GDN body with cache state passed explicitly for compiled decode.
+        /// `lengths` keeps each right-padded row's conv state at its last real token.
         func forward(
             _ x: MLXArray,
             convState: MLXArray,
             recState: MLXArray?,
             mask: MLXArray?,
+            lengths: MLXArray? = nil,
             checkpointAfter: Int? = nil
         ) -> (
             output: MLXArray,
@@ -808,7 +810,13 @@ public enum Qwen35Language {
 
             let convInput = concatenated([convState, mixedQKV], axis: 1)
             let newConvState: MLXArray
-            if convKernelSize > 1 {
+            if convKernelSize > 1, let lengths {
+                let ends = clip(lengths, min: 0, max: S)
+                let positions =
+                    (ends[0..., .newAxis] + MLXArray(0 ..< (convKernelSize - 1)))[
+                        .ellipsis, .newAxis]
+                newConvState = takeAlong(convInput, positions, axis: 1)
+            } else if convKernelSize > 1 {
                 newConvState = contiguous(
                     convInput[0..., (-(convKernelSize - 1))..., 0...])
             } else {

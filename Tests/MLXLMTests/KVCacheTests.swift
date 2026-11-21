@@ -98,6 +98,25 @@ func testNativeHybridRewindChecksTheWrittenWindow(length: Int, convolutionFirst:
     }
 }
 
+/// A `CacheList` reports no offset of its own, so the rewind checks what its children can trim.
+@Test
+func testNativeHybridRewindTrimsACacheList() {
+    let attention = KVCacheSimple()
+    let keys = KVCacheSimple()
+    let kv = MLXArray.zeros([1, 1, 5, 2])
+    _ = attention.update(keys: kv, values: kv)
+    _ = keys.update(keys: kv, values: kv)
+    let recurrent = MambaCache()
+    recurrent[0] = MLXArray([Float(1)])
+    recurrent.saveSpeculativeCheckpoint(state: [MLXArray([Float(0)]), nil], advancedBy: 1)
+    let caches: [KVCache] = [CacheList(attention, keys), recurrent]
+
+    #expect(rewindSpeculativePromptCache(caches, numTokens: 1) == 1)
+    #expect(attention.offset == 4)
+    #expect(keys.offset == 4)
+    #expect(recurrent[0]?.asArray(Float.self) == [0])
+}
+
 // MARK: - Helper
 
 private func tempURL() -> URL {
