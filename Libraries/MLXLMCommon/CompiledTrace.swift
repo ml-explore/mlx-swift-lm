@@ -112,6 +112,14 @@ public final class CompiledTrace<Owner: Module>: CompiledTraceInvalidating {
     }
 }
 
+/// A module that cannot run inside a compiled trace, for example one that reads
+/// arrays back to the CPU to page weights in from disk.
+///
+/// Compiled decode paths that support it treat the module as a boundary and run it
+/// eagerly between traces; others fall back to an eager forward. Adopting the
+/// protocol is all a module has to do.
+public protocol UntraceableModule: AnyObject {}
+
 /// Something `Module.invalidateCompiledTraces()` can reset: a ``CompiledTrace``
 /// or a container of them.
 public protocol CompiledTraceInvalidating: AnyObject {
