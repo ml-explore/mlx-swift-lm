@@ -1879,7 +1879,7 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
 
     /// Each layer visit has its own attention cache and the states of its four convolutions.
     /// The attention kernels read the keys and values, so an unbounded cache is a
-    /// ``DirectAttentionKVCache``.
+    /// `DirectAttentionKVCache`.
     public func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
         let text = config.textConfiguration
         return try text.layerVisits.map { layer in
@@ -2015,9 +2015,10 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
         }
     }
 
-    /// Strips the `model.` scope and sets each expert layer to its checkpoint's quantization.
+    /// Converts Thinking Machines' layout, strips the `model.` scope and sets each expert layer to
+    /// its checkpoint's quantization.
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
-        var checkpoint = checkpoint
+        var checkpoint = try Inkling2Checkpoint.convertingOriginalLayout(checkpoint)
         var weights = [String: MLXArray](minimumCapacity: checkpoint.weights.count)
         for (key, value) in checkpoint.weights {
             var key = key
@@ -2055,7 +2056,7 @@ extension Inkling2: LoRAModel {
 
 extension Inkling2: ModelComponentsProviding {
     public var modelComponents: [ModelComponent: [CheckpointComponent]] {
-        [.vision: .modules("vision_tower")]
+        Inkling2Checkpoint.components
     }
 
     public var onDemandComponents: [AnyOnDemandComponent] {

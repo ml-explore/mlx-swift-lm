@@ -111,7 +111,9 @@ projections require their own checkpoint weights.
 ## Inkling 2
 
 Inkling 2 Mini (`inkling2_loop`) runs its middle 12 layers three times per token, and
-Inkling 2 Small (`inkling2`) runs each layer once. Both load through `VLMModelFactory`.
+Inkling 2 Small (`inkling2`) runs each layer once. Both load through `VLMModelFactory`,
+from mlx-lm conversions or from Thinking Machines' own repositories, such as
+`thinkingmachines/Inkling-2-Mini`, whose experts stay in NVFP4 and MXFP8.
 The vision tower loads on the first image, so text-only use does not pay for it.
 
 The chat template sets the thinking effort, 0.9 by default. Pass another one in

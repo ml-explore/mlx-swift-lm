@@ -275,7 +275,7 @@ public final class Inkling2DSparkDraftModel: Module, StatefulMTPDrafterModel,
 
     /// The draft ships beside the target's weights, which it reads only to fold its head.
     public var additionalWeightFiles: [String] { ["mtp.safetensors"] }
-    public var excludedCheckpointNamespaces: [String] { ["model", "vision_tower"] }
+    public var excludedCheckpointNamespaces: [String] { Inkling2Checkpoint.namespacesBesideHead }
 
     @ModuleInfo fileprivate var layers: [Inkling2DSparkLayer]
     @ModuleInfo var norm: RMSNorm
@@ -433,7 +433,9 @@ public final class Inkling2DSparkDraftModel: Module, StatefulMTPDrafterModel,
     public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
         var checkpoint = checkpoint
         var weights = checkpoint.weights
-        guard let head = weights.removeValue(forKey: "lm_head.weight"),
+        guard
+            let head = weights.removeValue(forKey: "lm_head.weight")
+                ?? weights.removeValue(forKey: "\(Inkling2Checkpoint.originalHead).weight"),
             let projection = weights.removeValue(forKey: "markov_head.hidden_out.weight"),
             let bias = weights.removeValue(forKey: "markov_head.hidden_out.bias")
         else {

@@ -1048,6 +1048,211 @@ struct Inkling2StreamProtocolTests {
     }
 }
 
+// MARK: - Checkpoint
+
+@Suite("Inkling2 checkpoint")
+struct Inkling2CheckpointTests {
+
+    /// One tensor per rename, with the name the reference gives it.
+    @Test(
+        "Thinking Machines' tensor names convert as in the reference",
+        arguments: [
+            (
+                "model.llm.attn_res.attn_queries.0",
+                "model.language_model.layers.1.attention_input.query"
+            ),
+            ("model.llm.attn_res.mlp_queries.0", "model.language_model.layers.0.mlp_input.query"),
+            ("model.llm.attn_res.output_query", "model.language_model.final_input.query"),
+            ("model.llm.embed.weight", "model.language_model.embed_tokens.weight"),
+            ("model.llm.unembed.weight", "lm_head.weight"),
+            (
+                "model.llm.layers.0.attn.attn_sink_proj.weight",
+                "model.language_model.layers.0.self_attn.sink_proj.weight"
+            ),
+            (
+                "model.llm.layers.0.attn.gate_attn.weight",
+                "model.language_model.layers.0.self_attn.gate_proj.weight"
+            ),
+            (
+                "model.llm.layers.0.attn.k_sconv.weight",
+                "model.language_model.layers.0.self_attn.k_sconv.conv1d.weight"
+            ),
+            (
+                "model.llm.layers.0.attn.wk_dv.weight",
+                "model.language_model.layers.0.self_attn.k_proj.weight"
+            ),
+            (
+                "model.llm.layers.0.attn.wo_ud.weight",
+                "model.language_model.layers.0.self_attn.o_proj.weight"
+            ),
+            (
+                "model.llm.layers.0.attn.wq_du.weight",
+                "model.language_model.layers.0.self_attn.q_proj.weight"
+            ),
+            (
+                "model.llm.layers.0.attn.wr_du.weight",
+                "model.language_model.layers.0.self_attn.r_proj.weight"
+            ),
+            (
+                "model.llm.layers.0.attn.wv_dv.weight",
+                "model.language_model.layers.0.self_attn.v_proj.weight"
+            ),
+            (
+                "model.llm.layers.0.attn_norm.weight",
+                "model.language_model.layers.0.input_layernorm.weight"
+            ),
+            (
+                "model.llm.layers.0.attn_sconv.weight",
+                "model.language_model.layers.0.post_attention_convolution.conv1d.weight"
+            ),
+            (
+                "model.llm.layers.0.mlp.gate.bias",
+                "model.language_model.layers.0.mlp.gate.e_score_correction_bias"
+            ),
+            (
+                "model.llm.layers.0.mlp_norm.weight",
+                "model.language_model.layers.0.post_attention_layernorm.weight"
+            ),
+            (
+                "model.llm.layers.0.mlp_sconv.weight",
+                "model.language_model.layers.0.post_mlp_convolution.conv1d.weight"
+            ),
+            (
+                "model.llm.layers.10.controllers.attn.down_weight",
+                "model.language_model.layers.10.q_message_gate.down_proj.weight"
+            ),
+            (
+                "model.llm.layers.10.controllers.attn.gain_weight",
+                "model.language_model.layers.10.q_message_gate.message_gate_proj.weight"
+            ),
+            (
+                "model.llm.layers.10.controllers.k.forget_weight",
+                "model.language_model.layers.10.k_message_gate.forget_gate_proj.weight"
+            ),
+            (
+                "model.llm.layers.11.attn.k_sconv.static_w",
+                "model.language_model.layers.11.self_attn.k_sconv.static_weight"
+            ),
+            (
+                "model.llm.layers.11.attn.k_sconv.weight_proj",
+                "model.language_model.layers.11.self_attn.k_sconv.weight_proj.weight"
+            ),
+            (
+                "model.llm.layers.11.k_input_norm.weight",
+                "model.language_model.layers.11.k_input_layernorm.weight"
+            ),
+            (
+                "model.llm.layers.0.mlp.experts.w13_weight",
+                "model.language_model.layers.0.mlp.experts.gate_up_proj.weight"
+            ),
+            (
+                "model.llm.layers.0.mlp.experts.w13_weight_scale",
+                "model.language_model.layers.0.mlp.experts.gate_up_proj.scales"
+            ),
+            (
+                "model.llm.layers.0.mlp.experts.w2_weight_amax",
+                "model.language_model.layers.0.mlp.experts.down_proj.amax"
+            ),
+            (
+                "model.visual.backbone.embeddings.position_embedding",
+                "model.vision_tower.embeddings.position_embedding.weight"
+            ),
+            (
+                "model.visual.backbone.layers.0.ln_1.bias",
+                "model.vision_tower.layers.0.layernorm_before.bias"
+            ),
+            (
+                "model.visual.backbone.layers.0.ln_2.bias",
+                "model.vision_tower.layers.0.layernorm_after.bias"
+            ),
+            ("model.visual.backbone.layers.0.ls_1.gamma", "model.vision_tower.layers.0.lambda_1"),
+            (
+                "model.visual.backbone.layers.0.mlp.c_fc.bias",
+                "model.vision_tower.layers.0.mlp.fc1.bias"
+            ),
+            (
+                "model.visual.backbone.layers.0.mlp.c_proj.bias",
+                "model.vision_tower.layers.0.mlp.fc2.bias"
+            ),
+            ("model.visual.backbone.ln_pre.bias", "model.vision_tower.pre_layernorm.bias"),
+            ("model.visual.proj_in.weight", "model.vision_tower.merger.linear_1.weight"),
+            ("model.visual.proj_out.weight", "model.vision_tower.merger.linear_2.weight"),
+            (
+                "model.language_model.layers.0.self_attn.q_proj.weight",
+                "model.language_model.layers.0.self_attn.q_proj.weight"
+            ),
+        ])
+    func names(original: String, converted: String) {
+        #expect(Inkling2Checkpoint.convertedName(original) == converted)
+    }
+
+    @Test("Thinking Machines' tensors take the converted layout and dtypes")
+    func values() throws {
+        let conv = MLXArray(0 ..< 8).reshaped(2, 1, 4).asType(.bfloat16)
+        let packed = MLXArray((0 ..< 16).map { UInt8($0) }).reshaped(1, 2, 8)
+        let queries = MLXArray((0 ..< 4).map { Float($0) }).reshaped(4, 1)
+        let kvQueries = MLXArray((10 ..< 14).map { Float($0) }).reshaped(4, 1)
+        let checkpoint = try Inkling2Checkpoint.convertingOriginalLayout(
+            ModelCheckpoint(weights: [
+                "model.llm.layers.0.mlp_sconv.weight": conv,
+                "model.llm.layers.0.mlp.gate.weight": MLXArray.ones([2, 2], dtype: .bfloat16),
+                "model.llm.layers.0.mlp.experts.w2_weight": packed,
+                "model.llm.layers.0.mlp.experts.w2_weight_amax": MLXArray([Float(2), 4]),
+                "model.llm.layers.0.mlp.experts.w2_weight_outer_scale_denominator": MLXArray(
+                    [Float(448)]),
+                "model.llm.middle_cycle_cross_pass_queries": queries,
+                "model.llm.middle_cycle_cross_pass_kv_queries": kvQueries,
+            ]))
+        let weights = checkpoint.weights
+        let prefix = "model.language_model.layers.0"
+
+        let convolution = try #require(weights["\(prefix).post_mlp_convolution.conv1d.weight"])
+        #expect(convolution.shape == [2, 4, 1])
+        #expect(convolution.asArray(Float.self) == conv.asArray(Float.self))
+        #expect(weights["\(prefix).mlp.gate.weight"]?.dtype == .float32)
+
+        let expert = try #require(weights["\(prefix).mlp.experts.down_proj.weight"])
+        #expect(expert.dtype == .uint32 && expert.shape == [1, 2, 2])
+        let scale = try #require(weights["\(prefix).mlp.experts.down_proj.global_scale"])
+        #expect(scale.asArray(Float.self) == [12, 24])
+        #expect(!weights.keys.contains { $0.hasSuffix(".amax") || $0.hasSuffix("denominator") })
+
+        // [query, mlp] and [key, value] per looped layer become [query, key, value, mlp].
+        let message = try #require(weights["model.language_model.message_input.query"])
+        #expect(message.shape == [2, 4, 1])
+        #expect(message.asArray(Float.self) == [0, 10, 11, 1, 2, 12, 13, 3])
+    }
+
+    @Test("A converted checkpoint passes through unchanged")
+    func convertedPassesThrough() throws {
+        let model = try Inkling2ModelTests.makeModel()
+        let weights = Dictionary(
+            uniqueKeysWithValues: model.parameters().flattened().map { ("model.\($0)", $1) })
+        let checkpoint = try Inkling2Checkpoint.convertingOriginalLayout(
+            ModelCheckpoint(weights: weights))
+        #expect(Set(checkpoint.weights.keys) == Set(weights.keys))
+        for (name, value) in weights {
+            #expect(checkpoint.weights[name] === value, "\(name)")
+        }
+    }
+
+    @Test("The drafter folds the head of Thinking Machines' layout")
+    func drafterReadsOriginalHead() throws {
+        let configuration = try JSONDecoder().decode(
+            Inkling2DSparkConfiguration.self,
+            from: Data(Inkling2SpeculativeDecodingTests.draftJSON.utf8))
+        let drafter = Inkling2DSparkDraftModel(configuration)
+        let checkpoint = try drafter.prepareCheckpoint(
+            ModelCheckpoint(weights: [
+                "model.llm.unembed.weight": MLXArray.ones([50, 64]),
+                "markov_head.hidden_out.weight": MLXArray.ones([64, 8]),
+                "markov_head.hidden_out.bias": MLXArray.zeros([64]),
+            ]))
+        #expect(checkpoint.weights["markov_head.fold.weight"]?.shape == [50, 8])
+        #expect(checkpoint.weights["model.llm.unembed.weight"] == nil)
+    }
+}
+
 // MARK: - Processor
 
 @Suite("Inkling2 processor")

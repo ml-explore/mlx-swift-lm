@@ -2141,6 +2141,7 @@ public final class ConvolutionStatesCache: ArraysCache {
     ///   - states: the next state of each slot, `[B, stateLength, C]`.
     ///   - windows: when ``keepsWindows(count:)``, each slot's previous state followed by the
     ///     write's inputs, `[B, stateLength + count, C]`.
+    ///   - count: the positions the write adds.
     public func commit(states: [MLXArray], windows: [MLXArray]?, count: Int) {
         precondition(states.count == slotCount, "one state per convolution")
         if let windows, keepsWindows(count: count) {
