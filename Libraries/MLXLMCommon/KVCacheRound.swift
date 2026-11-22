@@ -174,6 +174,74 @@ struct RotatingRestorePoint: KVCacheLeafRestorePoint {
     }
 }
 
+/// A ``CacheList`` entry: each child takes part through its own strategy, presented as one list.
+///
+/// The children share the entry's slot, so a later rewind resolves the live list and reaches each
+/// child by position. The attention children carry the entry's position and window.
+final class CacheListRoundStrategy: KVCacheRoundStrategy {
+    let slot: Int
+    let presented: KVCache
+    private let children: [any KVCacheRoundStrategy]
+    private let attention: [any KVCacheRoundStrategy]
+
+    init(slot: Int, children: [(strategy: any KVCacheRoundStrategy, isAttention: Bool)]) {
+        self.slot = slot
+        self.children = children.map(\.strategy)
+        self.attention = children.filter(\.isAttention).map(\.strategy)
+        self.presented = CacheList(caches: children.map(\.strategy.presented))
+    }
+
+    var writtenPositions: Int {
+        let written = children[0].writtenPositions
+        assert(
+            children.allSatisfy { $0.writtenPositions == written },
+            "children of a cache list disagree on how much this round wrote")
+        return written
+    }
+
+    var liveOffset: Int { (attention.first ?? children[0]).liveOffset }
+    var attentionBound: Int? { attention.compactMap(\.attentionBound).min() }
+
+    func commit(retaining: Int) {
+        for child in children { child.commit(retaining: retaining) }
+    }
+
+    func makeRestorePoint(retaining: Int) -> (any KVCacheLeafRestorePoint)? {
+        let points = children.map { $0.makeRestorePoint(retaining: retaining) }
+        guard points.contains(where: { $0 != nil }) else { return nil }
+        return CacheListRestorePoint(children: points, committedPositions: retaining)
+    }
+}
+
+/// Restores a ``CacheList`` child by child: from a child's record when it left one, otherwise by
+/// trimming what that child committed.
+struct CacheListRestorePoint: KVCacheLeafRestorePoint {
+    let children: [(any KVCacheLeafRestorePoint)?]
+    let committedPositions: Int
+
+    func canRestore(into leaf: KVCache) -> Bool {
+        guard let list = leaf as? CacheList, list.children.count == children.count else {
+            return false
+        }
+        return zip(children, list.children).allSatisfy { point, child in
+            point?.canRestore(into: child) ?? child.isTrimmable
+        }
+    }
+
+    @discardableResult
+    func restore(into leaf: KVCache, retaining: Int) -> Bool {
+        guard canRestore(into: leaf), let list = leaf as? CacheList else { return false }
+        for (point, child) in zip(children, list.children) {
+            if let point {
+                point.restore(into: child, retaining: retaining)
+            } else {
+                child.trim(committedPositions - retaining)
+            }
+        }
+        return true
+    }
+}
+
 /// Chooses a strategy per leaf, or refuses.
 ///
 /// Deliberately not a requirement on ``KVCache`` itself: that protocol is public, so a `package`
@@ -181,6 +249,35 @@ struct RotatingRestorePoint: KVCacheLeafRestorePoint {
 /// ceiling worth naming — a conformer from outside this package cannot opt into staging. It gets
 /// write-through if it can prove it stays trimmable, and refusal otherwise.
 enum KVCacheRoundStrategyFactory {
+    /// A strategy for one entry of the storage's array: a leaf, or a ``CacheList`` of leaves.
+    ///
+    /// A list nested in a list is refused, since its leaves could not share the entry's slot.
+    static func make(
+        for entry: KVCache, slot: Int, maximumPositions: Int
+    ) -> (any KVCacheRoundStrategy)? {
+        guard let list = entry as? CacheList else {
+            return make(
+                for: KVCacheLeaf(path: [slot], cache: entry), slot: slot,
+                maximumPositions: maximumPositions)
+        }
+        var children = [(strategy: any KVCacheRoundStrategy, isAttention: Bool)]()
+        for (index, child) in list.children.enumerated() {
+            guard !(child is CacheList) else { return nil }
+            let leaf = KVCacheLeaf(path: [slot, index], cache: child)
+            // A recurrent child writes through when its trim undoes a write exactly, as
+            // convolution states that keep their windows do. A recurrent entry of its own takes
+            // the in-place hybrid rewind instead.
+            let strategy: (any KVCacheRoundStrategy)? =
+                leaf.isAttentionCache
+                ? make(for: leaf, slot: slot, maximumPositions: maximumPositions)
+                : child.isTrimmable(after: maximumPositions)
+                    ? AppendOnlyRoundStrategy(slot: slot, live: child) : nil
+            guard let strategy else { return nil }
+            children.append((strategy, leaf.isAttentionCache))
+        }
+        return children.isEmpty ? nil : CacheListRoundStrategy(slot: slot, children: children)
+    }
+
     /// - Parameter slot: the leaf's index in the storage's array, which the strategy carries so a
     ///   later rewind can resolve the live entry rather than trust a captured object.
     static func make(

@@ -395,11 +395,24 @@ private func expectCommitEquivalence(
         "one recurrent entry has to disqualify the whole array")
 }
 
-@Test func testOverlayRefusesNestedCacheLists() {
-    let nested = CacheList(KVCacheSimple(), RotatingKVCache(maxSize: 8))
+@Test func testOverlayRefusesListsItCannotRewind() {
+    let nested = CacheList(KVCacheSimple(), CacheList(KVCacheSimple()))
+    #expect(StagedRound([nested]) == nil, "a list in a list cannot share its slot")
+    let plain = CacheList(KVCacheSimple(), ArraysCache(size: 2))
     #expect(
-        StagedRound([nested]) == nil,
-        "nested topologies are not supported yet and must fall back, not misalign")
+        StagedRound([plain]) == nil,
+        "a convolution state that cannot rewind has to refuse the whole list")
+}
+
+@Test func testOverlayPresentsACacheListInItsSlot() throws {
+    let convolution = ConvolutionStatesCache(slots: 1, stateLength: 3)
+    let list = CacheList(RotatingKVCache(maxSize: 8), convolution)
+    let overlay = try #require(StagedRound([KVCacheSimple(), list]))
+    let presented = try #require(overlay.caches[1] as? CacheList)
+    #expect(presented[0] is RotatingStagedKVCache, "the sliding child is staged")
+    #expect(
+        presented[1] as AnyObject === convolution as AnyObject,
+        "the convolution child is written through")
 }
 
 @Test func testOverlayAcceptsTheGemma4Topology() throws {
@@ -685,6 +698,133 @@ private func expectRoundMatchesAcceptedOnlyReplay(
 @Test func testStagedRoundMatchesAcceptedOnlyReplayWhenWiderThanTheWindow() throws {
     try expectRoundMatchesAcceptedOnlyReplay(
         window: 4, prefill: 3, rounds: [(6, 2), (6, 6), (6, 0), (6, 3)])
+}
+
+// MARK: - Cache lists: attention plus convolution states, as in Inkling 2
+
+/// A global and a sliding entry, each an attention cache with the states of one convolution.
+private func makeListShapedStorage(window: Int) -> KVCacheStorage {
+    KVCacheStorage(
+        [
+            CacheList(KVCacheSimple(), ConvolutionStatesCache(slots: 1, stateLength: 3)),
+            CacheList(
+                RotatingKVCache(maxSize: window), ConvolutionStatesCache(slots: 1, stateLength: 3)),
+        ], plan: .disabled)
+}
+
+/// Writes `positions` to a list entry as one forward would: K/V to the attention child, and the
+/// positions themselves as the inputs of the convolution, whose state starts at `-1`.
+private func writeList(_ positions: Range<Int>, to entry: KVCache) {
+    let list = entry as! CacheList
+    let (keys, values) = positionedKV(positions)
+    _ = list[0].update(keys: keys, values: values)
+    let convolution = list[1] as! ConvolutionStatesCache
+    let previous = convolution[0] ?? MLXArray.full([1, 3, 1], values: MLXArray(Float(-1)))
+    let window = concatenated(
+        [previous, MLXArray(positions.map(Float.init), [1, positions.count, 1])], axis: 1)
+    convolution.commit(
+        states: [window[0..., (window.dim(1) - 3)..., 0...]],
+        windows: convolution.keepsWindows(count: positions.count) ? [window] : nil,
+        count: positions.count)
+}
+
+private func expectListStoragesEquivalent(
+    _ staged: KVCacheStorage, _ replayed: KVCacheStorage, _ note: String,
+    sourceLocation: SourceLocation = #_sourceLocation
+) {
+    #expect(
+        staged.processedTokenCount == replayed.processedTokenCount, "\(note): timeline",
+        sourceLocation: sourceLocation)
+    #expect(
+        staged.nativeAttentionOffsetsAreAligned, "\(note): leaves drifted",
+        sourceLocation: sourceLocation)
+    for (index, (a, b)) in zip(staged.cache, replayed.cache).enumerated() {
+        let (a, b) = (a as! CacheList, b as! CacheList)
+        let aKeys = (a[0] as? RotatingKVCache).map { $0.logicalView(tail: $0.maxSize!)!.0 }
+        let bKeys = (b[0] as? RotatingKVCache).map { $0.logicalView(tail: $0.maxSize!)!.0 }
+        let (aPositions, bPositions) = (
+            encodedPositions(aKeys ?? a[0].state[0]), encodedPositions(bKeys ?? b[0].state[0])
+        )
+        #expect(
+            aPositions == bPositions, "\(note): entry \(index) keys",
+            sourceLocation: sourceLocation)
+        #expect(a[1].offset == b[1].offset, "\(note): entry \(index) convolution offset")
+        let aState = (a[1] as! ConvolutionStatesCache)[0]!.asArray(Float.self)
+        let bState = (b[1] as! ConvolutionStatesCache)[0]!.asArray(Float.self)
+        #expect(
+            aState == bState, "\(note): entry \(index) convolution state \(aState) != \(bState)",
+            sourceLocation: sourceLocation)
+    }
+}
+
+/// Drives `rounds` through staged rounds, then takes back `lookahead` of the last commit, as a
+/// generation that stops inside an accepted prefix does. A storage that only ever saw the
+/// accepted tokens is the oracle.
+private func expectListRoundsMatchAcceptedOnlyReplay(
+    window: Int, prefill: Int, rounds: [(written: Int, retaining: Int)], lookahead: Int,
+    sourceLocation: SourceLocation = #_sourceLocation
+) throws {
+    let live = makeListShapedStorage(window: window)
+    let oracle = makeListShapedStorage(window: window)
+    for storage in [live, oracle] where prefill > 0 {
+        for entry in storage.cache { writeList(0 ..< prefill, to: entry) }
+        storage.commitProcessedTokens(prefill)
+    }
+
+    var next = prefill
+    for (index, round) in rounds.enumerated() {
+        let overlay = try #require(StagedRound(live), sourceLocation: sourceLocation)
+        for entry in overlay.caches { writeList(next ..< (next + round.written), to: entry) }
+        overlay.commit(accepted: round.retaining)
+        if round.retaining > 0 {
+            for entry in oracle.cache { writeList(next ..< (next + round.retaining), to: entry) }
+            oracle.commitProcessedTokens(round.retaining)
+        }
+        next += round.retaining
+        expectListStoragesEquivalent(live, oracle, "round \(index)", sourceLocation: sourceLocation)
+    }
+
+    // Chunking changes neither the attention window nor the last inputs of a convolution, so
+    // the oracle for the rewind writes what is left in one go.
+    #expect(live.rewindLastRound(lookahead) == lookahead, sourceLocation: sourceLocation)
+    let rewound = makeListShapedStorage(window: window)
+    for entry in rewound.cache { writeList(0 ..< (next - lookahead), to: entry) }
+    rewound.commitProcessedTokens(next - lookahead)
+    expectListStoragesEquivalent(live, rewound, "after rewind", sourceLocation: sourceLocation)
+}
+
+@Test func testListRoundsMatchAcceptedOnlyReplayAcrossTheWrap() throws {
+    try expectListRoundsMatchAcceptedOnlyReplay(
+        window: 8, prefill: 6,
+        rounds: [(4, 1), (4, 4), (4, 0), (4, 2), (4, 3), (4, 1), (4, 4), (4, 3)], lookahead: 2)
+}
+
+@Test func testListRoundsMatchAcceptedOnlyReplayFromEmpty() throws {
+    try expectListRoundsMatchAcceptedOnlyReplay(
+        window: 8, prefill: 0, rounds: [(5, 2), (5, 5), (5, 1), (5, 4)], lookahead: 4)
+}
+
+@Test func testConvolutionStatesRewindOnlyInsideAWriteThatKeptItsWindows() {
+    let cache = ConvolutionStatesCache(slots: 1, stateLength: 3, maximumRewind: 4)
+    func write(_ positions: Range<Int>) {
+        let previous = cache[0] ?? MLXArray.zeros([1, 3, 1])
+        let window = concatenated(
+            [previous, MLXArray(positions.map(Float.init), [1, positions.count, 1])], axis: 1)
+        cache.commit(
+            states: [window[0..., (window.dim(1) - 3)..., 0...]],
+            windows: cache.keepsWindows(count: positions.count) ? [window] : nil,
+            count: positions.count)
+    }
+    func state(_ cache: ConvolutionStatesCache) -> [Float] { cache[0]!.asArray(Float.self) }
+
+    write(0 ..< 6)
+    #expect(cache.trim(1) == 0, "a write wider than the rewind keeps no windows")
+    write(6 ..< 9)
+    let copy = cache.copy() as! ConvolutionStatesCache
+    #expect(cache.trim(2) == 2)
+    #expect(state(cache) == [4, 5, 6] && cache.offset == 7)
+    #expect(cache.trim(2) == 0, "only one position of the write is left to rewind")
+    #expect(copy.trim(3) == 3 && state(copy) == [3, 4, 5], "a copy keeps the windows")
 }
 
 /// The timeline half of the oracle, without the replay: a round leaves the storage's
