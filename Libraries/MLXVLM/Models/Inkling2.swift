@@ -1640,7 +1640,8 @@ private final class Inkling2DecoderLayer: Module {
     }
 
     /// The controllers stacked for the decode kernels. The gates' weights become views of the
-    /// stacked storage, in bfloat16, which holds the float32 checkpoint values exactly.
+    /// stacked storage, in bfloat16: the released checkpoint stores the controllers in bfloat16,
+    /// so a conversion that widens them to float32 casts back exactly.
     func prepareMessageControllers() throws {
         guard gates.count == 4, stackedControllers.value == nil else { return }
         let stacked = MessageControllers(
