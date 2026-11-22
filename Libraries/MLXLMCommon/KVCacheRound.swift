@@ -231,12 +231,17 @@ struct CacheListRestorePoint: KVCacheLeafRestorePoint {
     @discardableResult
     func restore(into leaf: KVCache, retaining: Int) -> Bool {
         guard canRestore(into: leaf), let list = leaf as? CacheList else { return false }
-        for (point, child) in zip(children, list.children) {
-            if let point {
-                point.restore(into: child, retaining: retaining)
-            } else {
-                child.trim(committedPositions - retaining)
-            }
+        let rewound = committedPositions - retaining
+        for (index, (point, child)) in zip(children, list.children).enumerated() {
+            let restored =
+                point?.restore(into: child, retaining: retaining)
+                ?? (child.trim(rewound) == rewound)
+            precondition(
+                restored,
+                """
+                child \(index) did not take back \(rewound) positions; a commit admits a child \
+                only if its record or a trim can undo it exactly
+                """)
         }
         return true
     }

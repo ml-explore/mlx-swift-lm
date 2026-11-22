@@ -804,6 +804,17 @@ private func expectListRoundsMatchAcceptedOnlyReplay(
         window: 8, prefill: 0, rounds: [(5, 2), (5, 5), (5, 1), (5, 4)], lookahead: 4)
 }
 
+/// A child that cannot take back what it committed would leave the list half restored, so the
+/// rewind stops rather than report success.
+@Test func testListRewindStopsWhenAChildCannotTakeBackItsPositions() async {
+    await #expect(processExitsWith: .failure) {
+        let convolution = ConvolutionStatesCache(slots: 1, stateLength: 3)
+        convolution.commit(states: [MLXArray.zeros([1, 3, 1])], windows: nil, count: 2)
+        let point = CacheListRestorePoint(children: [nil], committedPositions: 2)
+        point.restore(into: CacheList(convolution), retaining: 0)
+    }
+}
+
 @Test func testConvolutionStatesRewindOnlyInsideAWriteThatKeptItsWindows() {
     let cache = ConvolutionStatesCache(slots: 1, stateLength: 3, maximumRewind: 4)
     func write(_ positions: Range<Int>) {
