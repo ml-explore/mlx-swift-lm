@@ -59,9 +59,16 @@ actor ModelCache {
     /// A subset of `loadingTasks`' keys. See `load` and `isDownloading`.
     private var suppressedLoadIDs: Set<String> = []
     private var grammarTokenizers: [String: GrammarTokenizer] = [:]
-    /// Cached compiled constraint templates keyed by (modelID, schemaJSON).
-    /// Clone from template instead of recompiling the grammar each request.
+    /// Compiled grammars keyed by model, kind, fast-forward setting and source.
+    /// Each request takes a fresh matcher over one instead of recompiling.
     private var constraintTemplates: [String: GrammarConstraint] = [:]
+    /// Template keys from least to most recently used.
+    private var constraintTemplateOrder: [String] = []
+    /// Upper bound on cached templates across all models. A compiled grammar
+    /// for a large vocabulary costs tens of MB, so the cache stays small.
+    static let maxConstraintTemplates = 8
+    /// Number of grammars compiled so far. Test seam for the template cache.
+    private(set) var constraintCompilationCount = 0
     /// Cached per-model logit biases (closing + whitespace). Pure functions of
     /// the tokenizer, so computed once per model and reused across requests.
     private var tokenizerBiases: [String: TokenizerBias] = [:]
@@ -204,13 +211,13 @@ actor ModelCache {
         return bias
     }
 
-    /// Gets a fresh constraint by cloning a cached template, or compiles and caches one first.
+    /// Gets a constraint at the grammar's initial state, compiling and caching
+    /// the grammar on first use.
     ///
-    /// Grammar compilation is expensive (~5-20ms). By caching the compiled template
-    /// and cloning it (~0.1ms), repeated requests with the same schema skip recompilation.
-    /// When Fork() is unavailable (xgrammar < v0.1.33), the clone attempt fails gracefully
-    /// and each request compiles a fresh constraint instead. Any other clone failure
-    /// reaches the caller.
+    /// Compiling a grammar takes ~5-20ms; a new matcher over a compiled grammar
+    /// takes ~0.1ms. The template itself is never handed out, so it never
+    /// advances. The cache keeps the `maxConstraintTemplates` most recently
+    /// used templates and drops the rest.
     func makeConstraint(
         modelID: String,
         kind: ConstraintKind,
@@ -219,38 +226,45 @@ actor ModelCache {
         hostTokenizer: any Tokenizer,
         fastForward: Bool
     ) throws -> GrammarConstraint {
-        let cacheKey = "\(modelID):\(kind):\(source)"
+        let cacheKey = "\(modelID):\(kind):\(fastForward):\(source)"
         if let template = constraintTemplates[cacheKey] {
-            do {
-                return try template.clone()
-            } catch GrammarError.forkFailed {
-                constraintTemplates.removeValue(forKey: cacheKey)
-            }
+            markConstraintTemplateUsed(cacheKey)
+            return try template.freshMatcher()
         }
-        let constraint: GrammarConstraint
+        let template: GrammarConstraint
         switch kind {
         case .json:
-            constraint = try GrammarConstraint(
+            template = try GrammarConstraint(
                 tokenizer: tokenizer,
                 jsonSchema: source,
                 fastForward: fastForward,
                 hostTokenizer: hostTokenizer
             )
         case .structuralTag:
-            constraint = try GrammarConstraint(
+            template = try GrammarConstraint(
                 tokenizer: tokenizer,
                 structuralTag: source,
                 fastForward: fastForward,
                 hostTokenizer: hostTokenizer
             )
         }
-        do {
-            let clone = try constraint.clone()
-            constraintTemplates[cacheKey] = constraint
-            return clone
-        } catch GrammarError.forkFailed {
-            return constraint
+        constraintCompilationCount += 1
+        constraintTemplates[cacheKey] = template
+        markConstraintTemplateUsed(cacheKey)
+        while constraintTemplateOrder.count > Self.maxConstraintTemplates {
+            constraintTemplates.removeValue(forKey: constraintTemplateOrder.removeFirst())
         }
+        return try template.freshMatcher()
+    }
+
+    private func markConstraintTemplateUsed(_ cacheKey: String) {
+        constraintTemplateOrder.removeAll { $0 == cacheKey }
+        constraintTemplateOrder.append(cacheKey)
+    }
+
+    /// Number of cached constraint templates for the model. Test seam.
+    func cachedConstraintTemplateCount(modelID: String) -> Int {
+        constraintTemplates.keys.filter { $0.hasPrefix("\(modelID):") }.count
     }
 
     /// Evicts all cached state: model containers, tokenizers, constraint
@@ -267,6 +281,7 @@ actor ModelCache {
         suppressedLoadIDs.removeAll()
         grammarTokenizers.removeAll()
         constraintTemplates.removeAll()
+        constraintTemplateOrder.removeAll()
         tokenizerBiases.removeAll()
         lastErrors.removeAll()
     }
@@ -289,6 +304,7 @@ actor ModelCache {
         constraintTemplates = constraintTemplates.filter {
             !$0.key.hasPrefix("\(modelID):")
         }
+        constraintTemplateOrder.removeAll { $0.hasPrefix("\(modelID):") }
         tokenizerBiases.removeValue(forKey: modelID)
         lastErrors.removeValue(forKey: modelID)
     }
