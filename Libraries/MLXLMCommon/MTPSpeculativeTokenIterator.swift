@@ -58,6 +58,10 @@ func batchedGreedyMTPVerification(
 /// single-token "passthrough" mode for the remainder of generation —
 /// a mid-generation capability loss never crashes or corrupts the stream.
 ///
+/// At a nonzero temperature the drafter draws from the target sampler's distribution, and the
+/// verifier keeps each draft with the probability-ratio rule, so the emitted tokens follow the
+/// target's sampling distribution exactly.
+///
 /// Port of `_speculative_walk` from mlx-vlm/generate.py at SHA `d49d428`,
 /// with no-mutation-during-eval idioms (state is threaded through method
 /// args; drafter holds no target-derived state — the target and optional
@@ -99,6 +103,13 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     /// draft of a suppressed token would always be rejected by the
     /// verifier, wasting draft slots.
     let draftSampler: LogitSampler
+
+    /// The draft sampler when the target samples at a nonzero temperature: drafts are then kept
+    /// with the probability-ratio rule, and the emitted tokens follow the target's distribution.
+    private let proposalSampler: DraftProposalSampler?
+
+    /// The sampler the drafter's own state updates draw with.
+    private var drafterSampler: any LogitSampler { proposalSampler ?? sampler }
 
     public var tokenCount: Int { telemetry.emittedTokenCount }
     public let maxTokens: Int?
@@ -243,9 +254,20 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // Draft proposals bypass the iterator's processor chain, so suppressed
         // ids have to be masked at the drafter's own sampler: a proposal the
         // verifier will always reject is a wasted speculation slot.
-        if let suppressor = makeSuppressTokensProcessor(model: mainModel) {
+        let suppressor = makeSuppressTokensProcessor(model: mainModel)
+        if let distribution = self.sampler as? any DistributionLogitSampler {
+            // Separate from the sampler's stream, which draws the first token from the same seed.
+            let proposalSampler = DraftProposalSampler(
+                distribution: distribution, suppressor: suppressor,
+                randomState: parameters.seed.map { MLXRandom.RandomState(seed: $0 &+ 1) }
+                    ?? MLXRandom.RandomState())
+            self.proposalSampler = proposalSampler
+            self.draftSampler = proposalSampler
+        } else if let suppressor {
+            self.proposalSampler = nil
             self.draftSampler = SuppressTokensSampler(base: self.sampler, suppressor: suppressor)
         } else {
+            self.proposalSampler = nil
             self.draftSampler = self.sampler
         }
 
@@ -476,6 +498,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 return
             }
 
+            proposalSampler?.discardProposals()
             let resumed = resumableDrafter.resumeDrafterState(
                 target: mainModel,
                 suffixTokens: input.text.tokens,
@@ -484,7 +507,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 firstBonus: y.tokens,
                 positionDeltas: mainState?[mtpPositionDeltasKey],
                 state: &currentDrafterState,
-                sampler: sampler)
+                sampler: drafterSampler)
             guard resumed else {
                 switchToPassthrough(
                     reason:
@@ -506,6 +529,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 )
                 return
             }
+            proposalSampler?.discardProposals()
             statefulDrafter.prepareDrafterState(
                 target: mainModel,
                 promptTokens: input.text.tokens,
@@ -513,7 +537,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 firstBonus: y.tokens,
                 positionDeltas: mainState?[mtpPositionDeltasKey],
                 state: &currentDrafterState,
-                sampler: sampler)
+                sampler: drafterSampler)
             drafterState = currentDrafterState
         } else if cachePositionBeforePrefill > 0,
             drafter is any StatefulMTPDrafterModel
@@ -657,6 +681,17 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         // draftTokens shape [B, numDraft] -> flatten to [numDraft].
         let flatDraftTokens = draftTokens.flattened()
 
+        // A drafter draws every draft through the sampler, or none: then it drafts without
+        // drawing, and each proposal is the draft itself.
+        let proposal = proposalSampler?.takeProposals()
+        guard proposal.map({ $0.dim(0) == numDraft }) ?? true else {
+            if let round { mainCacheStorage.rollback(round) }
+            switchToPassthrough(
+                reason: "MTP drafter drew a different number of proposals than it drafted; "
+                    + "continuing without speculation")
+            return
+        }
+
         // Verify pass: main model evaluates [bonus, draft_1, ..., draft_numDraft]
         // in one forward call, emitting state for next round.
         var verifyState = state
@@ -685,6 +720,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             recordLogProbabilities(
                 of: [MLXArray(result.tokens)], sampledFrom: [logits[0 ..< (accepted + 1)]])
             emittedFinalToken = result.finalToken
+        } else if let proposalSampler {
+            (accepted, emittedFinalToken) = verifyBySpeculativeSampling(
+                logits: mainLogits[0, verifyStart ..< (verifyStart + numDraft + 1), 0...],
+                drafts: flatDraftTokens, proposal: proposal, sampler: proposalSampler)
         } else {
             eval(flatDraftTokens)
             let draftTokensList = flatDraftTokens.asArray(Int.self)
@@ -747,6 +786,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         if let statefulDrafter = drafter as? any StatefulMTPDrafterModel,
             var currentDrafterState = drafterState
         {
+            proposalSampler?.discardProposals()
             statefulDrafter.commitDrafterState(
                 target: mainModel,
                 targetHidden: mainResult.state?[mtpLastHiddenStatesKey] ?? lastHidden,
@@ -755,7 +795,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 finalToken: emittedFinalToken,
                 positionDeltas: mainResult.state?[mtpPositionDeltasKey],
                 state: &currentDrafterState,
-                sampler: sampler)
+                sampler: drafterSampler)
             drafterState = currentDrafterState
         }
 
@@ -800,6 +840,80 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         kvCachePlan.apply(to: mainCacheStorage)
 
         y = .init(tokens: emittedFinalToken)
+    }
+
+    /// Keeps each draft with the probability-ratio rule and queues the kept drafts and the token
+    /// after them, so the emitted tokens follow the target's sampling distribution exactly.
+    ///
+    /// - Parameters:
+    ///   - rows: the verify logits `[numDraft + 1, V]`.
+    ///   - drafts: the `numDraft` draft tokens.
+    ///   - proposal: the distributions the drafts were drawn from, or `nil` when the drafter
+    ///     drafted without drawing.
+    /// - Returns: the number of kept drafts, and the correction or bonus token after them.
+    private mutating func verifyBySpeculativeSampling(
+        logits rows: MLXArray, drafts: MLXArray, proposal: MLXArray?,
+        sampler proposals: DraftProposalSampler
+    ) -> (accepted: Int, finalToken: MLXArray) {
+        let numDraft = drafts.dim(0)
+        let proposal = proposal ?? deterministicProposal(drafts: drafts, width: rows.dim(-1))
+        let distribution = proposals.distribution
+        let randomState = proposals.randomState
+
+        // A stateless processor lets every row be decided with one readback.
+        if processor == nil || processor is SuppressTokensProcessor {
+            let logits = processor?.process(logits: rows) ?? rows
+            let target = distribution.logProbabilities(logits: logits)
+            let decisions = speculativeSamplingDecisions(
+                target: target[..<numDraft], proposal: proposal, drafts: drafts,
+                randomState: randomState)
+            let finals = concatenated([
+                decisions.corrections, categorical(target[numDraft...], key: randomState),
+            ])
+            let values = concatenated([
+                drafts.asType(.int32), decisions.kept.asType(.int32), finals.asType(.int32),
+            ]).asArray(Int.self)
+            let accepted = (0 ..< numDraft).first { values[numDraft + $0] == 0 } ?? numDraft
+            let tokens = Array(values[..<accepted]) + [values[2 * numDraft + accepted]]
+            pendingTokens.append(contentsOf: tokens)
+            recordLogProbabilities(
+                of: [MLXArray(tokens)], sampledFrom: [logits[0 ..< (accepted + 1)]])
+            return (accepted, finals[accepted ..< (accepted + 1)])
+        }
+
+        // Other processors see each emitted token before the next row.
+        let draftValues = drafts.asArray(Int.self)
+        var emittedTokens = [MLXArray]()
+        var emittedLogits = [MLXArray]()
+        func emit(_ token: MLXArray, value: Int, logits: MLXArray) {
+            processor?.didSample(token: token)
+            pendingTokens.append(value)
+            emittedTokens.append(token)
+            emittedLogits.append(logits)
+        }
+        defer { recordLogProbabilities(of: emittedTokens, sampledFrom: emittedLogits) }
+        var accepted = 0
+        while true {
+            var logits = rows[accepted ..< (accepted + 1)]
+            logits = processor?.process(logits: logits) ?? logits
+            let target = distribution.logProbabilities(logits: logits)
+            guard accepted < numDraft else {
+                let bonus = categorical(target, key: randomState)
+                emit(bonus, value: bonus.item(Int.self), logits: logits)
+                return (accepted, bonus)
+            }
+            let draft = drafts[accepted ..< (accepted + 1)]
+            let decision = speculativeSamplingDecisions(
+                target: target, proposal: proposal[accepted ..< (accepted + 1)], drafts: draft,
+                randomState: randomState)
+            guard decision.kept.item(Bool.self) else {
+                let correction = decision.corrections
+                emit(correction, value: correction.item(Int.self), logits: logits)
+                return (accepted, correction)
+            }
+            emit(draft, value: draftValues[accepted], logits: logits)
+            accepted += 1
+        }
     }
 
     /// Switch to single-token generation for the remainder of the stream.
@@ -856,6 +970,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             let targetHidden = result.state?[mtpLastHiddenStatesKey],
             targetHidden.dim(1) > 0
         {
+            proposalSampler?.discardProposals()
             statefulDrafter.commitDrafterState(
                 target: mainModel,
                 targetHidden: targetHidden,
@@ -864,7 +979,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 finalToken: token,
                 positionDeltas: result.state?[mtpPositionDeltasKey],
                 state: &currentDrafterState,
-                sampler: sampler)
+                sampler: drafterSampler)
             drafterState = currentDrafterState
             targetBoundaryHidden = targetHidden[0..., (-1)..., 0...]
         } else if maintainingDrafterState,

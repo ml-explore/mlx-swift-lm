@@ -114,6 +114,8 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
     var returnPreservedStateWhenOmittingDrafterState: Bool = false
     var prepareLogitsStateValue: Int?
     var emittedPositionDelta: Int?
+    /// When set, every position has these 20 logits instead of the planned token.
+    var fixedLogits: [Float]?
 
     private(set) var callCount: Int = 0
     private(set) var lastIncomingEmitFlag: Bool? = nil
@@ -230,6 +232,10 @@ private final class MockMainModel: Module, LanguageModel, KVCacheDimensionProvid
         // [B=1, positions, vocab=20]. One-hot at the planned token for each
         // position, taken from `nextLogitTokens[perPositionIndex...]`.
         let vocab = 20
+        if let fixedLogits {
+            return broadcast(
+                MLXArray(fixedLogits).reshaped(1, 1, vocab), to: [1, positions, vocab])
+        }
         var data = [Float](repeating: 0, count: positions * vocab)
         for i in 0 ..< positions {
             let tokIdx = perPositionIndex + i
@@ -848,6 +854,63 @@ func testMTPVerifyLoopMutatesClassProcessorForEmittedTokensOnly() throws {
         emissionLog.recordedTokens == [5, 9],
         "recordedTokens=\(emissionLog.recordedTokens) — expected one accepted draft and one correction only"
     )
+}
+
+/// Draws every draft through the sampler from the same 20 logits.
+private final class SamplingDrafter: Module, MTPDrafterModel {
+    let logits: MLXArray
+
+    init(logits: [Float]) {
+        self.logits = MLXArray(logits).reshaped(1, -1)
+    }
+
+    func validateCompatibility(with _: any LanguageModel) throws {}
+
+    func draftBlock(
+        target _: any LanguageModel, lastToken _: MLXArray, lastHidden _: MLXArray,
+        sharedKV _: [String: (MLXArray, MLXArray)], positionDeltas _: MLXArray?,
+        queryOffset _: Int, blockSize: Int, sampler: any LogitSampler
+    ) -> MLXArray {
+        concatenated(
+            (1 ..< blockSize).map { _ in sampler.sample(logits: logits).reshaped(1, 1) }, axis: 1)
+    }
+}
+
+/// With context-free target and draft distributions, every emitted token is an independent draw
+/// from the target, and each draft is kept with probability `a = sum(min(p, q))`: 0.9 here, where
+/// matching sampled tokens would keep only `sum(p * q)` = 0.27. A round of three drafts keeps
+/// `(a + a^2 + a^3) / 3` of them: 0.813, against 0.12.
+@Test(
+    "Sampled speculation emits the target distribution and keeps drafts by probability ratio",
+    arguments: [false, true])
+func testMTPSampledSpeculationKeepsTargetDistribution(statefulProcessor: Bool) throws {
+    let p: [Float] = [0.4, 0.3, 0.2, 0.1]
+    let q: [Float] = [0.3, 0.3, 0.2, 0.2]
+    func logits(_ probabilities: [Float]) -> [Float] {
+        (0 ..< 20).map { $0 < probabilities.count ? log(probabilities[$0]) : -.infinity }
+    }
+    let main = MockMainModel(nextLogitTokens: [])
+    main.fixedLogits = logits(p)
+    let count = 6000
+    var iterator = try MTPSpeculativeTokenIterator(
+        input: LMInput(tokens: MLXArray([Int32(1), 2, 3])), mainModel: main,
+        drafter: SamplingDrafter(logits: logits(q)), mainCache: nil,
+        parameters: GenerateParameters(maxTokens: count, temperature: 1, seed: 11),
+        blockSize: 4)
+    if statefulProcessor {
+        iterator._setProcessorForTesting(EmissionLog())
+    }
+
+    let tokens = Array(AnyIterator { iterator.next() })
+
+    #expect(tokens.count == count)
+    #expect(iterator.passthroughReason == nil)
+    for (token, probability) in p.enumerated() {
+        let frequency = Float(tokens.count { $0 == token }) / Float(count)
+        #expect(abs(frequency - probability) < 0.03, "token \(token): \(frequency)")
+    }
+    let acceptance = Float(iterator.acceptedCount) / Float(iterator.proposedCount)
+    #expect(abs(acceptance - 0.813) < 0.03, "acceptance \(acceptance)")
 }
 
 @Test
