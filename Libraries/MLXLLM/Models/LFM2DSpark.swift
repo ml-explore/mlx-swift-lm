@@ -295,7 +295,6 @@ public final class LFM2DSparkDraftModel: Module, StatefulMTPDrafterModel {
     public var maximumBlockSize: Int? { configuration.blockSize + 1 }
     public let requiresSharedTargetKV = false
     public let requiresPromptPrefill = true
-    public let requiresGreedySampling = true
     public var targetLayerIds: [Int]? { configuration.dflash.targetLayerIDs }
 
     @ModuleInfo(key: "layers") fileprivate var layers: [LFM2DSparkDecoderLayer]

@@ -98,7 +98,7 @@ func lfm2DSparkConfigurationAndCheckpointNamespaceMatchReleasedArchitecture() th
     #expect(drafter.targetLayerIds == [0, 1])
     #expect(drafter.requiresPromptPrefill)
     #expect(!drafter.requiresSharedTargetKV)
-    #expect(drafter.requiresGreedySampling)
+    #expect(!drafter.requiresGreedySampling)
     #expect(parameters["fc.weight"]?.shape == [8, 16])
     #expect(parameters["hidden_norm.weight"]?.shape == [8])
     #expect(parameters["layers.0.self_attn.q_proj.weight"]?.shape == [8, 8])

@@ -84,7 +84,6 @@ public final class Qwen35VLMNextNDraftModel: Module, ResumableMTPDrafterModel {
     public let maximumBlockSize: Int? = 2
     public let requiresSharedTargetKV = false
     public let requiresPromptPrefill = true
-    public let requiresGreedySampling = true
     private let checkpointPolicy: Qwen35CheckpointPolicy
 
     @ModuleInfo(key: "mtp") var mtp: Qwen35VLMNextNPredictor
