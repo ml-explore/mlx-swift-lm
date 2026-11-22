@@ -1070,4 +1070,45 @@ struct Inkling2ProcessorTests {
         #expect(abs(patches[0, 0].item(Float.self) - 1) < 1e-3)
         #expect(abs(patches[0, 1].item(Float.self) + 1) < 1e-3)
     }
+
+    @Test("Transparent pixels are put on an 8 px checkerboard")
+    func checkerboard() throws {
+        let processor = Inkling2Processor(
+            Inkling2ProcessorConfiguration(), tokenizer: InklingTestTokenizer())
+        let image = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 0)).cropped(
+            to: CGRect(x: 0, y: 0, width: 40, height: 40))
+        let (patches, _) = try processor.preprocess(image: image, processing: nil)
+        let light = (Float(204) / 255 - 0.5) / 0.5
+        let dark = (Float(153) / 255 - 0.5) / 0.5
+        // The red channel of (row, col) in the first 20 x 20 patch.
+        func red(_ row: Int, _ col: Int) -> Float {
+            patches[0, (row * 20 + col) * 3].item(Float.self)
+        }
+        for (row, col, expected) in [
+            (0, 0, light), (0, 1, light), (1, 0, light), (7, 7, light),
+            (0, 8, dark), (8, 0, dark), (8, 8, light), (9, 15, light),
+        ] {
+            #expect(abs(red(row, col) - expected) < 1e-3, "(\(row), \(col))")
+        }
+    }
+
+    @Test("Patch positions are whole rows and columns, merge block by merge block")
+    func gridPositions() {
+        let (row, col) = inkling2GridPositions(gridH: 4, gridW: 6, merge: 2)
+        var rows = [Int32]()
+        var cols = [Int32]()
+        for blockRow in 0 ..< 2 {
+            for blockCol in 0 ..< 3 {
+                for r in 0 ..< 2 {
+                    for c in 0 ..< 2 {
+                        rows.append(Int32(blockRow * 2 + r))
+                        cols.append(Int32(blockCol * 2 + c))
+                    }
+                }
+            }
+        }
+        #expect(row.dtype == .int32 && col.dtype == .int32)
+        #expect(row.asArray(Int32.self) == rows)
+        #expect(col.asArray(Int32.self) == cols)
+    }
 }

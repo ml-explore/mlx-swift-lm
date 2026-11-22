@@ -15,11 +15,14 @@ private func preciseGelu(_ x: MLXArray) -> MLXArray {
 
 /// The row and column of each patch, with the patches of each merge block consecutive and the
 /// blocks in raster order.
-private func gridPositions(gridH: Int, gridW: Int, merge: Int) -> (row: MLXArray, col: MLXArray) {
+func inkling2GridPositions(gridH: Int, gridW: Int, merge: Int) -> (row: MLXArray, col: MLXArray) {
     let i = MLXArray.arange(gridH * gridW, dtype: .int32)
     let blocksW = gridW / merge
-    let row = i / Int32(merge * merge * blocksW) * Int32(merge) + i / Int32(merge) % Int32(merge)
-    let col = i / Int32(merge * merge) % Int32(blocksW) * Int32(merge) + i % Int32(merge)
+    let row =
+        i.floorDivide(Int32(merge * merge * blocksW)) * Int32(merge)
+        + i.floorDivide(Int32(merge)) % Int32(merge)
+    let col =
+        i.floorDivide(Int32(merge * merge)) % Int32(blocksW) * Int32(merge) + i % Int32(merge)
     return (row, col)
 }
 
@@ -56,7 +59,7 @@ private final class Inkling2VisionEmbeddings: Module {
         var embeddings = patchEmbedding(patches)
 
         let side = gridSize
-        let (row, col) = gridPositions(gridH: gridH, gridW: gridW, merge: mergeSize)
+        let (row, col) = inkling2GridPositions(gridH: gridH, gridW: gridW, merge: mergeSize)
         let (rowTaps, rowWeights) = bilinearTaps(row, size: gridH, side: side)
         let (colTaps, colWeights) = bilinearTaps(col, size: gridW, side: side)
         let indices = rowTaps[0..., 0..., .newAxis] * Int32(side) + colTaps[0..., .newAxis, 0...]
@@ -211,7 +214,7 @@ final class Inkling2VisionModel: Module {
         hidden = preNorm(hidden)
 
         // The class token is at the origin; the patches start at 1.
-        let (row, col) = gridPositions(gridH: gridH, gridW: gridW, merge: merge)
+        let (row, col) = inkling2GridPositions(gridH: gridH, gridW: gridW, merge: merge)
         let zero = MLXArray.zeros([1], dtype: .int32)
         let (cos, sin) = rotary(
             row: concatenated([zero, row + 1]), col: concatenated([zero, col + 1]))
@@ -348,7 +351,7 @@ public struct Inkling2Processor: UserInputProcessor {
         // Premultiplied colors over the checkerboard.
         let y = MLXArray.arange(height, dtype: .int32)[0..., .newAxis]
         let x = MLXArray.arange(width, dtype: .int32)[.newAxis, 0...]
-        let light = ((x / 8 + y / 8) % 2) .== 0
+        let light = ((x.floorDivide(8) + y.floorDivide(8)) % 2) .== 0
         let background = which(light, MLXArray(Float(204) / 255), MLXArray(Float(153) / 255))
         let alpha = rgba[0..., 0..., 3...]
         let rgb = rgba[0..., 0..., ..<3] + background[0..., 0..., .newAxis] * (1 - alpha)
