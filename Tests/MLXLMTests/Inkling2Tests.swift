@@ -665,6 +665,142 @@ struct Inkling2ModelTests {
     }
 }
 
+// MARK: - Speculative decoding
+
+/// Proposes the target's greedy continuation, wrong at every third draft, so rounds accept some
+/// drafts and reject the rest.
+private final class ScriptedDrafter: Module, MTPDrafterModel {
+    let continuation: [Int]
+    let promptLength: Int
+    let requiresSharedTargetKV = false
+    let requiresGreedySampling = true
+    private var drafted = 0
+
+    init(continuation: [Int], promptLength: Int) {
+        self.continuation = continuation
+        self.promptLength = promptLength
+    }
+
+    func validateCompatibility(with _: any LanguageModel) throws {}
+
+    /// `queryOffset` is the position of `lastToken`, the continuation's token at
+    /// `queryOffset - promptLength`.
+    func draftBlock(
+        target _: any LanguageModel, lastToken _: MLXArray, lastHidden _: MLXArray,
+        sharedKV _: [String: (MLXArray, MLXArray)], positionDeltas _: MLXArray?,
+        queryOffset: Int, blockSize: Int, sampler _: any LogitSampler
+    ) -> MLXArray {
+        let drafts = (1 ..< blockSize).map { step -> Int32 in
+            drafted += 1
+            let index = min(queryOffset - promptLength + step, continuation.count - 1)
+            let token = continuation[index]
+            return Int32(drafted.isMultiple(of: 3) ? (token + 1) % 48 : token)
+        }
+        return MLXArray(drafts).reshaped(1, -1)
+    }
+}
+
+@Suite("Inkling2 speculative decoding")
+struct Inkling2SpeculativeDecodingTests {
+
+    /// The tiny model of ``Inkling2ModelTests`` with a two-layer draft that reads its first
+    /// prelude visit, its last core visit and its final hidden states.
+    static let draftJSON = Inkling2ModelTests.tinyJSON.replacingOccurrences(
+        of: "\"model_type\": \"inkling2_loop\",",
+        with: """
+            "model_type": "inkling2_loop",
+            "mtp_config": {
+              "hidden_size": 64, "num_hidden_layers": 2, "num_attention_heads": 4,
+              "num_key_value_heads": 2, "head_dim": 16, "intermediate_size": 32,
+              "rms_norm_eps": 1e-06, "rope_theta": 10000.0, "local_layer_ids": [0],
+              "sliding_window_size": 4, "block_size": 4, "markov_rank": 8,
+              "markov_head_type": "rnn_hidden", "target_layer_ids": [1, 5, 8]
+            },
+            """)
+
+    private static func greedy(_ model: Inkling2, prompt: LMInput, count: Int) throws -> [Int] {
+        var iterator = try TokenIterator(
+            input: prompt, model: model, parameters: .init(maxTokens: count, temperature: 0))
+        return Array(AnyIterator { iterator.next() })
+    }
+
+    private static var prompt: LMInput {
+        LMInput(tokens: MLXArray((0 ..< 5).map { Int32(($0 * 7 + 3) % 48) }))
+    }
+
+    @Test("Rejected drafts rewind every cache to the greedy sequence, past the window")
+    func rewindMatchesGreedy() throws {
+        let model = try Inkling2ModelTests.makeModel()
+        let expected = try Self.greedy(model, prompt: Self.prompt, count: 30)
+        let drafter = ScriptedDrafter(continuation: expected, promptLength: 5)
+        var iterator = try MTPSpeculativeTokenIterator(
+            input: Self.prompt, mainModel: model, drafter: drafter,
+            parameters: .init(maxTokens: 30, temperature: 0), blockSize: 4)
+        let output = Array(AnyIterator { iterator.next() })
+
+        #expect(output == expected)
+        #expect(iterator.passthroughReason == nil)
+        #expect(iterator.acceptedCount > 0 && iterator.acceptedCount < iterator.proposedCount)
+    }
+
+    @Test("The DSpark draft runs on the target's features and keeps greedy decoding")
+    func draftKeepsGreedy() throws {
+        let model = try Inkling2ModelTests.makeModel()
+        let configuration = try JSONDecoder().decode(
+            Inkling2DSparkConfiguration.self, from: Data(Self.draftJSON.utf8))
+        try configuration.validateModelConfiguration()
+        let drafter = Inkling2DSparkDraftModel(configuration)
+        MLXRandom.seed(12)
+        var parameters = [String: MLXArray]()
+        for (key, value) in drafter.parameters().flattened() {
+            parameters[key] = MLXRandom.normal(value.shape) * 0.3
+        }
+        try drafter.update(
+            parameters: ModuleParameters.unflattened(parameters), verify: .noUnusedKeys)
+        try drafter.validateCompatibility(with: model)
+
+        let expected = try Self.greedy(model, prompt: Self.prompt, count: 20)
+        var iterator = try MTPSpeculativeTokenIterator(
+            input: Self.prompt, mainModel: model, drafter: drafter,
+            parameters: .init(maxTokens: 20, temperature: 0), blockSize: 4)
+        let output = Array(AnyIterator { iterator.next() })
+
+        #expect(output == expected)
+        #expect(iterator.passthroughReason == nil)
+        #expect(iterator.proposedCount > 0)
+    }
+
+    @Test("Folding hidden_out into the quantized head keeps the logit correction")
+    func foldedHead() throws {
+        let configuration = try JSONDecoder().decode(
+            Inkling2DSparkConfiguration.self, from: Data(Self.draftJSON.utf8))
+        let drafter = Inkling2DSparkDraftModel(configuration)
+        MLXRandom.seed(13)
+        let head = MLXRandom.normal([50, 64]) * 0.3
+        let (weight, scales, biases) = MLX.quantized(head, groupSize: 64, bits: 4)
+        let projection = MLXRandom.normal([64, 8]) * 0.3
+        let bias = MLXRandom.normal([64]) * 0.3
+        let checkpoint = try drafter.prepareCheckpoint(
+            ModelCheckpoint(
+                weights: [
+                    "lm_head.weight": weight, "lm_head.scales": scales,
+                    "lm_head.biases": biases!, "markov_head.hidden_out.weight": projection,
+                    "markov_head.hidden_out.bias": bias,
+                ],
+                perLayerQuantization: .init(
+                    quantization: .init(groupSize: 64, bits: 4), perLayerQuantization: [:])))
+
+        let latent = MLXRandom.normal([3, 8])
+        let dense = dequantized(weight, scales: scales, biases: biases, groupSize: 64, bits: 4)
+        let expected = matmul(matmul(latent, projection.T) + bias, dense.T)
+        let folded = try #require(checkpoint.weights["markov_head.fold.weight"])
+        let foldedBias = try #require(checkpoint.weights["markov_head.fold.bias"])
+        let actual = matmul(latent, folded.asType(.float32).T) + foldedBias.asType(.float32)
+        #expect(maxDifference(actual, expected) < 5e-2)
+        #expect(checkpoint.weights["lm_head.weight"] == nil, "the head stays the target's")
+    }
+}
+
 // MARK: - Stream protocol
 
 private final class InklingTestTokenizer: Tokenizer, @unchecked Sendable {
