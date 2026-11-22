@@ -1878,13 +1878,16 @@ public final class Inkling2: Module, VLMModel, KVCacheDimensionProvider {
     }
 
     /// Each layer visit has its own attention cache and the states of its four convolutions.
+    /// The attention kernels read the keys and values, so an unbounded cache is a
+    /// ``DirectAttentionKVCache``.
     public func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
         let text = config.textConfiguration
         return try text.layerVisits.map { layer in
             let attention: KVCache =
                 text.isSliding(layer)
                 ? try makeSlidingWindowKVCache(parameters: parameters, window: text.slidingWindow)
-                : try makeAttentionKVCache(parameters: parameters)
+                : try makeAttentionKVCache(parameters: parameters) as? RotatingKVCache
+                    ?? DirectAttentionKVCache()
             return CacheList(
                 attention,
                 ConvolutionStatesCache(slots: 4, stateLength: text.convolutionKernelSize - 1))

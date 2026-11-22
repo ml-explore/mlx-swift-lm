@@ -609,6 +609,20 @@ struct Inkling2ModelTests {
         }
     }
 
+    @Test(
+        "Cache schemes that compute attention leave the attention caches in full precision",
+        arguments: ["varn4", "turbo8v4"])
+    func attentionOwningKVScheme(scheme: String) throws {
+        let model = try Self.makeModel()
+        let prompt = LMInput(tokens: MLXArray((0 ..< 12).map { Int32(($0 * 7 + 3) % 48) }))
+        func greedy(_ parameters: GenerateParameters) throws -> [Int] {
+            var iterator = try TokenIterator(input: prompt, model: model, parameters: parameters)
+            return Array(AnyIterator { iterator.next() })
+        }
+        let plain = try greedy(.init(maxTokens: 8, temperature: 0))
+        #expect(try greedy(.init(maxTokens: 8, kvScheme: scheme, temperature: 0)) == plain)
+    }
+
     @Test("Decoding through the caches matches the full-sequence forward")
     func incrementalDecoding() throws {
         let model = try Self.makeModel()

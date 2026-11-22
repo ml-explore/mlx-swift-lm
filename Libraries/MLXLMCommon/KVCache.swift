@@ -634,6 +634,37 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
     }
 }
 
+/// A full-precision KV cache that the model's own attention kernels read directly.
+///
+/// It can become an affine ``QuantizedKVCache``. TurboQuant and variance-normalized strategies
+/// leave it in full precision, because those caches compute attention themselves.
+public final class DirectAttentionKVCache: KVCacheSimple {
+    public override class var serializedClassName: String? { "DirectAttentionKVCache" }
+
+    public override class func restore(
+        state: [MLXArray], metaState: [String]
+    ) throws -> any KVCache {
+        try validatePromptCache(
+            className: "DirectAttentionKVCache", state: state, stateCounts: [0, 2],
+            metadata: metaState, metadataCounts: [1])
+        let cache = DirectAttentionKVCache()
+        if !state.isEmpty {
+            cache.state = state
+        }
+        return cache
+    }
+
+    public override func copy() -> any KVCache {
+        let new = DirectAttentionKVCache()
+        new.step = step
+        let s = state
+        if !s.isEmpty {
+            new.state = s.map { $0[.ellipsis] }
+        }
+        return new
+    }
+}
+
 /// Rotating KV cache for sliding window attention
 public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     public override class var serializedClassName: String? { "RotatingKVCache" }
@@ -3088,7 +3119,9 @@ func maybeVarianceNormalizeKVCache(
 ) -> Bool {
     var awaitsCompressionStart = false
     KVCacheTree.rewrite(&cache) { leaf in
-        guard case .simple(let simple) = leaf.kind else { return leaf.cache }
+        guard case .simple(let simple) = leaf.kind, !(simple is DirectAttentionKVCache) else {
+            return leaf.cache
+        }
         guard simple.offset > compressionStart else {
             awaitsCompressionStart = true
             return simple

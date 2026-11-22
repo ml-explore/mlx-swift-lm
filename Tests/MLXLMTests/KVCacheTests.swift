@@ -10,6 +10,7 @@ private let cacheCreators: [@Sendable () -> any KVCache] = [
     { QuantizedKVCache() },
     { VarianceNormalizedKVCache(tileSize: 32, keyBits: 4, valueBits: 4) },
     { ChunkedKVCache(chunkSize: 16) },
+    { DirectAttentionKVCache() },
     { ArraysCache(size: 2) },
     { MambaCache() },
 ]

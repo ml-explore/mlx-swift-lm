@@ -482,12 +482,47 @@ struct KVCacheConfigurationTests {
         }
     }
 
+    @Test func directAttentionCacheStaysFullPrecisionUnderAttentionOwningStrategies() throws {
+        let strategies: [KVCacheConfiguration.Strategy] = [
+            .turboQuant(.qualityFirst),
+            .varianceNormalized(try VarianceNormalizedKVCacheConfiguration()),
+        ]
+        for strategy in strategies {
+            var cache: [KVCache] = [
+                populatedSimpleCache(headDimension: 64, DirectAttentionKVCache())
+            ]
+            let result = try applyKVCacheConfiguration(
+                cache: &cache,
+                configuration: KVCacheConfiguration(
+                    strategy: strategy, compatibility: .allowPartial))
+
+            #expect(cache[0] is DirectAttentionKVCache)
+            #expect(result.skipped.map(\.path) == [[0]])
+            #expect(
+                throws: KVCacheConfigurationError.noCompatibleLayers(strategy: strategy.identifier)
+            ) {
+                try validateKVCacheCompatibility(
+                    cache, configuration: KVCacheConfiguration(strategy: strategy))
+            }
+        }
+    }
+
+    @Test func directAttentionCacheTakesAffineQuantization() throws {
+        var cache: [KVCache] = [populatedSimpleCache(headDimension: 64, DirectAttentionKVCache())]
+
+        _ = try applyKVCacheConfiguration(
+            cache: &cache, configuration: KVCacheConfiguration(strategy: .affine(.fourBit)))
+
+        #expect(cache[0] is QuantizedKVCache)
+    }
+
     private func mixedShapeCache() -> [KVCache] {
         [populatedSimpleCache(headDimension: 64), populatedSimpleCache(headDimension: 48)]
     }
 
-    private func populatedSimpleCache(headDimension: Int) -> KVCacheSimple {
-        let cache = KVCacheSimple()
+    private func populatedSimpleCache(
+        headDimension: Int, _ cache: KVCacheSimple = KVCacheSimple()
+    ) -> KVCacheSimple {
         cache.state = [
             MLXArray.zeros([1, 1, 1, headDimension]),
             MLXArray.zeros([1, 1, 1, headDimension]),
