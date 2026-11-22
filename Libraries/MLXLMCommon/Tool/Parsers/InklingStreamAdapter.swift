@@ -153,15 +153,13 @@ private struct InklingFrameParser {
         }
     }
 
-    /// The step for output that stopped inside a frame.
+    /// The step for output that stopped inside a frame. An open payload closes, so its text
+    /// flushes and its tool call can be refused.
     mutating func finish() -> InklingParseStep? {
         defer { state = .finished }
         switch state {
         case .payload(let kind, let name, let tokens):
-            if kind == .toolJSON || kind == .toolText {
-                return .closed(kind, name: name, tokens: tokens)
-            }
-            return nil
+            return .closed(kind, name: name, tokens: tokens)
         case .header(let tokens) where !tokens.isEmpty:
             return .rejected("Incomplete Inkling frame header at generation end")
         default:
@@ -219,7 +217,9 @@ private struct InklingProtocolDecoder {
 
     mutating func finish() -> TokenStreamEvent? {
         guard let step = parser.finish() else { return nil }
-        if case .closed(_, let name, let tokens) = step {
+        if case .closed(let kind, let name, let tokens) = step,
+            kind == .toolJSON || kind == .toolText
+        {
             let text = tokenizer.decode(tokenIds: tokens, skipSpecialTokens: false)
             return .rejectedToolCall(
                 rejection(.incompleteOutput, name: name.isEmpty ? nil : name, rawText: text))

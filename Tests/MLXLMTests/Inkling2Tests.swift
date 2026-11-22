@@ -823,10 +823,20 @@ private final class InklingTestTokenizer: Tokenizer, @unchecked Sendable {
         "<|content_model_end_sampling|>": 200_006, "<|content_thinking|>": 200_008,
         "<|end_message|>": 200_010, "<|content_invoke_tool_json|>": 200_049,
     ]
+    private let holdsTextUntilFinish: Bool
     private var nextID = 1
     private var textToID = InklingTestTokenizer.controls
     private var idToText = Dictionary(
         uniqueKeysWithValues: InklingTestTokenizer.controls.map { ($1, $0) })
+
+    init(holdsTextUntilFinish: Bool = false) {
+        self.holdsTextUntilFinish = holdsTextUntilFinish
+    }
+
+    func makeStreamingDetokenizer() -> any StreamingDetokenizer {
+        holdsTextUntilFinish
+            ? HoldingDetokenizer(tokenizer: self) : NaiveStreamingDetokenizer(tokenizer: self)
+    }
 
     func id(_ text: String) -> Int {
         if let id = textToID[text] { return id }
@@ -852,6 +862,19 @@ private final class InklingTestTokenizer: Tokenizer, @unchecked Sendable {
         messages: [[String: any Sendable]], tools: [[String: any Sendable]]?,
         additionalContext: [String: any Sendable]?
     ) throws -> [Int] { [] }
+}
+
+/// Releases nothing until `finish()`, as a detokenizer may for a context-dependent suffix.
+private struct HoldingDetokenizer: StreamingDetokenizer {
+    let tokenizer: any Tokenizer
+    var tokens = [Int]()
+
+    mutating func append(token: Int) { tokens.append(token) }
+    mutating func next() -> String? { nil }
+    mutating func finish() -> String? {
+        defer { tokens.removeAll() }
+        return tokens.isEmpty ? nil : tokenizer.decode(tokenIds: tokens, skipSpecialTokens: false)
+    }
 }
 
 @Suite("Inkling2 stream protocol")
@@ -908,6 +931,33 @@ struct Inkling2StreamProtocolTests {
         #expect(reasoning == "Plan it.")
         #expect(response == "Hello there.")
         #expect(!events.contains { if case .protocolError = $0 { true } else { false } })
+    }
+
+    @Test("Generation that stops inside a frame flushes the text the detokenizer holds")
+    func unfinishedFramesFlush() throws {
+        let tokenizer = InklingTestTokenizer(holdsTextUntilFinish: true)
+        let thinking = try events(
+            tokenizer,
+            tokenizer.ids("<|message_model|>", "<|content_thinking|>", "Plan", " it."))
+        #expect(text(thinking).reasoning == "Plan it.")
+        let answer = try events(
+            tokenizer,
+            tokenizer.ids(
+                "<|message_model|>", "<|content_thinking|>", "Plan.", "<|end_message|>",
+                "<|message_model|>", "<|content_text|>", "Hello", " there"))
+        #expect(text(answer).reasoning == "Plan.")
+        #expect(text(answer).response == "Hello there")
+        let continued = try events(tokenizer, tokenizer.ids("and", " more"))
+        #expect(text(continued).response == "and more")
+        for events in [thinking, answer, continued] {
+            #expect(
+                !events.contains {
+                    switch $0 {
+                    case .protocolError, .rejectedToolCall: true
+                    default: false
+                    }
+                })
+        }
     }
 
     @Test("A tool frame becomes a tool call")
