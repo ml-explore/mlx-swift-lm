@@ -1084,13 +1084,16 @@ final class Inkling2DecodeMasks {
 // MARK: - Mixture of experts
 
 /// One projection of all experts, quantized in the checkpoint's own format.
-private final class Inkling2ExpertProjection: Module {
+private final class Inkling2ExpertProjection: Module, Quantized {
     @ParameterInfo var weight: MLXArray
     @ParameterInfo var scales: MLXArray
     @ParameterInfo var biases: MLXArray?
     @ParameterInfo(key: "global_scale") var globalScale: MLXArray?
 
     let format: Inkling2ExpertFormat
+    var groupSize: Int { format.groupSize }
+    var bits: Int { format.bits }
+    var mode: QuantizationMode { format.mode }
 
     init(experts: Int, inputDims: Int, outputDims: Int, format: Inkling2ExpertFormat) {
         self.format = format

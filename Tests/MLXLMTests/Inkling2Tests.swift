@@ -573,6 +573,19 @@ struct Inkling2ModelTests {
         return model
     }
 
+    @Test("The parameter count holds every value the NVFP4 experts pack")
+    func parameterCount() throws {
+        let model = try Self.makeModel()
+        let isExpertTensor = { (key: String) in
+            [".weight", ".scales", ".global_scale"].contains { key.hasSuffix("_proj\($0)") }
+                && key.contains(".experts.")
+        }
+        let dense = model.parameters().flattened().filter { !isExpertTensor($0.0) }
+            .reduce(0) { $0 + $1.1.size }
+        // Six layers of four experts: a 64 -> 2 x 32 gate-up and a 32 -> 64 down projection.
+        #expect(model.numParameters() == dense + 6 * 4 * (64 * 2 * 32 + 32 * 64))
+    }
+
     @Test("Pinned keys keep their positions in the reference distances")
     func pinnedDistances() {
         let masks = Inkling2DecodeMasks()
