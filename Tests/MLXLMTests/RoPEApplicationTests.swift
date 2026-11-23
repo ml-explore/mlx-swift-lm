@@ -1,11 +1,11 @@
 import Foundation
 import MLX
 import MLXNN
-import MLXVLM
 import Testing
 
 @testable import MLXLLM
 @testable import MLXLMCommon
+@testable import MLXVLM
 
 struct RoPEApplicationTests {
 
@@ -517,4 +517,272 @@ private func forward(_ model: any LanguageModel, _ tokens: MLXArray, cache: [any
 
 func maxAbsDifference(_ lhs: MLXArray, _ rhs: MLXArray) -> Float {
     abs(lhs.asType(.float32) - rhs.asType(.float32)).max().item(Float.self)
+}
+
+@Suite(.serialized)
+struct QwenVLPositionTests {
+    @Test("Decode positions preserve scalar and per-row cache offsets")
+    func decodePositions() {
+        Device.withDefaultDevice(.cpu) {
+            let scalar = KVCacheSimple()
+            scalar.offset = 7
+            let rows = PositionOnlyCache(MLXArray([Int32(3), 9]))
+            let columns = PositionOnlyCache(MLXArray([Int32(3), 9]).reshaped([2, 1]))
+            let cases: [(KVCache?, MLXArray, [Int32])] = [
+                (nil, MLXArray([Int32(2)]), [2, 3, 4, 2, 3, 4]),
+                (scalar, MLXArray([Int32(-2), 1]), [5, 6, 7, 8, 9, 10]),
+                (rows, MLXArray([Int32(-1), -3]), [2, 3, 4, 6, 7, 8]),
+                (columns, MLXArray([Int32(-1), -3]).reshaped([2, 1]), [2, 3, 4, 6, 7, 8]),
+            ]
+            for (cache, deltas, expected) in cases {
+                let positions = QwenVL.decodePositionIds(
+                    cache: cache, ropeDeltas: deltas, batch: 2, length: 3)
+                #expect(positions.shape == [3, 2, 3])
+                #expect(positions.asArray(Int32.self) == expected + expected + expected)
+            }
+        }
+    }
+
+    @Test(
+        "Image-prefilled Qwen rows decode at their own positions",
+        arguments: PositionedQwenFamily.allCases)
+    func imageDecode(family: PositionedQwenFamily) throws {
+        // Qwen3.5 MoE's single-token router uses a Metal kernel.
+        let gpu = family == .qwen35MoE
+        let tolerance: Float = gpu ? 1e-2 : 1e-4
+        try Device.withDefaultDevice(gpu ? .gpu : .cpu) {
+            let model = try family.model()
+            let inputs = family.inputs()
+            let key = LMOutput.Key<MLXArray>(family.deltaKey)
+            func prefill(_ input: LMInput) throws -> ([KVCache], LMOutput.State) {
+                let cache = try model.newCache(parameters: nil)
+                let result = try model.prepare(input, cache: cache, state: nil, prefill: .init())
+                guard case .logits(let output) = result else {
+                    throw PositionTestError.expectedLogits
+                }
+                let state = try #require(output.state)
+                #expect(state[key] != nil, "An image prefill must provide its M-RoPE delta")
+                eval(output.logits, cache)
+                return (cache, state)
+            }
+            var singles = try inputs.map(prefill)
+            let joining = try inputs.map(prefill)
+            let batch = joining[0].0.indices.map { layer in
+                RowOffsetCache(rows: joining.map { $0.0[layer] }) as KVCache
+            }
+            #expect(joining[0].0[0].offset != joining[1].0[0].offset)
+            var state = LMOutput.State()
+            state[key] = try concatenated(joining.map { try #require($0.1[key]).reshaped([-1]) })
+
+            for length in [1, 2, 1] {
+                let tokens = MLXArray((0 ..< 2 * length).map { Int32(20 + $0) })
+                    .reshaped([2, length])
+                let actual = model.nextTokenLogits(
+                    .init(tokens: tokens), cache: batch, state: state)
+                state = try #require(actual.state)
+                for row in singles.indices {
+                    let expected = model.nextTokenLogits(
+                        .init(tokens: tokens[row ..< row + 1]), cache: singles[row].0,
+                        state: singles[row].1)
+                    singles[row].1 = try #require(expected.state)
+                    #expect(
+                        maxAbsDifference(actual.logits[row ..< row + 1], expected.logits)
+                            < tolerance,
+                        "\(family), row \(row), decode length \(length)")
+                }
+            }
+        }
+    }
+
+    @Test(
+        "Batched prefill consumes each row's image and video grids once",
+        arguments: PrefillPositionFamily.allCases, MediaRows.allCases)
+    func prefillPositions(family: PrefillPositionFamily, media: MediaRows) {
+        Device.withDefaultDevice(.cpu) {
+            let grids = [THW(1, 2, 4), THW(1, 4, 2)]
+            let kinds = media.kinds
+            let rows: [[Int32]] = kinds.map { kind in
+                switch kind {
+                case .image: [1, 502, 500, 500, 503, 2]
+                case .video: [1, 502, 501, 501, 503, 2]
+                case .text: [1, 3, 4, 5, 6, 2]
+                }
+            }
+            let images = kinds.indices.filter { kinds[$0] == .image }.map { grids[$0] }
+            let videos = kinds.indices.filter { kinds[$0] == .video }.map { grids[$0] }
+            let actual = family.positions(
+                MLXArray(rows.flatMap { $0 }).reshaped([2, 6]),
+                images: images.isEmpty ? nil : images, videos: videos.isEmpty ? nil : videos)
+            #expect(actual.0.shape == [3, 2, 6])
+            #expect(actual.1.shape == [2])
+            for row in rows.indices {
+                let expected = family.positions(
+                    MLXArray(rows[row]).reshaped([1, 6]),
+                    images: kinds[row] == .image ? [grids[row]] : nil,
+                    videos: kinds[row] == .video ? [grids[row]] : nil)
+                #expect(
+                    actual.0[0..., row ..< row + 1, 0...].asArray(Int32.self)
+                        == expected.0.asArray(Int32.self))
+                #expect(actual.1[row].item(Int32.self) == expected.1[0].item(Int32.self))
+            }
+        }
+    }
+}
+
+private enum PositionTestError: Error {
+    case expectedLogits
+}
+
+private final class PositionOnlyCache: KVCacheSimple {
+    let positions: MLXArray
+
+    init(_ positions: MLXArray) {
+        self.positions = positions
+        super.init()
+    }
+
+    override var ropeOffset: RoPEOffset { .batch(positions) }
+}
+
+enum PrefillPositionFamily: CaseIterable, Sendable {
+    case qwen25, qwen3
+
+    func positions(_ tokens: MLXArray, images: [THW]?, videos: [THW]?) -> (MLXArray, MLXArray) {
+        switch self {
+        case .qwen25:
+            Qwen25VL.getRopeIndex(
+                inputIds: tokens, imageGridTHW: images, videoGridTHW: videos,
+                spatialMergeSize: 2, imageTokenId: 500, videoTokenId: 501,
+                visionStartTokenId: 502)
+        case .qwen3:
+            Qwen3VLLanguage.getRopeIndex(
+                inputIds: tokens, imageGridTHW: images, videoGridTHW: videos,
+                spatialMergeSize: 2, imageTokenId: 500, videoTokenId: 501,
+                visionStartTokenId: 502)
+        }
+    }
+}
+
+enum MediaKind: Equatable {
+    case image, video, text
+}
+
+enum MediaRows: CaseIterable, Sendable {
+    case images, videos, imageThenVideo, textThenImage
+
+    var kinds: [MediaKind] {
+        switch self {
+        case .images: [.image, .image]
+        case .videos: [.video, .video]
+        case .imageThenVideo: [.image, .video]
+        case .textThenImage: [.text, .image]
+        }
+    }
+}
+
+enum PositionedQwenFamily: CaseIterable, Sendable {
+    case qwen2, qwen25, qwen3, qwen3MoE, qwen35, qwen35MoE
+
+    var deltaKey: String {
+        switch self {
+        case .qwen2: "qwen2vl.ropeDeltas"
+        case .qwen25: "qwen25vl.ropeDeltas"
+        case .qwen3: "qwen35vl.ropeDeltas"
+        case .qwen3MoE: "qwen3VLMoE.ropeDeltas"
+        case .qwen35, .qwen35MoE: "qwen35.ropeDeltas"
+        }
+    }
+
+    func inputs() -> [LMInput] {
+        let old = self == .qwen2 || self == .qwen25
+        let (pad, start, end): (Int32, Int32, Int32) = old ? (60, 62, 63) : (500, 502, 503)
+        return [(THW(1, 4, 4), 4, [Int32(2), 3]), (THW(1, 2, 4), 2, [Int32(4)])]
+            .enumerated().map { row, item in
+                let (grid, count, tail) = item
+                return LMInput(
+                    text: .init(
+                        tokens: MLXArray(
+                            [Int32(1), start] + Array(repeating: pad, count: count)
+                                + [end] + tail
+                        ).reshaped([1, -1])),
+                    image: .init(
+                        pixels: MLXRandom.normal(
+                            [grid.t * grid.h * grid.w, 3 * 2 * 16 * 16],
+                            key: MLXRandom.key(UInt64(row + 1))), frames: [grid]))
+            }
+    }
+
+    func model() throws -> any LanguageModel {
+        switch self {
+        case .qwen2: return try tinyQwenVLText(.qwen2)
+        case .qwen25: return try tinyQwenVLText(.qwen25)
+        default: break
+        }
+        let is35 = self == .qwen35 || self == .qwen35MoE
+        let moe = self == .qwen3MoE || self == .qwen35MoE
+        let modelType =
+            is35
+            ? (moe ? "qwen3_5_moe" : "qwen3_5_vl")
+            : (moe ? "qwen3_vl_moe" : "qwen3_vl")
+        var text: [String: Any] = [
+            "model_type": modelType, "hidden_size": 64, "num_hidden_layers": 2,
+            "intermediate_size": 128, "num_attention_heads": 4, "num_key_value_heads": 2,
+            "head_dim": is35 ? 32 : 16, "vocab_size": 512, "max_position_embeddings": 4096,
+            "rms_norm_eps": 1e-6, "rope_theta": 100000.0,
+        ]
+        if is35 {
+            // Full-attention-only fixtures isolate position handling from recurrent cache batching.
+            text["full_attention_interval"] = 1
+            text["linear_num_value_heads"] = 4
+            text["linear_num_key_heads"] = 2
+            text["linear_key_head_dim"] = 32
+            text["linear_value_head_dim"] = 32
+            text["linear_conv_kernel_dim"] = 4
+            text["rope_parameters"] =
+                [
+                    "type": "default", "mrope_section": [8, 4, 4], "rope_theta": 100000.0,
+                    "partial_rotary_factor": 1.0,
+                ] as [String: Any]
+        } else {
+            text["rope_scaling"] =
+                ["type": "default", "mrope_section": [4, 2, 2]] as [String: Any]
+        }
+        if moe {
+            text["num_experts"] = 2
+            text["num_experts_per_tok"] = 2
+            text["decoder_sparse_step"] = 1
+            text["mlp_only_layers"] = [Int]()
+            text["moe_intermediate_size"] = 128
+            text["shared_expert_intermediate_size"] = 128
+        }
+        let configuration: [String: Any] = [
+            "model_type": modelType, "image_token_id": 500, "video_token_id": 501,
+            "vision_start_token_id": 502, "vision_end_token_id": 503, "vocab_size": 512,
+            "text_config": text,
+            "vision_config": [
+                "model_type": "qwen3_vl", "depth": 2, "hidden_size": 32,
+                "intermediate_size": 64, "out_hidden_size": 64, "num_heads": 2,
+                "patch_size": 16, "spatial_merge_size": 2, "temporal_patch_size": 2,
+                "num_position_embeddings": 64, "deepstack_visual_indexes": [0, 1],
+            ] as [String: Any],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: configuration)
+        return try withRandomState(MLXRandom.RandomState(seed: 142)) {
+            let model: any LanguageModel
+            switch self {
+            case .qwen3:
+                model = Qwen3VL(try JSONDecoder().decode(Qwen3VLConfiguration.self, from: data))
+            case .qwen3MoE:
+                model = Qwen3VLMoE(
+                    try JSONDecoder().decode(Qwen3VLMoEConfiguration.self, from: data))
+            case .qwen35, .qwen35MoE:
+                let config = try JSONDecoder().decode(MLXVLM.Qwen35Configuration.self, from: data)
+                model = self == .qwen35 ? MLXVLM.Qwen35(config) : MLXVLM.Qwen35MoE(config)
+            default: throw PositionTestError.expectedLogits
+            }
+            model.train(false)
+            eval(model)
+            return model
+        }
+    }
 }

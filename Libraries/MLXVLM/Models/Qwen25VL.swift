@@ -291,24 +291,9 @@ private enum Language {
             if effectivePositionIds == nil, let ropeDeltas = state[ropeDeltasKey],
                 let cache, let input = inputs ?? inputEmbedding
             {
-                let batch = input.dim(0)
-                let seqLength = input.dim(1)
-
-                let offsets: MLXArray
-                switch cache.last?.ropeOffset ?? .scalar(0) {
-                case .scalar(let offset):
-                    offsets = MLXArray(offset).asType(.int32)
-                case .batch(let batchOffsets):
-                    offsets = batchOffsets.asType(.int32).reshaped(-1)
-                }
-
-                let delta = offsets + ropeDeltas.asType(.int32).reshaped(-1)
-                let base = MLXArray(0 ..< seqLength).asType(.int32)[.newAxis, 0...]
-                let positions = base + delta[0..., .newAxis]
-
-                effectivePositionIds = broadcast(
-                    positions[.newAxis, 0..., 0...],
-                    to: [3, batch, seqLength])
+                effectivePositionIds = QwenVL.decodePositionIds(
+                    cache: cache.last, ropeDeltas: ropeDeltas, batch: input.dim(0),
+                    length: input.dim(1))
             }
 
             var out = model(
@@ -1114,6 +1099,8 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
 
         var mropePositionDeltas: [Int] = []
         let mask = attentionMask ?? ones(like: inputIds)
+        var imageIndex = 0
+        var videoIndex = 0
 
         for batchIdx in 0 ..< batchSize {
             var batchInputIds = inputIds[batchIdx, 0...]
@@ -1131,8 +1118,6 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
             var st = 0
             var remainImages = imageNums
             var remainVideos = videoNums
-            var imageIndex = 0
-            var videoIndex = 0
 
             for _ in 0 ..< (imageNums + videoNums) {
                 let edImage: Int
@@ -1148,6 +1133,8 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
                 } else {
                     edVideo = inputTokens.count + 1
                 }
+
+                guard edImage < inputTokens.count || edVideo < inputTokens.count else { break }
 
                 let (t, h, w, ed): (Int, Int, Int, Int)
                 if edImage < edVideo {

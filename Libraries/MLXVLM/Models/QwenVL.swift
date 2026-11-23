@@ -52,6 +52,23 @@ public struct QwenVL {
         return resumeState
     }
 
+    /// Decode positions `[3, batch, length]`, using each row's cache offset and rope delta.
+    static func decodePositionIds(
+        cache: KVCache?, ropeDeltas: MLXArray, batch: Int, length: Int
+    ) -> MLXArray {
+        let offsets: MLXArray
+        switch cache?.ropeOffset {
+        case .batch(let rows): offsets = rows.asType(.int32).reshaped(-1)
+        case .scalar(let offset): offsets = MLXArray(offset).asType(.int32)
+        case nil: offsets = MLXArray(Int32(0))
+        }
+        let start = (offsets + ropeDeltas.asType(.int32).reshaped(-1))[0..., .newAxis]
+        let positions = broadcast(
+            MLXArray(0 ..< length).asType(.int32)[.newAxis, 0...] + start,
+            to: [batch, length])
+        return broadcast(positions[.newAxis, 0..., 0...], to: [3, batch, length])
+    }
+
     /// Rotates half the hidden dims of the input
     static func rotateHalf(_ x: MLXArray) -> MLXArray {
         let index = x.dim(-1) / 2

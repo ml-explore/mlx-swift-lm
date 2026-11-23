@@ -511,21 +511,9 @@ enum Qwen3VLMoELanguage {
                         positionIds = broadcast(positionIds!, to: [3, batch, seqLength])
                     }
                 } else if let cache, let ropeDeltas = state[qwen3VLMoERopeDeltasKey] {
-                    let batch = inputOrEmbeddings.dim(0)
-                    let seqLength = inputOrEmbeddings.dim(1)
-                    let lastCacheOffset = cache.last?.offset ?? 0
-
-                    var delta = MLXArray(lastCacheOffset).asType(.int32) + ropeDeltas.asType(.int32)
-
-                    var base = MLXArray(0 ..< seqLength).asType(.int32)
-                    base = broadcast(base[.newAxis, 0...], to: [batch, seqLength])
-
-                    if delta.dim(0) == 1 && batch > 1 {
-                        delta = repeated(delta, count: batch, axis: 0)
-                    }
-
-                    base = base + delta
-                    positionIds = broadcast(base[.newAxis, 0..., 0...], to: [3, batch, seqLength])
+                    positionIds = QwenVL.decodePositionIds(
+                        cache: cache.last, ropeDeltas: ropeDeltas,
+                        batch: inputOrEmbeddings.dim(0), length: inputOrEmbeddings.dim(1))
                 }
             }
 

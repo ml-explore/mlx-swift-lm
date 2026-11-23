@@ -1398,25 +1398,10 @@ enum Qwen3VLLanguage {
                         positionIds = tiled(positionIds!, repetitions: [3, batch, seqLength])
                     }
                 } else if let cache, let ropeDeltas = state[ropeDeltasKey] {
-                    let batch = (inputIds ?? inputEmbeddings!).dim(0)
-                    let seqLength = (inputIds ?? inputEmbeddings!).dim(1)
-
-                    let lastCacheOffset = cache.last?.offset ?? 0
-
-                    var delta = MLXArray(lastCacheOffset).asType(.int32) + ropeDeltas.asType(.int32)
-
-                    var base = MLXArray(0 ..< seqLength).asType(.int32)
-                    base = base[.newAxis, 0...]
-                    base = broadcast(base, to: [batch, seqLength])
-
-                    if delta.dim(0) == 1 && batch > 1 {
-                        delta = repeated(delta, count: batch, axis: 0)
-                    }
-
-                    base = base + delta
-
-                    positionIds = base[.newAxis, 0..., 0...]
-                    positionIds = broadcast(positionIds!, to: [3, batch, seqLength])
+                    let input = inputIds ?? inputEmbeddings!
+                    positionIds = QwenVL.decodePositionIds(
+                        cache: cache.last, ropeDeltas: ropeDeltas, batch: input.dim(0),
+                        length: input.dim(1))
                 }
             }
 
@@ -1486,8 +1471,10 @@ extension Qwen3VLLanguage {
 
         var mropePositionDeltas: [Int] = []
         let mask = attentionMask ?? ones(like: inputIds)
+        var imageIndex = 0
+        var videoIndex = 0
 
-        // Process each batch item (assume batch=1 for now)
+        // Process each batch item.
         for batchIdx in 0 ..< batchSize {
             var batchInputIds = inputIds[batchIdx, 0...]
 
@@ -1516,8 +1503,6 @@ extension Qwen3VLLanguage {
             var st = 0
             var remainImages = imageNums
             var remainVideos = videoNums
-            var imageIndex = 0
-            var videoIndex = 0
 
             // Process each image/video in sequence
             for _ in 0 ..< (imageNums + videoNums) {
@@ -1535,6 +1520,8 @@ extension Qwen3VLLanguage {
                 } else {
                     edVideo = inputTokens.count + 1
                 }
+
+                guard edImage < inputTokens.count || edVideo < inputTokens.count else { break }
 
                 let (t, h, w, ed): (Int, Int, Int, Int)
                 if edImage < edVideo {
@@ -1631,8 +1618,7 @@ extension Qwen3VLLanguage {
                     expandedMask, expandedPositions,
                     positionIds[0..., batchIdx ..< batchIdx + 1, 0...])
 
-                // Replace this batch's position IDs (assumes batch size = 1)
-                positionIds = newPositions
+                positionIds[0..., batchIdx ..< batchIdx + 1, 0...] = newPositions
 
                 let maxPosId = llmPositions.max().item(Int.self)
                 mropePositionDeltas.append(maxPosId + 1 - inputTokens.count)
