@@ -175,6 +175,23 @@ final class Qwen35ContinuationTests: XCTestCase {
         try continuation.assertWarmImageContinuation(try makeTinyModel())
     }
 
+    /// Through the `PreparedInputSplitting` conformance: the vision tower keeps each
+    /// image to itself, so dropping the cached image leaves the new one unchanged.
+    func testAppendOnlyMediaSplitMatchesFullPrefill() throws {
+        let model = try makeTinyModel()
+        try continuation.assertAppendOnlyMediaSplit(
+            model, split: { model.splitPreparedInput($0, droppingFirst: $1) },
+            expectsIsolation: true)
+    }
+
+    func testSplitMediaSuffixContinuationMatchesFullPrefill() throws {
+        try continuation.assertSplitMediaSuffixContinuation(try makeTinyModel())
+    }
+
+    func testSplitTextSuffixContinuationMatchesFullPrefill() throws {
+        try continuation.assertSplitTextSuffixContinuation(try makeTinyModel())
+    }
+
     func testImageStateSurvivesPromptCacheRoundTrip() throws {
         try withRandomState(MLXRandom.RandomState(seed: 17)) {
             let model = try makeTinyModel()

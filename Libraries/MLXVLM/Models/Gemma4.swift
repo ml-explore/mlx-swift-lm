@@ -2159,6 +2159,7 @@ extension Gemma4Unified: ModelComponentsProviding {
 ///
 /// Each image owns one run of `imageTokenId` placeholders, in order. A cut inside a
 /// run is refused: the cached half of the image could not attend to the other half.
+/// A cut past the last run keeps no images.
 private func gemma4SplitImagePrompt(
     _ input: LMInput,
     droppingFirst prefixTokenCount: Int,
@@ -2173,12 +2174,8 @@ private func gemma4SplitImagePrompt(
     let ids = tokens.asArray(Int.self)
     guard prefixTokenCount > 0, prefixTokenCount < ids.count else { return nil }
 
-    // The processor pairs images with an all-ones mask; anything else is real padding.
-    if let mask = input.text.mask {
-        guard mask.size == ids.count,
-            mask.asType(.int32).asArray(Int32.self).allSatisfy({ $0 == 1 })
-        else { return nil }
-    }
+    // A mask that masks nothing can be sliced with the tokens; anything else is real padding.
+    guard input.text.masksNothing else { return nil }
     // Placeholders for media this input carries no payload for.
     for tokenId in otherMediaTokenIds.compactMap({ $0 }) where ids.contains(tokenId) {
         return nil
@@ -2202,8 +2199,6 @@ private func gemma4SplitImagePrompt(
     guard !cutsAnImage else { return nil }
 
     let dropped = runs.prefix { $0.upperBound <= prefixTokenCount }.count
-    guard dropped < runs.count else { return nil }
-
     let suffixIds = Array(ids[prefixTokenCount...])
     let suffixTokens = MLXArray(suffixIds).expandedDimensions(axis: 0)
     let suffixMask = input.text.mask.map { ones([1, suffixIds.count]).asType($0.dtype) }
@@ -2235,9 +2230,11 @@ extension Gemma4: PreparedInputSplitting {
         let kept = split.keptImages
         return LMInput(
             text: split.text,
-            image: LMInput.ProcessedImage(
-                pixels: image.pixels[kept.lowerBound ..< kept.upperBound],
-                frames: image.frames.map { Array($0[kept]) }))
+            image: kept.isEmpty
+                ? nil
+                : LMInput.ProcessedImage(
+                    pixels: image.pixels[kept.lowerBound ..< kept.upperBound],
+                    frames: image.frames.map { Array($0[kept]) }))
     }
 }
 
@@ -2269,10 +2266,12 @@ extension Gemma4Unified: PreparedInputSplitting {
         let kept = split.keptImages
         return LMInput(
             text: split.text,
-            image: LMInput.ProcessedImage(
-                pixels: image.pixels[kept.lowerBound ..< kept.upperBound],
-                positionIds: positionIds[kept.lowerBound ..< kept.upperBound],
-                frames: image.frames.map { Array($0[kept]) }))
+            image: kept.isEmpty
+                ? nil
+                : LMInput.ProcessedImage(
+                    pixels: image.pixels[kept.lowerBound ..< kept.upperBound],
+                    positionIds: positionIds[kept.lowerBound ..< kept.upperBound],
+                    frames: image.frames.map { Array($0[kept]) }))
     }
 }
 
@@ -2488,9 +2487,8 @@ public struct Gemma4Processor: UserInputProcessor {
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-        let mask = ones(like: promptArray).asType(.int8)
         return LMInput(
-            text: .init(tokens: promptArray, mask: mask), image: processedImage,
+            text: .init(tokens: promptArray), image: processedImage,
             video: processedVideo)
     }
 }
@@ -3020,8 +3018,7 @@ public struct Gemma4UnifiedProcessor: UserInputProcessor {
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-        let mask = ones(like: promptArray).asType(.int8)
-        return LMInput(text: .init(tokens: promptArray, mask: mask), image: processedImage)
+        return LMInput(text: .init(tokens: promptArray), image: processedImage)
     }
 }
 
