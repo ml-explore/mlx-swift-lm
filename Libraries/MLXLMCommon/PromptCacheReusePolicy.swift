@@ -85,8 +85,8 @@ struct PromptCacheTurn: Sendable {
     /// no longer a valid prefix of the model's actual input.
     var carriesNewMedia: Bool = false
 
-    /// The prepared input contains image/video/audio tensors, which the rewind
-    /// path cannot account for.
+    /// The prepared input contains image/video/audio tensors, which a rewind can
+    /// only feed through the model's own split.
     var carriesPreparedMedia: Bool = false
 
     /// The prepared input carries an explicit attention mask; a partial prefill
@@ -94,7 +94,8 @@ struct PromptCacheTurn: Sendable {
     var carriesAttentionMask: Bool = false
 
     /// Per-call model state (e.g. M-RoPE deltas) is carried across turns. Such
-    /// state is anchored to a prefill and cannot be rewound.
+    /// state describes the tokens the cache holds, so a rewind must take it back
+    /// too.
     var carriesModelState: Bool = false
 
     /// This turn appends tool results to a transcript whose last assistant
@@ -121,13 +122,21 @@ struct PromptCacheTurn: Sendable {
     var usesSpeculativeDecoding: Bool = false
 
     /// The model can split a prepared input into a media-carrying suffix, so an
-    /// append-only media turn has a way to reuse the cached prefix. The session
+    /// append-only media turn, or a rewind whose prompt carries media, has a way
+    /// to reuse the cached prefix. The session
     /// reports the capability here rather than the policy inspecting the model,
     /// which keeps the decision table free of MLX and session types.
     ///
     /// Capability is not a guarantee: the split may still be declined for a
     /// specific input, which the caller handles when applying the decision.
     var canSplitPreparedMedia: Bool = false
+
+    /// The model can rewind its carried state to a shorter prefix, so that state
+    /// does not stand in the way of rewinding the cache.
+    ///
+    /// Capability is not a guarantee: the model may still decline for a specific
+    /// prefix, which the caller handles when applying the decision.
+    var canRewindModelState: Bool = false
 }
 
 /// What speculative-cache reuse can safely accompany the authoritative main cache.
@@ -273,11 +282,11 @@ struct ExtendCachedPrefixRule: PromptCacheReuseRule {
 /// fires when the session reports the model can perform it.
 ///
 /// Unlike ``ExtendCachedPrefixRule`` this rule does **not** require the absence
-/// of an attention mask. A VL processor pairs media with an all-ones mask as a
-/// matter of course, so refusing masks here would disable the path for exactly
-/// the inputs it exists to serve. Distinguishing that benign mask from a real
-/// padding mask needs the model's own layout knowledge, so the check belongs to
-/// the splitter, which refuses anything that is not all-ones.
+/// of an attention mask. A VL processor may pair media with an all-ones mask, so
+/// refusing masks here would disable the path for exactly the inputs it exists to
+/// serve. Distinguishing that benign mask from a real padding mask needs the
+/// model's own layout knowledge, so the check belongs to the splitter, which
+/// refuses anything that is not all-ones.
 struct AppendOnlyMediaRule: PromptCacheReuseRule {
     func reuse(turn: PromptCacheTurn, cache: PromptCacheState) -> PromptCacheReuseDecision? {
         guard turn.carriesNewMedia,
@@ -320,9 +329,9 @@ struct RewindToCommonPrefixRule: PromptCacheReuseRule {
             && cache.mainCacheIsAligned
             && trimCount <= cache.maxTrimCount
             && !turn.carriesNewMedia
-            && !turn.carriesPreparedMedia
+            && (!turn.carriesPreparedMedia || turn.canSplitPreparedMedia)
             && !turn.carriesAttentionMask
-            && !turn.carriesModelState
+            && (!turn.carriesModelState || turn.canRewindModelState)
 
         // The template changed an already-cached portion of the transcript, or
         // this input carries state/media that a trim cannot rewind safely.

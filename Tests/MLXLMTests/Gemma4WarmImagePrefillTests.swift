@@ -87,6 +87,38 @@ struct Gemma4WarmImagePrefillTests {
         #expect(drift < Self.tolerance, "warm and cold logits differ by \(drift)")
     }
 
+    /// A text turn after an image turn: the suffix keeps the mask but no image, and the
+    /// warm prefill matches a cold prefill of the whole conversation.
+    @Test(arguments: [true, false])
+    func splitTextTurnMatchesColdPrefill(bidirectional: Bool) throws {
+        let model = try Self.makeGemma4(bidirectional: bidirectional)
+        let firstTurn = Self.text(4, seed: 3) + Self.imageBlock() + Self.text(9, seed: 4)
+        let tokens = firstTurn + Self.text(6, seed: 5)
+        let image = LMInput.ProcessedImage(pixels: Self.pixels(seed: 0))
+        let full = Self.input(tokens, image: image)
+
+        let cold = try Self.suffixLogits(
+            model.prepare(
+                full, cache: try model.newCache(parameters: nil), state: nil,
+                prefill: .init(stepSize: 512)), count: 1)
+
+        let warmCache = try model.newCache(parameters: nil)
+        _ = try model.prepare(
+            Self.input(firstTurn, image: image), cache: warmCache, state: nil,
+            prefill: .init(stepSize: 512))
+        let suffix = try #require(
+            model.splitPreparedInput(full, droppingFirst: firstTurn.count))
+        #expect(suffix.image == nil)
+        #expect(suffix.text.mask?.shape == [1, tokens.count - firstTurn.count])
+        // A text prefill returns only the final position's logits.
+        let warm = try Self.suffixLogits(
+            model.prepare(suffix, cache: warmCache, state: nil, prefill: .init(stepSize: 512)),
+            count: 1)
+
+        let drift = Self.maxDrift(warm, cold)
+        #expect(drift < Self.tolerance, "warm and cold logits differ by \(drift)")
+    }
+
     @Test func splitKeepsFramesOfTheSuffixImages() throws {
         let model = try Self.makeGemma4(bidirectional: true)
         let firstTurn = Self.text(2, seed: 7) + Self.imageBlock()
@@ -113,8 +145,6 @@ struct Gemma4WarmImagePrefillTests {
 
         // Inside the image.
         #expect(model.splitPreparedInput(full, droppingFirst: firstSoftToken + 2) == nil)
-        // After the only image: the suffix would carry no media.
-        #expect(model.splitPreparedInput(full, droppingFirst: tokens.count - 2) == nil)
         // Placeholder runs that do not match the payload.
         let twoImages = Self.input(
             tokens + Self.imageBlock(), image: LMInput.ProcessedImage(pixels: Self.pixels(seed: 0)))

@@ -2079,6 +2079,22 @@ extension Qwen35: SpeculativeCacheRewindModel {
     public var maximumNativeTargetCacheRewind: Int { 1 }
 }
 
+extension Qwen35: PreparedInputSplitting {
+
+    /// The vision tower is the Qwen3-VL one, which keeps each image to itself, so the
+    /// split is the Qwen VL one over the placeholders the feature merge replaces.
+    public func splitPreparedInput(_ input: LMInput, droppingFirst prefixTokenCount: Int)
+        -> LMInput?
+    {
+        QwenVL.splitPreparedInput(
+            input,
+            droppingFirst: prefixTokenCount,
+            imageTokenId: config.imageTokenIndex,
+            videoTokenId: config.videoTokenIndex,
+            mergeSize: config.visionConfiguration.spatialMergeSize)
+    }
+}
+
 extension Array where Element == THW {
     fileprivate var nilIfEmpty: [THW]? { isEmpty ? nil : self }
 }

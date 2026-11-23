@@ -1575,7 +1575,8 @@ public final class ChatSession {
                                     currentConversation.uncommittedTokens,
                                 structuredToolCallCount: structuredToolCallCount,
                                 usesSpeculativeDecoding: speculationIsEligibleForParameters,
-                                canSplitPreparedMedia: model is PreparedInputSplitting)
+                                canSplitPreparedMedia: model is PreparedInputSplitting,
+                                canRewindModelState: model is ModelStateRewinding)
                             let checkpoint = currentConversation.checkpoints.longest(
                                 prefixing: promptTokenIds)
                             let cacheState = PromptCacheState(
@@ -1597,6 +1598,39 @@ public final class ChatSession {
                                 !carriesPreparedMedia, !isToolResultContinuation
                             {
                                 decision = .rebuild
+                            }
+
+                            // Splitting a prepared input can fail before anything is
+                            // applied: only the model can carve a media-carrying suffix,
+                            // and it declines any boundary it cannot prove equivalent to
+                            // a cold prefill. An append-media turn and a rewind whose
+                            // prompt carries media both feed through it, so a cache is
+                            // only trimmed behind a boundary that held.
+                            var mediaSuffixInput: LMInput?
+                            let splitBoundary: Int? =
+                                switch decision {
+                                case .appendMediaSuffix(let suffixStart, _):
+                                    suffixStart
+                                case .trimToCommonPrefix(let commonPrefixLength, _),
+                                    .trimToCommonPrefixMainOnly(let commonPrefixLength, _):
+                                    carriesPreparedMedia ? commonPrefixLength : nil
+                                default:
+                                    nil
+                                }
+                            if let splitBoundary {
+                                let splitInput = (model as? PreparedInputSplitting)?
+                                    .splitPreparedInput(
+                                        preparedInput, droppingFirst: splitBoundary)
+                                // Only the exact tokens the boundary names may be prefilled;
+                                // the ledger below advances on the strength of that boundary.
+                                if let splitInput,
+                                    splitInput.text.tokens.asArray(Int.self)
+                                        == Array(promptTokenIds[splitBoundary...])
+                                {
+                                    mediaSuffixInput = splitInput
+                                } else {
+                                    decision = .rebuild
+                                }
                             }
 
                             // Rewinding can fail while being applied: a cache may trim
@@ -1636,33 +1670,30 @@ public final class ChatSession {
                             default:
                                 break
                             }
+                            // Carried state must follow a trimmed cache back, which the
+                            // model may decline for what is kept and dropped.
+                            switch decision {
+                            case .trimToCommonPrefix(let commonPrefixLength, _),
+                                .trimToCommonPrefixMainOnly(let commonPrefixLength, _):
+                                if let carried = lmState {
+                                    if let rewound = (model as? ModelStateRewinding)?.rewoundState(
+                                        carried,
+                                        keeping: Array(promptTokenIds[..<commonPrefixLength]),
+                                        dropping: Array(cachedTokenIds[commonPrefixLength...]))
+                                    {
+                                        lmState = rewound
+                                    } else {
+                                        decision = .rebuild
+                                    }
+                                }
+                            default:
+                                break
+                            }
                             if decision.rewinds, !currentConversation.transcriptBuiltCache {
                                 // A fork shares its source's arrays. A copy keeps only
                                 // the prefix, so the next write does not copy the rest.
                                 kvCache = kvCache.copy()
                                 draftKVCache = draftKVCache?.copy()
-                            }
-
-                            // Splitting a prepared input is the other decision that
-                            // can fail while being applied: only the model can carve
-                            // a media-carrying suffix, and it declines any boundary
-                            // it cannot prove equivalent to a cold prefill. Verify
-                            // and downgrade to a rebuild before prefilling.
-                            var mediaSuffixInput: LMInput?
-                            if case .appendMediaSuffix(let suffixStart, _) = decision {
-                                let splitInput = (model as? PreparedInputSplitting)?
-                                    .splitPreparedInput(
-                                        preparedInput, droppingFirst: suffixStart)
-                                // Only the exact tokens the boundary names may be prefilled;
-                                // the ledger below advances on the strength of that boundary.
-                                if let splitInput,
-                                    splitInput.text.tokens.asArray(Int.self)
-                                        == Array(promptTokenIds[suffixStart...])
-                                {
-                                    mediaSuffixInput = splitInput
-                                } else {
-                                    decision = .rebuild
-                                }
                             }
 
                             switch decision {
@@ -1695,14 +1726,21 @@ public final class ChatSession {
 
                             case .trimToCommonPrefix(let prefixLength, _),
                                 .restoreCheckpoint(let prefixLength):
-                                input = LMInput(
-                                    tokens: MLXArray(Array(promptTokenIds.dropFirst(prefixLength))))
+                                // A declined split was downgraded to `.rebuild` above, so a
+                                // media-carrying rewind always has its model-carved suffix.
+                                input =
+                                    mediaSuffixInput
+                                    ?? LMInput(
+                                        tokens: MLXArray(
+                                            Array(promptTokenIds.dropFirst(prefixLength))))
                                 cachedPromptTokenCount = prefixLength
 
                             case .trimToCommonPrefixMainOnly(let commonPrefixLength, _):
-                                input = LMInput(
-                                    tokens: MLXArray(
-                                        Array(promptTokenIds.dropFirst(commonPrefixLength))))
+                                input =
+                                    mediaSuffixInput
+                                    ?? LMInput(
+                                        tokens: MLXArray(
+                                            Array(promptTokenIds.dropFirst(commonPrefixLength))))
                                 cachedPromptTokenCount = commonPrefixLength
                                 draftKVCache = nil
                                 mtpDrafterContinuation = nil

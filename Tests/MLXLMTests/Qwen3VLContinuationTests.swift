@@ -257,11 +257,25 @@ final class Qwen3VLContinuationTests: XCTestCase {
         try continuation.assertSplitMediaSuffixContinuation(try makeTinyModel())
     }
 
+    func testSplitTextSuffixContinuationMatchesFullPrefill() throws {
+        try continuation.assertSplitTextSuffixContinuation(try makeTinyModel())
+    }
+
     /// An image in the middle turn: the continuation must both place the new
     /// image at the anchor and hand back a resume state that positions the
     /// following turn correctly.
     func testImageMidContinuationResumeState() throws {
         try continuation.assertImageMidContinuationResumeState(try makeTinyModel())
+    }
+
+    /// A cache trimmed back past an image must resume from the delta of the prefix it kept.
+    func testRewoundStateContinuationMatchesFullPrefill() throws {
+        try continuation.assertRewoundStateContinuation(try makeTinyModel())
+    }
+
+    /// A cache trimmed back past text, keeping its image, must keep the delta it carried.
+    func testRewoundStateKeepsThePrefixMediaDelta() throws {
+        try continuation.assertRewoundStateKeepsThePrefixMediaDelta(try makeTinyModel())
     }
 
     // MARK: - Windowed prefill

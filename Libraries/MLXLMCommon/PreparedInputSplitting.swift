@@ -11,7 +11,8 @@ import Foundation
 public protocol PreparedInputSplitting {
 
     /// Return the suffix of `input` that begins at `prefixTokenCount`, carrying only
-    /// the media whose placeholder tokens lie inside that suffix.
+    /// the media whose placeholder tokens lie inside that suffix. A suffix past the
+    /// last placeholder carries no media: a text turn after a media turn.
     ///
     /// Returning `nil` means the input cannot be split safely at this boundary and
     /// the caller must fall back to a full prefill. Implementations should return
