@@ -19,8 +19,9 @@ public protocol LogitSampler {
 /// Speculative decoding needs the distribution, not only the draw, to keep draft tokens with the
 /// probability-ratio rule and to keep the target's output distribution unchanged.
 public protocol DistributionLogitSampler: LogitSampler {
-    /// The float32 log probabilities `[..., V]` of the tokens ``sample(logits:)`` draws for
-    /// `logits`, and `-inf` for the tokens it never draws.
+    /// The float32 log probabilities `[..., V]` of the tokens
+    /// ``LogitSampler/sample(logits:)`` draws for `logits`, and `-inf` for the tokens it never
+    /// draws.
     func logProbabilities(logits: MLXArray) -> MLXArray
 }
 
