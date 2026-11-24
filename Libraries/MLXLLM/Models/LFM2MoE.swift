@@ -358,9 +358,9 @@ class Lfm2MoeSparseMoeBlock: Module, UnaryLayer {
         let indices: MLXArray
         if useExpertBias, let expertBias {
             let selection = routingWeights + expertBias.asType(.float32)
-            indices = argPartition(-selection, kth: k - 1, axis: -1)[.ellipsis, ..<k]
+            indices = argPartition(selection, kth: -k, axis: -1)[.ellipsis, (-k)...]
         } else {
-            indices = argPartition(-routingWeights, kth: k - 1, axis: -1)[.ellipsis, ..<k]
+            indices = argPartition(routingWeights, kth: -k, axis: -1)[.ellipsis, (-k)...]
         }
 
         var weights = takeAlong(routingWeights, indices, axis: -1)
