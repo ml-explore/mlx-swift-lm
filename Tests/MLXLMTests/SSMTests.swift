@@ -177,3 +177,67 @@ private func expectAllClose(
         #expect(continuedState.dtype == previousState.dtype)
     }
 }
+
+/// Compare two `segsum` results that may hold -inf at masked positions.
+private func expectSameSegsum(_ actual: MLXArray, _ expected: MLXArray, label: String) {
+    guard actual.shape == expected.shape else {
+        Issue.record("\(label) shape \(actual.shape) != \(expected.shape)")
+        return
+    }
+    #expect(
+        MLX.arrayEqual(MLX.isInf(actual), MLX.isInf(expected)).item(Bool.self),
+        "\(label) masks differ")
+    let zero = MLXArray(Float(0))
+    #expect(
+        MLX.allClose(
+            MLX.which(MLX.isInf(expected), zero, actual),
+            MLX.which(MLX.isInf(expected), zero, expected)
+        ).item(Bool.self), "\(label) values differ")
+}
+
+/// `segsum` with a (B, L) mask and a (B, H, L) input must apply row b's mask to
+/// every head of row b, as running each row on its own does. When B == H the
+/// pair mask built from the unexpanded mask still broadcasts, but against the
+/// heads, so head h of every row got row h's mask.
+@Test func testSegsumBatchMaskMatchesPerRowSegsum() {
+    withRandomState(MLXRandom.RandomState(seed: 13)) {
+        let batch = 2
+        let heads = 2
+        let length = 4
+        let x = MLXRandom.normal([batch, heads, length])
+        let mask = MLXArray([1, 1, 1, 1, 0, 0, 1, 1].map { Float($0) }, [batch, length])
+
+        let batched = segsum(x, mask: mask)
+        #expect(batched.shape == [batch, heads, length, length])
+
+        for row in 0 ..< batch {
+            let single = segsum(x[row ..< (row + 1)], mask: mask[row ..< (row + 1)])
+            expectSameSegsum(batched[row ..< (row + 1)], single, label: "row \(row)")
+        }
+    }
+}
+
+/// With B > 1, H > 1 and B != H the unexpanded pair mask, (B, L, L), does not
+/// broadcast against (B, H, L, L) at all.
+@Test func testSegsumBatchMaskBroadcastsAcrossHeads() {
+    withRandomState(MLXRandom.RandomState(seed: 14)) {
+        let batch = 2
+        let heads = 3
+        let length = 5
+        let x = MLXRandom.normal([batch, heads, length])
+        let mask = MLXArray([1, 1, 1, 1, 1, 0, 0, 1, 1, 1].map { Float($0) }, [batch, length])
+
+        let masked = segsum(x, mask: mask)
+        #expect(masked.shape == [batch, heads, length, length])
+
+        // An all-ones mask is the same as no mask.
+        expectSameSegsum(
+            segsum(x, mask: MLXArray.ones([batch, length])), segsum(x), label: "all-ones")
+
+        // Row 1 pads columns 0 and 1, so those are -inf in every head.
+        for head in 0 ..< heads {
+            let padded = masked[1, head, 2, ..<2].asArray(Float.self)
+            #expect(padded.allSatisfy { $0 == -Float.infinity }, "head \(head)")
+        }
+    }
+}
