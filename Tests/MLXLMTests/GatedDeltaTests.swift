@@ -137,6 +137,30 @@ public class GatedDeltaTests: XCTestCase {
         )
     }
 
+    /// A decay per key dimension must reach every state column: the kernel and the ops path agree.
+    ///
+    /// The kernel indexes a vector gate `[B, T, Hv, Dk]` by key dimension. Read as a per-head gate,
+    /// it would decay every column of a row with the first column's value.
+    func testGatedDeltaVectorGateKernelMatchesOps() throws {
+        let inputs = makeInputs(T: 12, Dk: 64)
+        let (g, beta) = withRandomState(MLXRandom.RandomState(seed: 7)) {
+            (
+                MLXRandom.uniform(low: 0.5, high: 1.0, [1, 12, 4, 64]),
+                MLXRandom.uniform(low: 0.0, high: 1.0, [1, 12, 4])
+            )
+        }
+        let (yKernel, stateKernel) = gatedDeltaRecurrence(
+            q: inputs.q, k: inputs.k, v: inputs.v, g: g, beta: beta)
+        let (yOps, stateOps) = gatedDeltaRecurrence(
+            q: inputs.q, k: inputs.k, v: inputs.v, g: g, beta: beta, useKernel: false)
+        let (yScalar, _) = gatedDeltaRecurrence(
+            q: inputs.q, k: inputs.k, v: inputs.v, g: g[.ellipsis, 0], beta: beta)
+
+        XCTAssertLessThan(relativeDrift(yKernel, yOps), 1e-2)
+        XCTAssertLessThan(relativeDrift(stateKernel, stateOps), 1e-4)
+        XCTAssertGreaterThan(relativeDrift(yKernel, yScalar), 1e-2)
+    }
+
     /// The recurrent state update must retain low-order terms in its k-state dot product.
     ///
     /// Each SIMD lane accumulates one large value followed by five unit values. A naive

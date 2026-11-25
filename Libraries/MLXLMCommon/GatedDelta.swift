@@ -23,8 +23,16 @@ private let computeGatedDeltaG: @Sendable (MLXArray, MLXArray, MLXArray) -> MLXA
 
 // MARK: - Metal Kernel
 
-private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
+/// With `vectorized`, `g` holds one decay per key dimension, `[B, T, Hv, Dk]`.
+private func makeGatedDeltaKernel(hasMask: Bool, vectorized: Bool = false)
+    -> MLXFast.MLXFastKernel?
+{
     let maskSource = hasMask ? "mask[b_idx * T + t]" : "true"
+    let gSetup =
+        vectorized
+        ? "auto g_ = g + (b_idx * T * Hv + hv_idx) * Dk;" : "auto g_ = g + b_idx * T * Hv;"
+    let gAccess = vectorized ? "g_[s_idx]" : "g_[hv_idx]"
+    let gAdvance = vectorized ? "g_ += Hv * Dk;" : "g_ += Hv;"
 
     let source = """
             auto n = thread_position_in_grid.z;
@@ -44,8 +52,8 @@ private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
             auto dk_idx = thread_position_in_threadgroup.x;
             auto dv_idx = thread_position_in_grid.y;
 
-            // g: [B, T, Hv]
-            auto g_ = g + b_idx * T * Hv;
+            // g: [B, T, Hv] or [B, T, Hv, Dk]
+            \(gSetup)
             auto beta_ = beta + b_idx * T * Hv;
 
             // state_in, state_out: [B, Hv, Dv, Dk]
@@ -68,7 +76,7 @@ private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
                   float kv_compensation = 0.0f;
                   for (int i = 0; i < n_per_t; ++i) {
                     auto s_idx = n_per_t * dk_idx + i;
-                    state[i] = state[i] * g_[hv_idx];
+                    state[i] = state[i] * \(gAccess);
                     auto product = state[i] * k_[s_idx];
                     auto corrected = product - kv_compensation;
                     auto next_sum = kv_mem + corrected;
@@ -98,7 +106,7 @@ private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
               k_ += Hk * Dk;
               v_ += Hv * Dv;
               y += Hv * Dv;
-              g_ += Hv;
+              \(gAdvance)
               beta_ += Hv;
             }
             for (int i = 0; i < n_per_t; ++i) {
@@ -112,7 +120,7 @@ private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
         inputNames.append("mask")
     }
 
-    let suffix = hasMask ? "_mask" : ""
+    let suffix = (vectorized ? "_vec" : "") + (hasMask ? "_mask" : "")
 
     return MLXFast.metalKernel(
         name: "gated_delta_step\(suffix)",
@@ -127,10 +135,14 @@ private final class GatedDeltaKernelManager: Sendable {
 
     let kernel: MLXFast.MLXFastKernel?
     let kernelMasked: MLXFast.MLXFastKernel?
+    let kernelVectorized: MLXFast.MLXFastKernel?
+    let kernelVectorizedMasked: MLXFast.MLXFastKernel?
 
     private init() {
         kernel = makeGatedDeltaKernel(hasMask: false)
         kernelMasked = makeGatedDeltaKernel(hasMask: true)
+        kernelVectorized = makeGatedDeltaKernel(hasMask: false, vectorized: true)
+        kernelVectorizedMasked = makeGatedDeltaKernel(hasMask: true, vectorized: true)
     }
 }
 
@@ -154,13 +166,15 @@ func gatedDeltaKernel(
     let inputType = q.dtype
     let stateType = state.dtype
 
+    let kernels = GatedDeltaKernelManager.shared
+    let vectorized = g.ndim == 4
     let selectedKernel: MLXFast.MLXFastKernel?
     var inputs: [MLXArray] = [q, k, v, g, beta, state, MLXArray(T)]
     if let mask {
-        selectedKernel = GatedDeltaKernelManager.shared.kernelMasked
+        selectedKernel = vectorized ? kernels.kernelVectorizedMasked : kernels.kernelMasked
         inputs.append(mask)
     } else {
-        selectedKernel = GatedDeltaKernelManager.shared.kernel
+        selectedKernel = vectorized ? kernels.kernelVectorized : kernels.kernel
     }
 
     guard let kernel = selectedKernel else {
@@ -340,8 +354,8 @@ func gatedDeltaOps(
 /// Whether mlx core runs a fused kernel for these inputs, as `use_fallback`
 /// in mlx core. Otherwise it runs a per-step fallback, which is slower than
 /// `gatedDeltaKernel`.
-private func hasFastGatedDelta(q: MLXArray, v: MLXArray, mask: MLXArray?) -> Bool {
-    guard mask == nil, q.dim(3) == 128, v.dim(3) == 128 else { return false }
+private func hasFastGatedDelta(q: MLXArray, v: MLXArray, g: MLXArray, mask: MLXArray?) -> Bool {
+    guard mask == nil, g.ndim == 3, q.dim(3) == 128, v.dim(3) == 128 else { return false }
     switch (q.dim(2), v.dim(2)) {
     case (16, 16), (16, 32), (16, 48), (16, 64), (24, 24), (32, 32): return true
     default: return false
@@ -377,9 +391,33 @@ public func gatedDeltaUpdate(
     mask: MLXArray? = nil,
     useKernel: Bool = true
 ) -> (MLXArray, MLXArray) {
-    let beta = sigmoid(b).asType(.float32)
-    let g = computeGatedDeltaG(aLog, a, dtBias)
+    gatedDeltaRecurrence(
+        q: q, k: k, v: v, g: computeGatedDeltaG(aLog, a, dtBias),
+        beta: sigmoid(b).asType(.float32), state: state, mask: mask, useKernel: useKernel)
+}
 
+/// The gated delta rule with precomputed gates.
+///
+/// - Parameters:
+///   - q: queries, `[B, T, Hk, Dk]`.
+///   - k: keys, `[B, T, Hk, Dk]`.
+///   - v: values, `[B, T, Hv, Dv]`.
+///   - g: decay per head, `[B, T, Hv]`, or per key dimension, `[B, T, Hv, Dk]`.
+///   - beta: write strength, `[B, T, Hv]`.
+///   - state: recurrent state, `[B, Hv, Dv, Dk]`, kept in float32.
+///   - mask: the steps that update the state, `[B, T]`.
+///   - useKernel: `false` in training, where the custom kernel has no gradient.
+/// - Returns: the outputs `[B, T, Hv, Dv]` and the next state.
+public func gatedDeltaRecurrence(
+    q: MLXArray,
+    k: MLXArray,
+    v: MLXArray,
+    g: MLXArray,
+    beta: MLXArray,
+    state: MLXArray? = nil,
+    mask: MLXArray? = nil,
+    useKernel: Bool = true
+) -> (MLXArray, MLXArray) {
     let B = q.dim(0)
     let Dk = q.dim(3)
     let Hv = v.dim(2)
@@ -406,7 +444,7 @@ public func gatedDeltaUpdate(
     //
     // The MLXFast kernel has a gradient and is faster than both, so the
     // layouts it supports take it in training and in inference.
-    if hasFastGatedDelta(q: q, v: v, mask: mask) {
+    if hasFastGatedDelta(q: q, v: v, g: g, mask: mask) {
         return fastGatedDelta(q: q, k: k, v: v, g: g, beta: beta, state: state)
     }
     if useKernel, GatedDeltaKernelManager.shared.kernel != nil, Dk % 32 == 0 {
