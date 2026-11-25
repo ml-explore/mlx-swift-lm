@@ -76,6 +76,16 @@ LLMRegistry.glm4_9b_4bit          // mlx-community/GLM-4-9B-0414-4bit
 // Note: GLM4 uses special tool call format
 ```
 
+### Raon
+
+```swift
+// model_type: "raon1_mini"
+// KRAFTON/Raon-1-mini-mlx: 28.8B MoE, 4.3B active, NVFP4 experts
+// Note: Raon uses Qwen-style <think> reasoning and .xmlFunction tool calls
+```
+
+Each request uses the steering alpha of the config's default reasoning effort.
+
 ### Mellum
 
 ```swift
