@@ -97,3 +97,55 @@ package final class CompiledDecodeSegmentCache<Owner: Module>: CompiledTraceInva
         traces.forEach { $0.invalidate() }
     }
 }
+
+/// Compiled segments for a short multi-token step that also returns a
+/// recurrent checkpoint (MTP verification): one `CompiledDecodeSegmentCache`
+/// per checkpoint column, because the column is a constant of the traced
+/// body. MLX retraces each one per input shape.
+package final class CompiledVerifySegmentCaches<Owner: Module>: CompiledTraceInvalidating {
+
+    /// Runs segment `index` with the checkpoint after `checkpointAfter`
+    /// columns over the flat argument list.
+    package typealias Body = @Sendable (Owner, Int, Int, [MLXArray]) -> [MLXArray]
+
+    private let count: Int
+    private let state: CompiledDecodeSegmentCache<Owner>.StateProvider
+    private let body: Body
+    private let lock = NSLock()
+    private var caches: [Int: CompiledDecodeSegmentCache<Owner>] = [:]
+
+    package init(
+        count: Int, state: @escaping CompiledDecodeSegmentCache<Owner>.StateProvider,
+        body: @escaping Body
+    ) {
+        self.count = count
+        self.state = state
+        self.body = body
+    }
+
+    package var compiledCount: Int {
+        lock.withLock { caches.values.reduce(0) { $0 + $1.compiledCount } }
+    }
+
+    package func callAsFunction(
+        _ owner: Owner, at index: Int, checkpointAfter: Int, _ arguments: [MLXArray]
+    ) -> [MLXArray] {
+        let cache = lock.withLock {
+            if let existing = caches[checkpointAfter] { return existing }
+            let body = self.body
+            let created = CompiledDecodeSegmentCache<Owner>(
+                count: count, state: state,
+                body: { owner, index, arguments in
+                    body(owner, index, checkpointAfter, arguments)
+                })
+            caches[checkpointAfter] = created
+            return created
+        }
+        return cache(owner, at: index, arguments)
+    }
+
+    /// Drops every segment trace. See `CompiledTrace.invalidate()`.
+    package func invalidate() {
+        lock.withLock { caches.values.forEach { $0.invalidate() } }
+    }
+}
