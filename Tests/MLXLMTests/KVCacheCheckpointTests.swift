@@ -183,6 +183,69 @@ final class KVCacheCheckpointTests: XCTestCase {
         }
     }
 
+    private func requested(maxSize: Int) throws -> RotatingKVCache {
+        try KVCacheConfiguration.Capacity(maxTokens: maxSize).makeRotatingCache()
+    }
+
+    /// Asserts both storages present the same attention history to their next token.
+    private func assertSameNextAttention(
+        _ actual: KVCacheStorage, _ expected: KVCacheStorage, line: UInt = #line
+    ) {
+        XCTAssertEqual(actual.processedTokenCount, expected.processedTokenCount, line: line)
+        let row = rows(actual.processedTokenCount ..< actual.processedTokenCount + 1)
+        for (actual, expected) in zip(actual.cache, expected.cache) {
+            let (actualKeys, actualValues) = actual.update(keys: row, values: row)
+            let (expectedKeys, expectedValues) = expected.update(keys: row, values: row)
+            XCTAssertEqual(
+                actualKeys.asArray(Float.self), expectedKeys.asArray(Float.self), line: line)
+            XCTAssertEqual(
+                actualValues.asArray(Float.self), expectedValues.asArray(Float.self), line: line)
+        }
+    }
+
+    func testRequestedCapacityTrimsBackToACheckpointWithoutACopy() throws {
+        let live = KVCacheStorage([try requested(maxSize: 16), KVCacheSimple()], plan: .disabled)
+        write(0 ..< 6, into: live)
+        XCTAssertFalse(live.needsCheckpoint)
+        let checkpoint = try XCTUnwrap(live.checkpoint())
+        XCTAssertEqual(checkpoint.retainedBytes, 0)
+
+        write(6 ..< 14, into: live)
+        XCTAssertTrue(live.restore(checkpoint))
+
+        let reference = KVCacheStorage(
+            [try requested(maxSize: 16), KVCacheSimple()], plan: .disabled)
+        write(0 ..< 6, into: reference)
+        assertSameNextAttention(live, reference)
+    }
+
+    func testRequestedCapacityIsCopiedOnceItEvicts() throws {
+        let entry = try requested(maxSize: 8)
+        let live = KVCacheStorage([entry], plan: .disabled)
+        write(0 ..< 12, into: live)
+        XCTAssertTrue(live.needsCheckpoint)
+        let checkpoint = try XCTUnwrap(live.checkpoint())
+        XCTAssertEqual(checkpoint.retainedBytes, 2 * 8 * MemoryLayout<Float>.size)
+        let reference = KVCacheStorage([entry.copy()], plan: .disabled, processedTokenCount: 12)
+
+        write(12 ..< 20, into: live)
+        XCTAssertTrue(live.restore(checkpoint))
+        assertSameNextAttention(live, reference)
+    }
+
+    func testRequestedCapacityThatEvictsAfterItsCheckpointRefusesIt() throws {
+        let live = KVCacheStorage([try requested(maxSize: 8)], plan: .disabled)
+        write(0 ..< 4, into: live)
+        let checkpoint = try XCTUnwrap(live.checkpoint())
+        write(4 ..< 12, into: live)
+        let before = contents(live)
+
+        XCTAssertFalse(live.canRestore(checkpoint))
+        XCTAssertFalse(live.restore(checkpoint))
+        XCTAssertEqual(live.processedTokenCount, 12)
+        XCTAssertEqual(contents(live), before)
+    }
+
     func testEqualLeafCountsWithDifferentPathsCannotRestore() throws {
         let live = storage(0 ..< 4)
         let checkpoint = try XCTUnwrap(live.checkpoint())

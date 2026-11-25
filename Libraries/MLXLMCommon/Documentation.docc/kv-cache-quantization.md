@@ -129,7 +129,11 @@ the latest reply instead of before the first one. The session restores the longe
 checkpoint the new prompt starts with.
 
 The checkpoint copies only rotating and recurrent leaves, including inside composite
-caches. Global attention history is trimmed in place. Variance-normalized caches save
+caches. Global attention history is trimmed in place. A requested capacity
+(``KVCacheConfiguration/capacity``) is also trimmed in place until it evicts its
+first position, because it can span the whole context; from then on it is copied like
+a sliding window. A checkpoint taken before that eviction cannot be restored after it,
+so that one turn rebuilds the cache. Variance-normalized caches save
 only the incomplete raw tile and reuse the immutable compressed prefix. Crossing a
 tile boundary without that saved tail cannot be rewound exactly. Checkpoint storage
 is therefore bounded by window, recurrent-state, and raw-tile sizes, plus token-prefix

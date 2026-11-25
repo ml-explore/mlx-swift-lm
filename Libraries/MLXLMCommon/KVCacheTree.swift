@@ -38,7 +38,10 @@ struct KVCacheLeaf {
 
     var checkpointStrategy: CheckpointStrategy {
         switch kind {
-        case .recurrent, .rotating: .copy
+        case .recurrent: .copy
+        // A requested capacity can hold the whole context. Until it evicts, a trim restores it.
+        case .rotating(let cache):
+            cache.capacityOrigin == .requested && cache.isTrimmable ? .trim : .copy
         case .varianceNormalized: .varianceNormalized
         case .simple where cache is ChunkedKVCache: .unsupported
         case .simple, .affine, .turboQuant: .trim

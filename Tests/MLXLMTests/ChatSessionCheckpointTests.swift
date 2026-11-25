@@ -434,4 +434,24 @@ final class ChatSessionCheckpointTests: XCTestCase {
         XCTAssertEqual(second.info.cachedPromptTokenCount, prefix)
         assertResumes(model, from: prefix, of: prompt)
     }
+
+    func testRequestedCapacityAddsNoCheckpointStorageWhileItEvictsNothing() async throws {
+        let (session, model) = try makeSession(
+            reply: "<think>\nreason\n</think>\n\nanswer",
+            kvCache: KVCacheConfiguration(capacity: try .init(maxTokens: 256)))
+        let first = try await respond(session, to: firstQuestion)
+        let prefix = try render([("user", firstQuestion)]).count - 1
+        let status = try await session.cacheStatus()
+        let checkpointBytes = 2 * 16 * 16 * MemoryLayout<Float>.size + MemoryLayout<Int32>.size
+        XCTAssertEqual(status.checkpoint?.tokens, prefix)
+        XCTAssertEqual(status.checkpoint?.memory, checkpointBytes)
+
+        model.clearForwards()
+        let second = try await respond(session, to: "word")
+        let prompt = try render([
+            ("user", firstQuestion), ("assistant", first.text), ("user", "word"),
+        ])
+        XCTAssertEqual(second.info.cachedPromptTokenCount, prefix)
+        assertResumes(model, from: prefix, of: prompt)
+    }
 }
