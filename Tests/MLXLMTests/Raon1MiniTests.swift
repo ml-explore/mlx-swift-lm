@@ -238,6 +238,60 @@ struct Raon1MiniTests {
         #expect(Self.relativeDrift(actual, expected) < 1e-2)
     }
 
+    @Test("DFlash2 rejects a suffix and drops undelivered tokens before the next turn")
+    func dflashRewindsAfterEarlyStop() throws {
+        let model = try Self.preparedModel()
+        let draftConfiguration = Raon1DFlash2Configuration(
+            architectures: ["DFlash2DraftModel"], hiddenSize: 256, hiddenLayers: 1,
+            attentionHeads: 2, kvHeads: 1, headDimension: 128, intermediateSize: 128,
+            rmsNormEps: 1e-5, vocabularySize: 64, targetLayerCount: 4,
+            rope: .init(theta: 10_000),
+            dflash: .init(
+                blockSize: 8, maskTokenID: 0, convolutionTaps: 2, convolutionGroupSize: 64,
+                selectorRank: 8, selectorTopK: 1, window: 32,
+                targetLayerIDs: [3], targetStreamsPerLayer: model.configuration.mhcStreams))
+        let drafter = Raon1DFlash2DraftModel(draftConfiguration)
+        let proposal = Linear(
+            weight: MLXArray.zeros([64, 256]),
+            bias: (MLXArray(0 ..< 64) .== 7).asType(.float32))
+        try drafter.update(
+            modules: ModuleChildren.unflattened(["head": proposal]), verify: .none)
+
+        let prompt: [Int32] = [1, 2, 3, 4]
+        let cache = try model.newCache(parameters: nil)
+        var iterator = try MTPSpeculativeTokenIterator(
+            input: LMInput(tokens: MLXArray(prompt)), mainModel: model, drafter: drafter,
+            mainCache: cache, parameters: GenerateParameters(maxTokens: 32, temperature: 0),
+            blockSize: 8,
+            components: GenerationComponents().appendingLogitProcessor { DraftAcceptance() })
+        #expect(iterator.next() == 7)
+        #expect(iterator.next() == 7)
+        #expect(iterator.proposedCount == 7)
+        #expect(iterator.acceptedCount == 2)
+        iterator.finalizeGeneration()
+        #expect(cache.allSatisfy { $0.offset == prompt.count + 2 })
+
+        let suffix: [Int32] = [10, 11]
+        let actual = model(MLXArray(suffix)[.newAxis], cache: cache)
+        let expected = model(
+            MLXArray(prompt + [7, 7] + suffix)[.newAxis], cache: try model.newCache(parameters: nil)
+        )
+        #expect(Self.relativeDrift(actual, expected[0..., (-2)...]) < 1e-2)
+    }
+
+    private struct DraftAcceptance: LogitProcessor {
+        private var sampled = 0
+
+        mutating func prompt(_ prompt: MLXArray) {}
+
+        func process(logits: MLXArray) -> MLXArray {
+            let forced = (MLXArray(0 ..< logits.dim(-1)) .== (sampled < 3 ? 7 : 9))
+            return broadcast(forced.asType(logits.dtype), to: logits.shape)
+        }
+
+        mutating func didSample(token: MLXArray) { sampled += 1 }
+    }
+
     @Test("Token-by-token decode reproduces the logits of one prompt pass")
     func decodeMatchesPrompt() throws {
         let model = try Self.preparedModel()
