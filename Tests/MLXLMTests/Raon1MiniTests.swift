@@ -193,6 +193,26 @@ struct Raon1MiniTests {
         #expect(Self.relativeDrift(actual, expected) < 1e-5)
     }
 
+    @Test("Packed experts and the optional shortlist preserve the model's parameter count")
+    func parameterCount() throws {
+        let dense: Module = Raon1MiniModel(try Self.configuration())
+        let packed = Raon1MiniModel(try Self.configuration(quantized: true))
+        let denseExpertWeights = 8 * 256 * 64
+        #expect(
+            Raon1ExpertProjection(
+                experts: 8, inputDims: 256, outputDims: 64,
+                quantization: packed.configuration.quantization
+            ).numParameters() == denseExpertWeights)
+        #expect(packed.numParameters() == dense.numParameters())
+
+        try packed.update(
+            modules: ModuleChildren.unflattened([
+                "lm_head_stage1": QuantizedLinear(
+                    256, 64, bias: false, groupSize: 64, bits: 2)
+            ]), verify: .none)
+        #expect(packed.numParameters() == dense.numParameters())
+    }
+
     // MARK: - Decode paths
 
     @Test(

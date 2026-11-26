@@ -392,7 +392,7 @@ final class Raon1FusedSlot: @unchecked Sendable {
 }
 
 /// The experts of one projection, `[experts, out, in]`, applied to the routed rows.
-final class Raon1ExpertProjection: Module {
+final class Raon1ExpertProjection: Module, ParameterCountProviding {
     @ParameterInfo var weight: MLXArray
     @ParameterInfo var scales: MLXArray?
     @ParameterInfo(key: "global_scale") var globalScale: MLXArray?
@@ -418,6 +418,11 @@ final class Raon1ExpertProjection: Module {
         }
         super.init()
         freeze()
+    }
+
+    var parameterCount: Int {
+        guard let quantization else { return weight.size }
+        return weight.size * 32 / quantization.bits
     }
 
     func callAsFunction(_ x: MLXArray, _ indices: MLXArray, sorted: Bool) -> MLXArray {
@@ -1519,7 +1524,7 @@ public class Raon1MiniModelInner: Module {
 }
 
 public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding,
-    SpeculativeCacheRewindModel
+    SpeculativeCacheRewindModel, ParameterCountProviding
 {
     public let vocabularySize: Int
 
@@ -1542,6 +1547,11 @@ public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding,
     static let shortlistTailRank = 64
 
     public var additionalWeightFiles: [String] { [Self.shortlistFile] }
+
+    package var parameterCount: Int {
+        // The shortlist is a second representation of lm_head.
+        model.numParameters() + (lmHead?.numParameters() ?? 0)
+    }
 
     public var supportedReasoningEfforts: Set<ReasoningEffort> {
         guard let steering = configuration.effortSteering, !steering.layers.isEmpty else {
