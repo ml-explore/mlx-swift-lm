@@ -2107,10 +2107,19 @@ public final class RewindableGatedDeltaCache: MambaCache {
     /// Stores the states after a call and, for a call of at most ``rollbackCapacity`` positions,
     /// what `trim(_:)` needs to take it back.
     ///
+    /// `q`, `k`, `v`, `g`, and `beta` are inputs to
+    /// ``gatedDeltaRecurrence(q:k:v:g:beta:state:mask:useKernel:)``.
+    ///
     /// - Parameters:
+    ///   - convolutionState: the convolution state after the call.
+    ///   - recurrentState: the recurrent state after the call.
     ///   - convolutionInputs: the call's convolution inputs, channel parts in the order of the
     ///     convolution state.
-    ///   - q, k, v, g, beta: the recurrence inputs of ``gatedDeltaRecurrence(q:k:v:g:beta:state:mask:useKernel:)``.
+    ///   - q: the query tensor.
+    ///   - k: the key tensor.
+    ///   - v: the value tensor.
+    ///   - g: the decay gate.
+    ///   - beta: the update gate.
     public func update(
         convolutionState: MLXArray, recurrentState: MLXArray, convolutionInputs: [MLXArray],
         q: MLXArray, k: MLXArray, v: MLXArray, g: MLXArray, beta: MLXArray

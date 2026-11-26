@@ -1593,7 +1593,7 @@ public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding,
         projectLogits(hiddenStates(inputs, cache: cache))
     }
 
-    /// Steers with the request's ``reasoningEffortKey`` and returns `state` unchanged.
+    /// Steers with the request's `reasoningEffortKey` and returns `state` unchanged.
     ///
     /// When a drafter asks, it also emits the drafter's target features, and the logits of
     /// every position follow the same accuracy policy as plain decoding.
