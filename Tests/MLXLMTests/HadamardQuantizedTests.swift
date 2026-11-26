@@ -81,6 +81,46 @@ final class HadamardQuantizedTests: XCTestCase {
         assertClose(rotation.inverse(rotated, signs: signs), x, rtol: 1e-2, atol: 1e-2)
     }
 
+    /// Blocks of 8 share a simdgroup, 32 and 256 fill one, 1024 and 4096 exchange slices.
+    /// Larger blocks are valid and use ops.
+    func testKernelMatchesTheOpsTransformForEveryBlockLayout() {
+        let largest = SignedBlockHadamard.maximumKernelBlockSize
+        XCTAssertTrue(SignedBlockHadamard.isValidBlockSize(2 * largest))
+        for block in [8, 32, 256, 1024, largest, 2 * largest] {
+            let rotation = SignedBlockHadamard(blockSize: block)
+            let signs = Self.signs(3 * block)
+            for dtype in [DType.float32, .float16, .bfloat16] {
+                let x = Self.values([5, 3 * block]).asType(dtype)
+                let tolerance = dtype == .float32 ? 1e-5 : dtype == .float16 ? 2e-3 : 1e-2
+                let message = "block \(block) \(dtype)"
+
+                let forward = rotation.forward(x, signs: signs, useKernel: true)
+                XCTAssertEqual(forward.dtype, dtype, message)
+                assertClose(
+                    forward.asType(.float32),
+                    rotation.forward(x, signs: signs).asType(.float32),
+                    rtol: tolerance, atol: tolerance, message)
+                assertClose(
+                    rotation.inverse(x, signs: signs, useKernel: true).asType(.float32),
+                    rotation.inverse(x, signs: signs).asType(.float32),
+                    rtol: tolerance, atol: tolerance, message)
+            }
+        }
+    }
+
+    /// The kernel has no gradient, so the rotation uses differentiable ops unless asked.
+    func testRotationIsDifferentiableByDefault() {
+        let rotation = SignedBlockHadamard(blockSize: 64)
+        let signs = Self.signs(128)
+        let x = Self.values([2, 128])
+        let cotangent = Self.values([2, 128], phase: 1)
+        let forward = grad { (rotation.forward($0, signs: signs) * cotangent).sum() }(x)
+        let inverse = grad { (rotation.inverse($0, signs: signs) * cotangent).sum() }(x)
+        // R is orthogonal, so each direction's gradient is the other direction.
+        assertClose(forward, rotation.inverse(cotangent, signs: signs), rtol: 1e-5, atol: 1e-5)
+        assertClose(inverse, rotation.forward(cotangent, signs: signs), rtol: 1e-5, atol: 1e-5)
+    }
+
     // MARK: - Layers
 
     func testLinearRotatesTheInputBeforeThePackedMatmul() {
@@ -112,6 +152,32 @@ final class HadamardQuantizedTests: XCTestCase {
             x, weight, scales: scales, biases: biases, transpose: true,
             groupSize: groupSize, bits: bits)
         XCTAssertFalse(layer(x).allClose(unrotated, rtol: 1e-2, atol: 1e-2).item(Bool.self))
+    }
+
+    /// The kernel has no gradient, so a layer in training rotates with differentiable ops.
+    func testLinearInTrainingDifferentiatesThroughTheRotation() {
+        let (inputs, outputs, groupSize, bits) = (512, 8, 32, 2)
+        let rotation = SignedBlockHadamard(blockSize: 256)
+        let (weight, scales, biases) = quantized(
+            Self.values([outputs, inputs]), groupSize: groupSize, bits: bits)
+        let signs = Self.signs(inputs)
+        let layer = HadamardQuantizedLinear(
+            weight: weight, scales: scales, biases: biases, signs: signs,
+            groupSize: groupSize, bits: bits, rotation: rotation)
+        let x = Self.values([2, inputs], phase: 1)
+
+        layer.train(true)
+        let training = layer(x)
+        let gradient = grad { layer($0).sum() }(x)
+        let dequantizedWeight = dequantized(
+            weight, scales: scales, biases: biases, groupSize: groupSize, bits: bits)
+        let expected = rotation.inverse(
+            broadcast(dequantizedWeight.sum(axis: 0), to: x.shape), signs: signs,
+            useKernel: false)
+        assertClose(gradient, expected, rtol: 1e-3, atol: 1e-3)
+
+        layer.train(false)
+        assertClose(layer(x), training)
     }
 
     func testEmbeddingUnrotatesRowsAndRotatesForTheHead() {

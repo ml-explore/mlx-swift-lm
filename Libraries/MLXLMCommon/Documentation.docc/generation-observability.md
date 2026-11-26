@@ -113,8 +113,12 @@ sampling filters, matching Python MLX-LM. They describe the processed token
 distribution, rather than confidence that an answer is correct. Top candidates
 can include the selected token.
 
-Reporting adds normalization where the sampler does not already need it and
-candidate extraction to each decode step. Keep it disabled when unused.
+``GenerateTokenLogProbabilities/entropy`` reports the entropy of that distribution
+over the whole vocabulary, in nats. The top candidates alone cannot give it: the
+probability outside them can spread over many tokens. Masked tokens add nothing.
+
+Reporting adds normalization where the sampler does not already need it, an entropy
+reduction, and candidate extraction to each decode step. Keep it disabled when unused.
 Speculative iterators normalize the rows a round emits in one batch, after
 acceptance, and skip rejected proposals.
 
