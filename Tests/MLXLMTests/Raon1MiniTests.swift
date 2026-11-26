@@ -154,8 +154,10 @@ struct Raon1MiniTests {
     /// The cache keeps only the latent and the shared key channels. Expanding per-head keys for a
     /// prompt and attending in the latent space for decode must both equal attention over the
     /// full 192-wide keys built from `kv_b_proj`, as the Transformers reference computes it.
-    @Test("MLA prompt and decode attention equal attention over the uncompressed keys")
-    func mlaMatchesUncompressedAttention() throws {
+    @Test(
+        "MLA prompt and decode attention equal attention over the uncompressed keys",
+        arguments: [false, true])
+    func mlaMatchesUncompressedAttention(quantizedCache: Bool) throws {
         let config = try Self.configuration()
         let model = Raon1MiniModel(config)
         Self.randomize(model, dtype: .float32)
@@ -173,15 +175,19 @@ struct Raon1MiniTests {
                     split["model.layers.3.self_attn.unembed_out.weight"]),
             ]))
 
-        let x = withRandomState(MLXRandom.RandomState(seed: 4)) { MLXRandom.normal([1, 8, 256]) }
+        let expanded = Raon1MLA.minimumBlockRows + 8
+        let length = expanded + 5
+        let x = withRandomState(MLXRandom.RandomState(seed: 4)) {
+            MLXRandom.normal([1, length, 256])
+        }
         // The CPU computes float32 products exactly enough to compare the two forms.
         let (expected, actual) = Device.withDefaultDevice(.cpu) {
-            // Two prompt chunks, so the second attends to cached keys, then two decode steps.
-            let cache = KVCacheSimple()
-            let chunks = [0 ..< 4, 4 ..< 6].map {
+            // An expanded prompt chunk, a latent chunk over cached keys, then two decode steps.
+            let cache: KVCache = quantizedCache ? QuantizedKVCache(groupSize: 32) : KVCacheSimple()
+            let chunks = [0 ..< expanded, expanded ..< (length - 2)].map {
                 attention(x[0..., $0], mask: .causal, cache: cache)
             }
-            let steps = (6 ..< 8).map {
+            let steps = ((length - 2) ..< length).map {
                 attention(x[0..., $0 ..< ($0 + 1)], mask: .none, cache: cache)
             }
             return (
@@ -190,7 +196,7 @@ struct Raon1MiniTests {
             )
         }
 
-        #expect(Self.relativeDrift(actual, expected) < 1e-5)
+        #expect(Self.relativeDrift(actual, expected) < (quantizedCache ? 1e-2 : 1e-5))
     }
 
     @Test("Packed experts and the optional shortlist preserve the model's parameter count")

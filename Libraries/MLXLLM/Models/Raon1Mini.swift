@@ -993,14 +993,28 @@ enum Raon1PromptMask {
             self = .causal
         }
     }
+
+    /// `scores` `[B, heads, L, T]` with the masked keys set to the fill value.
+    func applied(to scores: MLXArray) -> MLXArray {
+        let fill = MLXArray.maskFill(for: scores.dtype)
+        switch self {
+        case .none:
+            return scores
+        case .causal:
+            let (rows, keys) = (scores.dim(-2), scores.dim(-1))
+            return MLX.where(createCausalMask(n: rows, offset: keys - rows), scores, fill)
+        case .array(let mask):
+            return MLX.where(mask, scores, fill)
+        }
+    }
 }
 
 /// NoPE MLA with a sigmoid output gate.
 ///
 /// The cache holds the normalized latent `[B, 1, T, kv_lora_rank]` as keys and the shared
 /// key channels `[B, 1, T, qk_rope_head_dim]` as values. The shared channels are never rotated.
-/// Decode attends in the latent space; a prompt expands per-head keys and values and adds the
-/// shared-channel scores as an additive mask.
+/// Decode and speculative verification attend in the latent space and read the cache once; a
+/// prompt expands per-head keys and values and adds the shared-channel scores as an additive mask.
 final class Raon1MLA: Raon1PreparedModule {
     @ModuleInfo(key: "q_a_proj") var qAProj: Linear
     @ModuleInfo(key: "q_a_layernorm") var qANorm: RMSNorm
@@ -1021,6 +1035,8 @@ final class Raon1MLA: Raon1PreparedModule {
 
     /// The largest shared-channel score block of a prompt, in bytes.
     static let maximumMaskBytes = 256 << 20
+    /// The smallest query block of an expanded prompt. Calls of at most this many rows attend in
+    /// the latent space: expansion costs work in proportion to the cache length.
     static let minimumBlockRows = 32
 
     init(_ config: Raon1MiniConfiguration, linear: (String, Int, Int) -> Linear) {
@@ -1061,14 +1077,15 @@ final class Raon1MLA: Raon1PreparedModule {
         if let quantized = cache as? QuantizedKVCacheProtocol {
             let (qLatent, qSharedKeys) = quantized.updateQuantized(keys: latent, values: shared)
             let (groupSize, bits, mode) = (quantized.groupSize, quantized.bits, quantized.mode)
-            if L == 1 {
-                let scores =
-                    quantizedMM(
+            if L <= Self.minimumBlockRows {
+                let scores = mask.applied(
+                    to: quantizedMM(
                         embedQ(qNope) * scale, qLatent.0, scales: qLatent.1, biases: qLatent.2,
                         transpose: true, groupSize: groupSize, bits: bits, mode: mode)
-                    + quantizedMM(
-                        qShared, qSharedKeys.0, scales: qSharedKeys.1, biases: qSharedKeys.2,
-                        transpose: true, groupSize: groupSize, bits: bits, mode: mode)
+                        + quantizedMM(
+                            qShared, qSharedKeys.0, scales: qSharedKeys.1,
+                            biases: qSharedKeys.2, transpose: true, groupSize: groupSize,
+                            bits: bits, mode: mode))
                 let weights = softmax(scores, axis: -1, precise: true)
                 out = unembedOut(
                     quantizedMM(
@@ -1087,11 +1104,11 @@ final class Raon1MLA: Raon1PreparedModule {
             if let cache {
                 (latent, shared) = cache.update(keys: latent, values: shared)
             }
-            if L == 1 {
+            if L <= Self.minimumBlockRows {
                 // The cached keys are the latent itself, so the latent serves as both keys and values.
-                let scores =
-                    matmul(embedQ(qNope) * scale, latent.swappedAxes(-1, -2))
-                    + matmul(qShared, shared.swappedAxes(-1, -2))
+                let scores = mask.applied(
+                    to: matmul(embedQ(qNope) * scale, latent.swappedAxes(-1, -2))
+                        + matmul(qShared, shared.swappedAxes(-1, -2)))
                 let weights = softmax(scores, axis: -1, precise: true)
                 out = unembedOut(matmul(weights, latent))
             } else {
