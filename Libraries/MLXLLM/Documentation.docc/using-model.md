@@ -84,12 +84,10 @@ while loading.
 ### LFM2.5 DSpark speculative decoding
 
 Liquid AI's DSpark checkpoints are block drafters rather than standalone
-language models. Register the draft architecture, load the target and its
-matching draft checkpoint, then use the MTP generation overload:
+language models. Load the target and its matching draft checkpoint, then use
+the MTP generation overload:
 
 ```swift
-await LFM2DSparkRegistration.register()
-
 let target = try await LLMModelFactory.shared.load(
     from: targetDirectory,
     using: tokenizerLoader

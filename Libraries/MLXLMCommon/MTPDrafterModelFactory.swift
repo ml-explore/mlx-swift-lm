@@ -3,27 +3,50 @@
 import Foundation
 import MLX
 
-/// Registry of `model_type` strings (e.g. `"gemma4_assistant"`) to creator
-/// closures that instantiate ``MTPDrafterModel`` instances from `config.json`
-/// data.
+/// Registries of `model_type` strings (e.g. `"gemma4_assistant"`) to the
+/// ``MTPDrafterArchitecture`` that reads the checkpoint.
 ///
-/// Empty at bootstrap because drafter implementations live in MLXVLM —
-/// importing them here would create a circular dependency. Downstream
-/// modules call ``ModelTypeRegistry/registerModelType(_:creator:)`` on the
-/// shared registry at app/import time. See `Gemma4AssistantRegistration`
-/// in MLXVLM.
+/// The drafters live in MLXLLM and MLXVLM, which MLXLMCommon cannot import. Both
+/// registries start with the drafters that the linked modules list through
+/// ``ModelFactoryTrampoline/drafters()``.
 ///
 /// Note: ``ModelTypeRegistry`` is an `actor`; registration is `async`.
 public enum MTPDrafterTypeRegistry {
-    /// Shared registry. Empty until a downstream module registers a drafter
-    /// type via `await MTPDrafterTypeRegistry.shared.registerModelType(...)`.
-    public static let shared: ModelTypeRegistry<any MTPDrafterModel> = .init()
+    /// The registry of a drafter architecture.
+    public enum Kind: Sendable {
+        /// ``MTPDrafterTypeRegistry/shared``.
+        case shared
+        /// ``MTPDrafterTypeRegistry/visionLanguage``.
+        case visionLanguage
+    }
+
+    /// Registry for drafters that read text target state.
+    public static let shared = ModelTypeRegistry(drafters: linked(.shared))
 
     /// Registry for drafters whose forward pass consumes multimodal position
     /// state. It is separate from ``shared`` because standalone Qwen MTP
     /// checkpoints intentionally ship an empty `vision_config`, so their
     /// target architecture cannot be inferred from drafter metadata alone.
-    public static let visionLanguage: ModelTypeRegistry<any MTPDrafterModel> = .init()
+    public static let visionLanguage = ModelTypeRegistry(drafters: linked(.visionLanguage))
+
+    public static subscript(kind: Kind) -> ModelTypeRegistry<any MTPDrafterModel> {
+        switch kind {
+        case .shared: shared
+        case .visionLanguage: visionLanguage
+        }
+    }
+
+    /// Adds `drafter` to its registry.
+    public static func register(_ drafter: any MTPDrafterArchitecture.Type) async {
+        await self[drafter.registry].register(drafter)
+    }
+
+    private static func linked(_ kind: Kind) -> [any MTPDrafterArchitecture.Type] {
+        ModelFactoryRegistry.trampolineClassNames
+            .compactMap { NSClassFromString($0) as? any ModelFactoryTrampoline.Type }
+            .flatMap { $0.drafters() }
+            .filter { $0.registry == kind }
+    }
 }
 
 /// Registry of model id (e.g. `"mlx-community/gemma-4-31B-it-assistant-bf16"`)

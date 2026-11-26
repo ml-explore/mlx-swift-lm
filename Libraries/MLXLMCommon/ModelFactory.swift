@@ -592,6 +592,13 @@ private func load<R>(loader: (any ModelFactory) async throws -> sending R) async
 /// - ``ModelFactoryRegistry``
 public protocol ModelFactoryTrampoline {
     static func modelFactory() -> (any GenericModelFactory<ModelContext, ModelContainer>)?
+
+    /// The drafters the module implements. ``MTPDrafterTypeRegistry`` starts with them.
+    static func drafters() -> [any MTPDrafterArchitecture.Type]
+}
+
+extension ModelFactoryTrampoline {
+    public static func drafters() -> [any MTPDrafterArchitecture.Type] { [] }
 }
 
 /// Registry of ``ModelFactory`` trampolines.
@@ -615,19 +622,15 @@ final public class ModelFactoryRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var trampolines: [() -> (any ModelFactory)?]
 
+    /// The ``ModelFactoryTrampoline`` classes of the library modules.
+    static let trampolineClassNames = [
+        "MLXVLM.TrampolineModelFactory", "MLXLLM.TrampolineModelFactory",
+    ]
+
     private init() {
-        self.trampolines = [
-            {
-                (NSClassFromString("MLXVLM.TrampolineModelFactory")
-                    as? any ModelFactoryTrampoline.Type)?
-                    .modelFactory()
-            },
-            {
-                (NSClassFromString("MLXLLM.TrampolineModelFactory")
-                    as? any ModelFactoryTrampoline.Type)?
-                    .modelFactory()
-            },
-        ]
+        self.trampolines = Self.trampolineClassNames.map { name in
+            { (NSClassFromString(name) as? any ModelFactoryTrampoline.Type)?.modelFactory() }
+        }
     }
 
     public func addTrampoline(_ trampoline: @escaping () -> (any ModelFactory)?) {

@@ -371,3 +371,24 @@ extension Qwen35MTPDraftModel: ModelConversionMetadataProvider {
         [Qwen35CheckpointPolicy.normMetadataKey: "scale"]
     }
 }
+
+extension Qwen35MTPDraftModel: MTPDrafterArchitecture {
+    public static let modelTypes = [
+        "qwen3_5_text", "qwen3_8_text",
+        "qwen3_5", "qwen3_5_moe", "qwen3_8", "qwen3_8_moe",
+        "qwen3_5_mtp", "qwen3_8_mtp",
+    ]
+
+    /// A `_text` checkpoint has a flat text configuration. A standalone `_mtp`
+    /// checkpoint stores its norms already converted.
+    public convenience init(modelType: String, configuration: Data) throws {
+        let decoder = JSONDecoder.json5()
+        if modelType.hasSuffix("_text") {
+            self.init(try decoder.decode(Qwen35TextConfiguration.self, from: configuration))
+        } else {
+            self.init(
+                try decoder.decode(Qwen35Configuration.self, from: configuration),
+                preconvertedNorms: modelType.hasSuffix("_mtp"))
+        }
+    }
+}

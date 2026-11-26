@@ -505,3 +505,20 @@ public final class LFM2DSparkDraftModel: Module, StatefulMTPDrafterModel {
         precondition(isCompatible(with: target), "LFM2 DSpark draft and target are incompatible")
     }
 }
+
+extension LFM2DSparkDraftModel: MTPDrafterArchitecture {
+    /// DSpark checkpoints declare the `model_type` of Qwen3 language models.
+    public static let modelTypes = ["qwen3"]
+
+    public static func matches(_ configuration: Data) -> Bool {
+        let object = try? JSONSerialization.jsonObject(with: configuration) as? [String: Any]
+        return (object?["architectures"] as? [String])?.contains("Lfm2DSparkDraftModel") == true
+    }
+
+    public convenience init(modelType: String, configuration: Data) throws {
+        let configuration = try JSONDecoder.json5().decode(
+            LFM2DSparkConfiguration.self, from: configuration)
+        try configuration.validateModelConfiguration()
+        self.init(configuration)
+    }
+}

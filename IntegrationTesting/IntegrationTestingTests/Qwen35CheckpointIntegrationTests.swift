@@ -90,7 +90,6 @@ extension ModelLoadingSuite.Qwen35CheckpointIntegrationTests {
     private func loadDrafterUncached(_ reference: QwenMTPReference) async throws
         -> MTPDrafterContext
     {
-        await Qwen35TextMTPRegistration.register()
         return try await MTPDrafterModelFactory.shared.load(
             from: downloader, using: tokenizerLoader,
             configuration: .init(id: reference.id, revision: reference.revision))

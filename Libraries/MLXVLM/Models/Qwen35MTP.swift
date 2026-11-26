@@ -403,3 +403,39 @@ extension Qwen35VLMNextNDraftModel: ModelConversionMetadataProvider {
         [Qwen35CheckpointPolicy.normMetadataKey: "scale"]
     }
 }
+
+/// Standalone Qwen MTP checkpoints ship an empty `vision_config` for text and
+/// multimodal targets alike. The multimodal drafter therefore lives in its own
+/// registry, so neither configuration shape nor registration order selects it.
+extension Qwen35VLMNextNDraftModel: MTPDrafterArchitecture {
+    public static let modelTypes = [
+        "qwen3_5", "qwen3_5_moe", "qwen3_8", "qwen3_8_moe",
+        "qwen3_5_mtp", "qwen3_8_mtp",
+    ]
+
+    public static var registry: MTPDrafterTypeRegistry.Kind { .visionLanguage }
+
+    /// A standalone `_mtp` checkpoint stores its norms already converted.
+    public convenience init(modelType: String, configuration: Data) throws {
+        let checkpoint = try JSONDecoder.json5().decode(
+            Qwen35MTPCheckpointConfiguration.self, from: configuration)
+        if modelType.hasSuffix("_mtp") {
+            self.init(
+                checkpoint.textConfiguration,
+                checkpointPolicy: .init(modelType: checkpoint.modelType, preconvertedNorms: true))
+        } else {
+            self.init(checkpoint.textConfiguration)
+        }
+    }
+}
+
+/// The fields a drafter reads from a Qwen3.5 checkpoint, whatever its `vision_config`.
+private struct Qwen35MTPCheckpointConfiguration: Decodable {
+    let modelType: String
+    let textConfiguration: Qwen35Configuration.TextConfiguration
+
+    enum CodingKeys: String, CodingKey {
+        case modelType = "model_type"
+        case textConfiguration = "text_config"
+    }
+}

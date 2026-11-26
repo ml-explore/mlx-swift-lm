@@ -1,16 +1,40 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
-import MLXLMCommon
+import MLXLLM
 import MLXVLM
 import Testing
+
+@testable import MLXLMCommon
 
 // MARK: - Type-registry registration
 
 @Test
-func testGemma4AssistantRegistrationRegistersType() async throws {
-    await Gemma4AssistantRegistration.register()
+func testDrafterRegistriesStartWithTheLinkedDrafters() async {
+    let drafters =
+        MLXLLM.TrampolineModelFactory.drafters() + MLXVLM.TrampolineModelFactory.drafters()
+    #expect(!drafters.isEmpty)
+    for drafter in drafters {
+        for modelType in drafter.modelTypes {
+            #expect(
+                await MTPDrafterTypeRegistry[drafter.registry].contains(modelType), "\(modelType)")
+        }
+    }
+}
 
+@Test
+func testARegisteredDrafterKeepsItsConfigurationMatch() async {
+    let registry = ModelTypeRegistry<any MTPDrafterModel>(drafters: [])
+    await registry.register(LFM2DSparkDraftModel.self)
+
+    let dspark = Data(#"{"architectures": ["Lfm2DSparkDraftModel"]}"#.utf8)
+    let qwen3 = Data(#"{"architectures": ["Qwen3ForCausalLM"]}"#.utf8)
+    #expect(await registry.contains("qwen3", configuration: dspark))
+    #expect(await !registry.contains("qwen3", configuration: qwen3))
+}
+
+@Test
+func testGemma4AssistantRegistrationRegistersType() async throws {
     let json = """
         {
           "model_type": "gemma4_assistant",

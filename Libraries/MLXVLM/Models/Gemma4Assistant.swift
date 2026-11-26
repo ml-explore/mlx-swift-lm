@@ -436,3 +436,13 @@ public final class Gemma4AssistantDraftModel: Module, MTPDrafterModel {
         return sanitized
     }
 }
+
+extension Gemma4AssistantDraftModel: MTPDrafterArchitecture {
+    /// `gemma4_unified_assistant`, the drafter of the 12B `gemma4_unified` target,
+    /// differs only in a `text_config` that `Gemma4TextConfiguration` decodes.
+    public static let modelTypes = ["gemma4_assistant", "gemma4_unified_assistant"]
+
+    public convenience init(modelType: String, configuration: Data) throws {
+        self.init(try JSONDecoder().decode(Gemma4AssistantConfiguration.self, from: configuration))
+    }
+}

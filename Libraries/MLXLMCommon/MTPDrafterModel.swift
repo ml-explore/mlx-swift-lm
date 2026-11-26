@@ -129,6 +129,32 @@ extension MTPDrafterModel {
     public var targetLayerIds: [Int]? { nil }
 }
 
+/// A drafter that ``MTPDrafterTypeRegistry`` creates from `config.json`.
+///
+/// The library's drafters conform, and each module lists them through
+/// ``ModelFactoryTrampoline/drafters()``. Register another architecture with
+/// ``MTPDrafterTypeRegistry/register(_:)``.
+public protocol MTPDrafterArchitecture: MTPDrafterModel {
+    /// The `model_type` values of the drafter's checkpoints.
+    static var modelTypes: [String] { get }
+
+    /// The registry that creates the drafter. The default is `.shared`.
+    static var registry: MTPDrafterTypeRegistry.Kind { get }
+
+    /// Whether `configuration` is this drafter's when other architectures share
+    /// its `model_type`. The default accepts every configuration.
+    static func matches(_ configuration: Data) -> Bool
+
+    /// Creates the drafter from the `config.json` of a `modelType` checkpoint.
+    init(modelType: String, configuration: Data) throws
+}
+
+extension MTPDrafterArchitecture {
+    public static var registry: MTPDrafterTypeRegistry.Kind { .shared }
+
+    public static func matches(_ configuration: Data) -> Bool { true }
+}
+
 /// Target-side capability for rewinding an in-place speculative verify pass.
 ///
 /// Rollback belongs to the target/cache implementation, not to the drafter.

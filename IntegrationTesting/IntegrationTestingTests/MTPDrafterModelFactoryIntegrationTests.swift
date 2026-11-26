@@ -22,7 +22,6 @@ extension ModelLoadingSuite {
 extension ModelLoadingSuite.MTPDrafterModelFactoryIntegrationTests {
     @Test
     func testMTPDrafterFactoryLoadFromDirectoryWhenCheckpointPresent() async throws {
-        await Gemma4AssistantRegistration.register()
         let factory = MTPDrafterModelFactory.shared
 
         let configuration = ModelConfiguration(
