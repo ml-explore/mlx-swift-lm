@@ -225,10 +225,42 @@ public class EvalTests: XCTestCase {
             XCTAssertEqual(
                 values.topLogProbabilities.reduce(0) { $0 + exp(Double($1.logProbability)) },
                 1, accuracy: 2e-5)
+            let expectedEntropy = -expected.reduce(0) { $0 + exp(Double($1)) * Double($1) }
+            XCTAssertEqual(Double(try XCTUnwrap(values.entropy)), expectedEntropy, accuracy: 1e-4)
 
             previous = MLXArray([token])
             processor?.didSample(token: previous)
         }
+    }
+
+    func testEntropyCoversTheWholeVocabularyAndSkipsMaskedTokens() throws {
+        // Six candidates hold half the probability and 50 tokens share the rest. The other
+        // 44 tokens are masked, as a grammar would mask them.
+        struct FixedDistribution: LogitProcessor {
+            static let probabilities: [Float] =
+                [0.3] + Array(repeating: 0.04, count: 5) + Array(repeating: 0.01, count: 50)
+
+            func prompt(_ prompt: MLXArray) {}
+            func didSample(token: MLXArray) {}
+            func process(logits: MLXArray) -> MLXArray {
+                let masked = Array(
+                    repeating: -Float.infinity, count: 100 - Self.probabilities.count)
+                return MLXArray(Self.probabilities.map { log($0) } + masked)[.newAxis, 0...]
+            }
+        }
+        var iterator = try TokenIterator(
+            input: LMInput(tokens: MLXArray([1, 2, 3])), model: makeQualityGateLlamaModel(),
+            parameters: .init(maxTokens: 1, temperature: 0, logProbabilities: 6),
+            components: .init(logitProcessorFactory: { FixedDistribution() }))
+
+        XCTAssertEqual(iterator.next(), 0)
+        let values = try XCTUnwrap(iterator.lastLogProbabilities).materialize()
+
+        let expected = -FixedDistribution.probabilities.reduce(0) {
+            $0 + Double($1) * log(Double($1))
+        }
+        XCTAssertEqual(Double(try XCTUnwrap(values.entropy)), expected, accuracy: 1e-4)
+        XCTAssertEqual(values.topLogProbabilities.count, 6)
     }
 
     func testSpeculativeLogProbabilitiesMatchTheMainModelDecodingAlone() throws {
@@ -271,6 +303,8 @@ public class EvalTests: XCTestCase {
                 for (a, e) in zip(actual.topLogProbabilities, expected.topLogProbabilities) {
                     XCTAssertEqual(a.logProbability, e.logProbability, accuracy: 1e-4)
                 }
+                XCTAssertEqual(
+                    try XCTUnwrap(actual.entropy), try XCTUnwrap(expected.entropy), accuracy: 1e-4)
             }
             XCTAssertNil(speculative.next())
 
