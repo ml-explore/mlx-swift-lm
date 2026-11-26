@@ -403,9 +403,8 @@ package func validateSourceConfigurationForModelConversion(in directory: URL) th
 }
 
 package func validateConvertibleWeights(in directory: URL) throws {
-    let fileManager = FileManager.default
-    let files = try fileManager.contentsOfDirectory(
-        at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+    let files = try contentsOfModelDirectory(
+        directory, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
 
     let safetensors = files.contains { $0.pathExtension == "safetensors" }
     if safetensors {
@@ -480,8 +479,8 @@ private func copyModelConversionSidecars(
 ) throws {
     let fileManager = FileManager.default
     let resourceKeys: [URLResourceKey] = [.isDirectoryKey]
-    let files = try fileManager.contentsOfDirectory(
-        at: sourceDirectory,
+    let files = try contentsOfModelDirectory(
+        sourceDirectory,
         includingPropertiesForKeys: resourceKeys,
         options: [.skipsHiddenFiles])
 
@@ -490,7 +489,8 @@ private func copyModelConversionSidecars(
     ]
 
     for sourceURL in files {
-        let resourceValues = try sourceURL.resourceValues(forKeys: Set(resourceKeys))
+        let resolvedURL = sourceURL.resolvingSymlinksInPath()
+        let resourceValues = try resolvedURL.resourceValues(forKeys: Set(resourceKeys))
         if resourceValues.isDirectory == true {
             continue
         }
@@ -514,7 +514,7 @@ private func copyModelConversionSidecars(
         if fileManager.fileExists(atPath: destinationURL.path) {
             try fileManager.removeItem(at: destinationURL)
         }
-        try fileManager.copyItem(at: sourceURL, to: destinationURL)
+        try fileManager.copyItem(at: resolvedURL, to: destinationURL)
     }
 }
 

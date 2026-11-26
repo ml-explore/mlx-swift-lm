@@ -83,8 +83,8 @@ public enum ParoQuantPreparedCheckpoint {
     static func sourceURLs(
         in directory: URL, includingPropertiesForKeys keys: [URLResourceKey]? = nil
     ) throws -> [URL] {
-        try FileManager.default.contentsOfDirectory(
-            at: directory, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]
+        try contentsOfModelDirectory(
+            directory, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]
         )
         .filter {
             $0.pathExtension == "safetensors" && !excludedFileNames.contains($0.lastPathComponent)
