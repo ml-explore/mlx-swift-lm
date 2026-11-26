@@ -1710,7 +1710,8 @@ public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding,
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
         try model.layers.map { layer in
             if layer.isRDA {
-                return RewindableGatedDeltaCache(rollbackCapacity: maximumNativeTargetCacheRewind)
+                return RewindableGatedDeltaCache(
+                    rollbackCapacity: maximumNativeTargetCacheRewind + 1)
             }
             return try makeAttentionKVCache(parameters: parameters)
         }

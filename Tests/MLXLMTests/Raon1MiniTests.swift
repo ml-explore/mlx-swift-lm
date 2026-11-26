@@ -195,21 +195,24 @@ struct Raon1MiniTests {
 
     // MARK: - Decode paths
 
-    @Test("Rejecting a verify suffix preserves the convolution and recurrent state")
-    func speculativeRewindMatchesRetainedPrefix() throws {
+    @Test(
+        "Rejecting a verify suffix preserves the convolution and recurrent state",
+        arguments: [3, 16]
+    )
+    func speculativeRewindMatchesRetainedPrefix(rejected: Int) throws {
         let model = try Self.preparedModel()
-        let tokens = MLXArray((0 ..< 12).map { Int32(($0 * 7 + 3) % 64) })[.newAxis]
+        let tokens = MLXArray((0 ..< (5 + rejected)).map { Int32(($0 * 7 + 3) % 64) })[.newAxis]
         let rewound = try model.newCache(parameters: nil)
         let reference = try model.newCache(parameters: nil)
 
         for cache in [rewound, reference] {
             eval(model(tokens[0..., ..<4], cache: cache))
         }
-        eval(model(tokens[0..., 4 ..< 11], cache: rewound))
-        eval(model(tokens[0..., 4 ..< 8], cache: reference))
-        #expect(rewindSpeculativePromptCache(rewound, numTokens: 3) == 3)
+        eval(model(tokens[0..., 4 ..< (5 + rejected)], cache: rewound))
+        eval(model(tokens[0..., 4 ..< 5], cache: reference))
+        #expect(rewindSpeculativePromptCache(rewound, numTokens: rejected) == rejected)
 
-        let next = tokens[0..., 8 ..< 9]
+        let next = tokens[0..., 5 ..< 6]
         let actual = model(next, cache: rewound)
         let expected = model(next, cache: reference)
         #expect(Self.relativeDrift(actual, expected) < 1e-2)
