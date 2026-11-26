@@ -12,16 +12,16 @@ import MLXNN
 /// ±1 signs. The transform runs in float32 and returns the input's dtype, like the reference.
 public struct SignedBlockHadamard: Sendable, Equatable {
 
+    /// The largest block one threadgroup of the rotation kernel holds. Larger blocks use ops.
+    public static let maximumKernelBlockSize = 4096
+
     /// Elements per Hadamard block along the last axis. A power of two.
     public let blockSize: Int
-
-    private let scale: Float
 
     /// Creates a rotation over blocks of `blockSize` elements.
     public init(blockSize: Int) {
         precondition(Self.isValidBlockSize(blockSize), "blockSize must be a power of two")
         self.blockSize = blockSize
-        self.scale = 1 / Float(blockSize).squareRoot()
     }
 
     /// Whether `blockSize` is a positive power of two, the only order Sylvester's construction
@@ -31,27 +31,162 @@ public struct SignedBlockHadamard: Sendable, Equatable {
     }
 
     /// `R·x` along the last axis: flip signs, then transform each block.
-    public func forward(_ x: MLXArray, signs: MLXArray) -> MLXArray {
-        transform(x.asType(.float32) * signs).asType(x.dtype)
+    ///
+    /// - Parameters:
+    ///   - x: Values whose last axis is a multiple of ``blockSize``.
+    ///   - signs: One ±1 per element of the last axis.
+    ///   - useKernel: Whether to run the fused Metal kernel, for blocks up to
+    ///     ``maximumKernelBlockSize``. It has no gradient, so pass `true` only outside training.
+    public func forward(_ x: MLXArray, signs: MLXArray, useKernel: Bool = false) -> MLXArray {
+        guard useKernel, blockSize <= Self.maximumKernelBlockSize else {
+            return transform(x.asType(.float32) * signs).asType(x.dtype)
+        }
+        return SignedBlockHadamardKernel.rotate(
+            blocks(x, signs: signs), signs: signs, inverse: false
+        ).reshaped(x.shape)
     }
 
     /// `Rᵀ·x` along the last axis: transform each block, then flip signs.
-    public func inverse(_ x: MLXArray, signs: MLXArray) -> MLXArray {
-        (transform(x.asType(.float32)) * signs).asType(x.dtype)
+    ///
+    /// - Parameters:
+    ///   - x: Values whose last axis is a multiple of ``blockSize``.
+    ///   - signs: One ±1 per element of the last axis.
+    ///   - useKernel: As in ``forward(_:signs:useKernel:)``.
+    public func inverse(_ x: MLXArray, signs: MLXArray, useKernel: Bool = false) -> MLXArray {
+        guard useKernel, blockSize <= Self.maximumKernelBlockSize else {
+            return (transform(x.asType(.float32)) * signs).asType(x.dtype)
+        }
+        return SignedBlockHadamardKernel.rotate(
+            blocks(x, signs: signs), signs: signs, inverse: true
+        ).reshaped(x.shape)
+    }
+
+    /// `x` with its last axis split into blocks, the shape the kernel reads.
+    private func blocks(_ x: MLXArray, signs: MLXArray) -> MLXArray {
+        let width = x.dim(-1)
+        precondition(width % blockSize == 0, "last axis must be a multiple of blockSize")
+        precondition(
+            signs.shape == [width], "signs must hold one value per element of the last axis")
+        return x.reshaped(-1, width / blockSize, blockSize)
     }
 
     private func transform(_ x: MLXArray) -> MLXArray {
         precondition(x.dim(-1) % blockSize == 0, "last axis must be a multiple of blockSize")
         let shape = x.shape
+        let scale = 1 / Float(blockSize).squareRoot()
         return hadamardTransform(x.reshaped(-1, blockSize), scale: scale).reshaped(shape)
     }
+}
+
+// MARK: - Kernel
+
+/// The rotation as one Metal pass: read, flip signs, transform and round in a single kernel.
+///
+/// The three-op form (`asType(.float32) * signs`, `hadamardTransform`, `asType`) moves every
+/// activation through memory as float32 three times. Here the values stay in float32 registers.
+/// Each simdgroup transforms a 256-element slice with register butterflies and
+/// `simd_shuffle_xor`, and the slices of a block combine through threadgroup memory. Only the
+/// summation order differs from `hadamardTransform`.
+private enum SignedBlockHadamardKernel {
+
+    /// `x`, shaped `[..., blocks, blockSize]`, rotated block by block with `signs` over each row.
+    static func rotate(_ x: MLXArray, signs: MLXArray, inverse: Bool) -> MLXArray {
+        let blockSize = x.dim(-1)
+        let simdgroups = max(blockSize / sliceSize, 1)
+        let threads = x.size / blockSize * min(blockSize, 32) * simdgroups
+        return kernel(
+            [x, signs],
+            template: [("T", x.dtype), ("N", blockSize), ("S", simdgroups), ("INVERSE", inverse)],
+            grid: (threads, 1, 1),
+            threadGroup: (simdgroups > 1 ? simdgroups * 32 : min(threads, 256), 1, 1),
+            outputShapes: [x.shape], outputDTypes: [x.dtype])[0]
+    }
+
+    /// Elements one simdgroup transforms, eight a lane. A short butterfly chain spreads even a
+    /// single decode row over several simdgroups.
+    private static let sliceSize = 256
+
+    /// One block of `N` elements per `L` lanes of `S` simdgroups: each lane holds `R` values
+    /// `r * L + lane` of its simdgroup's slice. Register butterflies combine the `r` bits,
+    /// shuffles the lane bits, and threadgroup memory the simdgroup bits.
+    private static let kernel = MLXFast.metalKernel(
+        name: "signed_block_hadamard",
+        inputNames: ["x", "signs"],
+        outputNames: ["out"],
+        source: """
+            constexpr int L = N < 32 ? N : 32;
+            constexpr int R = N / (L * S);
+            threadgroup float exchange[S > 1 ? N : 1];
+
+            const uint index = thread_position_in_grid.x;
+            const uint lane = index % L;
+            const uint part = (index / L) % S;
+            const size_t base = size_t(index / (L * S)) * N + part * (R * L);
+            const uint column = uint(base % size_t(signs_shape[0]));
+
+            float v[R];
+            #pragma clang loop unroll(full)
+            for (int r = 0; r < R; ++r) {
+                v[r] = float(x[base + r * L + lane]);
+                if (!INVERSE) {
+                    v[r] *= float(signs[column + r * L + lane]);
+                }
+            }
+            #pragma clang loop unroll(full)
+            for (int h = 1; h < R; h <<= 1) {
+                #pragma clang loop unroll(full)
+                for (int r = 0; r < R; ++r) {
+                    if ((r & h) == 0) {
+                        const float a = v[r];
+                        const float b = v[r + h];
+                        v[r] = a + b;
+                        v[r + h] = a - b;
+                    }
+                }
+            }
+            #pragma clang loop unroll(full)
+            for (ushort m = 1; m < L; m <<= 1) {
+                #pragma clang loop unroll(full)
+                for (int r = 0; r < R; ++r) {
+                    const float p = simd_shuffle_xor(v[r], m);
+                    v[r] = (lane & m) ? p - v[r] : v[r] + p;
+                }
+            }
+            if (S > 1) {
+                #pragma clang loop unroll(full)
+                for (int r = 0; r < R; ++r) {
+                    exchange[part * (R * L) + r * L + lane] = v[r];
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                #pragma clang loop unroll(full)
+                for (int r = 0; r < R; ++r) {
+                    float sum = 0;
+                    #pragma clang loop unroll(full)
+                    for (uint g = 0; g < S; ++g) {
+                        const float value = exchange[g * (R * L) + r * L + lane];
+                        sum += popcount(part & g) & 1 ? -value : value;
+                    }
+                    v[r] = sum;
+                }
+            }
+
+            const float scale = 1.0f / metal::precise::sqrt(float(N));
+            #pragma clang loop unroll(full)
+            for (int r = 0; r < R; ++r) {
+                float y = v[r] * scale;
+                if (INVERSE) {
+                    y *= float(signs[column + r * L + lane]);
+                }
+                out[base + r * L + lane] = static_cast<T>(y);
+            }
+            """)
 }
 
 // MARK: - Layers
 
 /// A `QuantizedLinear` whose weights were quantized in a rotated input basis.
 ///
-/// The forward pass rotates the input with ``SignedBlockHadamard/forward(_:signs:)`` before the
+/// The forward pass rotates the input with ``SignedBlockHadamard/forward(_:signs:useKernel:)`` before the
 /// packed matmul. `signs` loads from the checkpoint like any other parameter.
 open class HadamardQuantizedLinear: QuantizedLinear {
 
@@ -92,7 +227,7 @@ open class HadamardQuantizedLinear: QuantizedLinear {
     }
 
     open override func callAsFunction(_ x: MLXArray) -> MLXArray {
-        super.callAsFunction(rotation.forward(x, signs: signs))
+        super.callAsFunction(rotation.forward(x, signs: signs, useKernel: !training))
     }
 }
 
@@ -122,11 +257,11 @@ open class HadamardQuantizedEmbedding: QuantizedEmbedding {
     }
 
     open override func callAsFunction(_ x: MLXArray) -> MLXArray {
-        rotation.inverse(super.callAsFunction(x), signs: signs)
+        rotation.inverse(super.callAsFunction(x), signs: signs, useKernel: !training)
     }
 
     open override func asLinear(_ x: MLXArray) -> MLXArray {
-        super.asLinear(rotation.forward(x, signs: signs))
+        super.asLinear(rotation.forward(x, signs: signs, useKernel: !training))
     }
 }
 
