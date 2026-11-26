@@ -126,12 +126,21 @@ public struct GenerateTokenLogProbabilities: Sendable, Equatable {
     /// top candidates.
     public let topLogProbabilities: [GenerateTokenLogProbability]
 
+    /// The Shannon entropy, in nats, of the distribution over the whole vocabulary.
+    ///
+    /// The top candidates alone cannot give this value: the probability outside them can
+    /// spread over many tokens. Iterators always report it; `nil` means the value was
+    /// built without it.
+    public let entropy: Float?
+
     public init(
         chosen: GenerateTokenLogProbability,
-        topLogProbabilities: [GenerateTokenLogProbability] = []
+        topLogProbabilities: [GenerateTokenLogProbability] = [],
+        entropy: Float? = nil
     ) {
         self.chosen = chosen
         self.topLogProbabilities = topLogProbabilities
+        self.entropy = entropy
     }
 }
 
@@ -922,6 +931,7 @@ public struct DeferredTokenLogProbabilities {
     let chosenLogProbability: MLXArray
     let topTokenIDs: MLXArray?
     let topLogProbabilities: MLXArray?
+    let entropy: MLXArray
 
     init(logProbabilities: MLXArray, token: MLXArray, topK: Int) {
         self.token = token
@@ -930,6 +940,7 @@ public struct DeferredTokenLogProbabilities {
         let tokenIndices = token[0..., .newAxis]
         self.chosenLogProbability = takeAlong(logProbabilities, tokenIndices, axis: -1)
             .asType(.float32)
+        self.entropy = Self.entropy(of: logProbabilities)
 
         let count = Swift.min(Swift.max(topK, 0), logProbabilities.dim(-1))
         guard count > 0 else {
@@ -956,12 +967,24 @@ public struct DeferredTokenLogProbabilities {
 
     private init(
         token: MLXArray, chosenLogProbability: MLXArray,
-        topTokenIDs: MLXArray?, topLogProbabilities: MLXArray?
+        topTokenIDs: MLXArray?, topLogProbabilities: MLXArray?, entropy: MLXArray
     ) {
         self.token = token
         self.chosenLogProbability = chosenLogProbability
         self.topTokenIDs = topTokenIDs
         self.topLogProbabilities = topLogProbabilities
+        self.entropy = entropy
+    }
+
+    /// The entropy of each row of normalized log probabilities, in nats.
+    ///
+    /// Sums in `float32`: a `float16` sum over a large vocabulary loses precision. A token
+    /// with probability zero adds nothing, so a masked logit cannot give `0 * -inf = NaN`.
+    private static func entropy(of logProbabilities: MLXArray) -> MLXArray {
+        let logProbabilities = logProbabilities.asType(.float32)
+        let probabilities = exp(logProbabilities)
+        let terms = MLX.where(probabilities .> 0, probabilities * logProbabilities, 0)
+        return -terms.sum(axis: -1)
     }
 
     /// Records the log probabilities of tokens sampled from the rows of processed logits.
@@ -987,7 +1010,8 @@ public struct DeferredTokenLogProbabilities {
                 token: batch.token[row ..< row + 1],
                 chosenLogProbability: batch.chosenLogProbability[row ..< row + 1],
                 topTokenIDs: batch.topTokenIDs?[row ..< row + 1],
-                topLogProbabilities: batch.topLogProbabilities?[row ..< row + 1])
+                topLogProbabilities: batch.topLogProbabilities?[row ..< row + 1],
+                entropy: batch.entropy[row ..< row + 1])
         }
         // Evaluate the row views too: each unevaluated view read later is a GPU sync.
         asyncEval(rows.flatMap { [$0.token] + $0.arrays })
@@ -995,7 +1019,7 @@ public struct DeferredTokenLogProbabilities {
     }
 
     var arrays: [MLXArray] {
-        [chosenLogProbability, topTokenIDs, topLogProbabilities].compactMap { $0 }
+        [chosenLogProbability, topTokenIDs, topLogProbabilities, entropy].compactMap { $0 }
     }
 
     /// Copies the values from the GPU into a `Sendable` value.
@@ -1017,7 +1041,8 @@ public struct DeferredTokenLogProbabilities {
             chosen: .init(
                 token: token.item(Int.self),
                 logProbability: chosenLogProbability.item(Float.self)),
-            topLogProbabilities: materializedTopLogProbabilities)
+            topLogProbabilities: materializedTopLogProbabilities,
+            entropy: entropy.item(Float.self))
     }
 }
 
