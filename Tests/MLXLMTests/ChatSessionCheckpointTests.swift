@@ -73,14 +73,17 @@ final class ChatSessionCheckpointTests: XCTestCase {
     }
 
     /// Serves `base`'s attention caches beside recurrent state that sums every token it has
-    /// seen, and records each forward with the sum it started from.
+    /// seen, and records each forward with the sum it started from. Without recurrent state,
+    /// the carried sum stands in for it.
     private final class RecurrentStateModel: Module, LanguageModel {
         static let carriedSum = LMOutput.Key<Int>("checkpoint.carriedSum")
         let base: any LanguageModel
+        let recurrentState: Bool
         private(set) var forwards: [(tokens: [Int], stateBefore: Int, carriedBefore: Int)] = []
 
-        init(_ base: any LanguageModel) {
+        init(_ base: any LanguageModel, recurrentState: Bool = true) {
             self.base = base
+            self.recurrentState = recurrentState
             super.init()
         }
 
@@ -95,20 +98,24 @@ final class ChatSessionCheckpointTests: XCTestCase {
         func callAsFunction(
             _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
         ) -> LMOutput {
-            let recurrent = cache?.last as! MambaCache
+            let recurrent = recurrentState ? cache?.last as? MambaCache : nil
             let tokens = input.tokens.asArray(Int.self)
-            let before = recurrent[0]?.item(Int.self) ?? 0
-            forwards.append((tokens, before, state?[Self.carriedSum] ?? 0))
-            recurrent[0] = MLXArray(before + tokens.reduce(0, +))
-            recurrent.offset += tokens.count
-            let output = base(input, cache: cache.map { Array($0.dropLast()) }, state: nil)
+            let carriedBefore = state?[Self.carriedSum] ?? 0
+            let before = recurrent.map { $0[0]?.item(Int.self) ?? 0 } ?? carriedBefore
+            forwards.append((tokens, before, carriedBefore))
+            if let recurrent {
+                recurrent[0] = MLXArray(before + tokens.reduce(0, +))
+                recurrent.offset += tokens.count
+            }
+            let output = base(
+                input, cache: cache.map { recurrentState ? Array($0.dropLast()) : $0 }, state: nil)
             var carried = LMOutput.State()
             carried[Self.carriedSum] = (state?[Self.carriedSum] ?? 0) + tokens.reduce(0, +)
             return LMOutput(logits: output.logits, state: carried)
         }
 
         func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
-            try base.newCache(parameters: parameters) + [MambaCache()]
+            try base.newCache(parameters: parameters) + (recurrentState ? [MambaCache()] : [])
         }
     }
 
@@ -136,7 +143,7 @@ final class ChatSessionCheckpointTests: XCTestCase {
         reply: String, reasoning: ReasoningConfig? = nil,
         additionalContext: [String: any Sendable]? = nil,
         prefill: PrefillParameters = .init(), kvCache: KVCacheConfiguration? = nil,
-        headDim: Int = 16
+        headDim: Int = 16, slidingWindowPattern: Int = 2, recurrentState: Bool = true
     ) throws -> (ChatSession, RecurrentStateModel) {
         let eos = try XCTUnwrap(tokenizer.eosTokenId)
         let configuration = ModelConfiguration(
@@ -147,10 +154,10 @@ final class ChatSessionCheckpointTests: XCTestCase {
                 attentionHeads: 2, headDim: headDim, rmsNormEps: 0.00001,
                 vocabularySize: tokenizer.vocabulary.size, kvHeads: 1,
                 ropeTheta: 1_000_000, ropeLocalBaseFreq: 10_000, ropeTraditional: false,
-                queryPreAttnScalar: 16, slidingWindow: 16, slidingWindowPattern: 2,
-                maxPositionEmbeddings: 4096))
+                queryPreAttnScalar: 16, slidingWindow: 16,
+                slidingWindowPattern: slidingWindowPattern, maxPositionEmbeddings: 4096))
         eval(base)
-        let model = RecurrentStateModel(base)
+        let model = RecurrentStateModel(base, recurrentState: recurrentState)
         let replyTokens = tokenizer.encode(text: reply, addSpecialTokens: false) + [eos]
         let session = ChatSession(
             ModelContext(
@@ -433,5 +440,74 @@ final class ChatSessionCheckpointTests: XCTestCase {
         ])
         XCTAssertEqual(second.info.cachedPromptTokenCount, prefix)
         assertResumes(model, from: prefix, of: prompt)
+    }
+
+    func testRequestedCapacityAddsNoCheckpointStorageWhileItEvictsNothing() async throws {
+        let (session, model) = try makeSession(
+            reply: "<think>\nreason\n</think>\n\nanswer",
+            kvCache: KVCacheConfiguration(capacity: try .init(maxTokens: 256)))
+        let first = try await respond(session, to: firstQuestion)
+        let prefix = try render([("user", firstQuestion)]).count - 1
+        let status = try await session.cacheStatus()
+        let checkpointBytes = 2 * 16 * 16 * MemoryLayout<Float>.size + MemoryLayout<Int32>.size
+        XCTAssertEqual(status.checkpoint?.tokens, prefix)
+        XCTAssertEqual(status.checkpoint?.memory, checkpointBytes)
+
+        model.clearForwards()
+        let second = try await respond(session, to: "word")
+        let prompt = try render([
+            ("user", firstQuestion), ("assistant", first.text), ("user", "word"),
+        ])
+        XCTAssertEqual(second.info.cachedPromptTokenCount, prefix)
+        assertResumes(model, from: prefix, of: prompt)
+    }
+
+    func testForkEvictionDoesNotMaterializeTheSourceCheckpoint() async throws {
+        let (session, _) = try makeSession(
+            reply: "<think>reason</think>\n\nanswer",
+            kvCache: KVCacheConfiguration(capacity: try .init(maxTokens: 128)),
+            slidingWindowPattern: 1, recurrentState: false)
+        _ = try await respond(session, to: firstQuestion)
+        let before = try await session.cacheStatus()
+        XCTAssertEqual(before.checkpoint?.memory, 0)
+
+        let fork = await session.fork()
+        let longQuestion = String(repeating: "word ", count: 120)
+        let response = try await respond(fork, to: longQuestion)
+        XCTAssertEqual(response.info.cachedPromptTokenCount, before.checkpoint?.tokens)
+
+        let after = try await session.cacheStatus()
+        XCTAssertEqual(after.checkpoint, before.checkpoint)
+    }
+
+    func testRequestedCapacityResumesFromTheCheckpointAfterTheReplyEvicts() async throws {
+        // Every layer is a requested capacity. Each reply evicts from it; at 64 the first
+        // prompt is longer than the capacity too.
+        let reply = "<think>" + String(repeating: "reason", count: 40) + "</think>\n\nanswer"
+        for capacity in [128, 64] {
+            let (session, model) = try makeSession(
+                reply: reply,
+                kvCache: KVCacheConfiguration(capacity: try .init(maxTokens: capacity)),
+                slidingWindowPattern: 1, recurrentState: false)
+            var history = [(role: "user", content: firstQuestion)]
+            var answer = try await respond(session, to: firstQuestion)
+            for turn in 1 ... 2 {
+                let prefix = try render(history).count - 1
+                let status = try await session.cacheStatus()
+                XCTAssertEqual(status.checkpoint?.tokens, prefix, "\(capacity) turn \(turn)")
+                // The reply evicted, so both layers copied the keys and values they retain.
+                let rows = min(prefix, capacity)
+                XCTAssertEqual(
+                    status.checkpoint?.memory, 2 * 2 * rows * 16 * MemoryLayout<Float>.size,
+                    "\(capacity) turn \(turn)")
+
+                history += [("assistant", answer.text), ("user", "word")]
+                model.clearForwards()
+                answer = try await respond(session, to: "word")
+                XCTAssertEqual(
+                    answer.info.cachedPromptTokenCount, prefix, "\(capacity) turn \(turn)")
+                assertResumes(model, from: prefix, of: try render(history))
+            }
+        }
     }
 }

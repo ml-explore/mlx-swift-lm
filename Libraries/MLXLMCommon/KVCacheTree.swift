@@ -3,7 +3,7 @@
 /// A classified leaf in a potentially nested cache topology.
 struct KVCacheLeaf {
     enum CheckpointStrategy: Equatable {
-        case trim, copy, varianceNormalized, unsupported
+        case trim, copy, deferredCopy, varianceNormalized, unsupported
     }
 
     enum Kind {
@@ -38,7 +38,11 @@ struct KVCacheLeaf {
 
     var checkpointStrategy: CheckpointStrategy {
         switch kind {
-        case .recurrent, .rotating: .copy
+        case .recurrent: .copy
+        // A requested capacity can hold the whole context, so it is copied only when it evicts.
+        case .rotating(let cache):
+            cache.capacityOrigin == .requested && cache.evictedTokenCount == 0
+                ? .deferredCopy : .copy
         case .varianceNormalized: .varianceNormalized
         case .simple where cache is ChunkedKVCache: .unsupported
         case .simple, .affine, .turboQuant: .trim

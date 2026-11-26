@@ -235,6 +235,17 @@ public final class ChatSession {
 
             var all: [Checkpoint] { [turn, step].compactMap { $0 } }
 
+            func copy(from source: KVCacheStorage, to destination: KVCacheStorage) -> Checkpoints {
+                func copy(_ checkpoint: Checkpoint) -> Checkpoint {
+                    Checkpoint(
+                        tokens: checkpoint.tokens,
+                        prefill: PrefillCheckpoint(
+                            cache: source.copyCheckpoint(checkpoint.prefill.cache, to: destination),
+                            state: checkpoint.prefill.state))
+                }
+                return Checkpoints(turn: turn.map(copy), step: step.map(copy))
+            }
+
             /// The longest checkpoint that `tokens` starts with.
             func longest(prefixing tokens: [Int]) -> Checkpoint? {
                 all.filter { tokens.starts(with: $0.tokens) }.max {
@@ -427,8 +438,13 @@ public final class ChatSession {
                 copied.state.cache = continuation.state.cache.map { $0.copy() }
                 return copied
             }
+            let copiedMain = main.copy()
+            var conversation = conversation
+            if let checkpoints = conversation?.checkpoints {
+                conversation?.checkpoints = checkpoints.copy(from: main, to: copiedMain)
+            }
             return RealizedCache(
-                main: main.copy(), draft: draft?.copy(), state: state,
+                main: copiedMain, draft: draft?.copy(), state: state,
                 mtpDrafterContinuation: mtpContinuation, conversation: conversation)
         }
     }
@@ -461,15 +477,14 @@ public final class ChatSession {
                 }
             }
             guard case .kvcache(let stored) = self,
-                var conversation = stored.conversation,
+                let conversation = stored.conversation,
                 !carriesMedia(conversation.messages), !carriesMedia(history)
             else {
                 return .history(history)
             }
-            conversation.messages = history
-            conversation.transcriptBuiltCache = false
             var copied = stored.copy()
-            copied.conversation = conversation
+            copied.conversation?.messages = history
+            copied.conversation?.transcriptBuiltCache = false
             return .kvcache(copied)
         }
     }
@@ -1639,7 +1654,11 @@ public final class ChatSession {
                             if decision.rewinds, !currentConversation.transcriptBuiltCache {
                                 // A fork shares its source's arrays. A copy keeps only
                                 // the prefix, so the next write does not copy the rest.
-                                kvCache = kvCache.copy()
+                                let copied = kvCache.copy()
+                                currentConversation.checkpoints = currentConversation.checkpoints
+                                    .copy(
+                                        from: kvCache, to: copied)
+                                kvCache = copied
                                 draftKVCache = draftKVCache?.copy()
                             }
 

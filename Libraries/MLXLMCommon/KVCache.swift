@@ -709,6 +709,70 @@ public class RotatingKVCache: BaseKVCache, KVCacheAttentionProtocol, CustomDebug
     /// window and do not participate in requested-capacity validation.
     package var capacityOrigin = CapacityOrigin.modelNative
 
+    /// A checkpoint of this cache taken before it evicted anything.
+    ///
+    /// A trim restores it until the cache evicts. The write that first evicts copies the
+    /// checkpoint's prefix here first, so the checkpoint holds no copy unless it needs one.
+    package final class DeferredCheckpointCopy {
+        package let offset: Int
+        package fileprivate(set) var copy: RotatingKVCache?
+
+        fileprivate init(offset: Int) {
+            self.offset = offset
+        }
+    }
+
+    private struct PendingCheckpointCopy {
+        weak var checkpoint: DeferredCheckpointCopy?
+    }
+
+    /// Checkpoints whose prefix this cache still holds.
+    private var pendingCheckpointCopies = [PendingCheckpointCopy]()
+
+    /// Records a checkpoint at the current offset. The cache must not have evicted.
+    package func deferCheckpointCopy() -> DeferredCheckpointCopy {
+        precondition(evictedTokenCount == 0, "an evicting cache must copy its checkpoint now")
+        let checkpoint = DeferredCheckpointCopy(offset: offset)
+        pendingCheckpointCopies.removeAll { $0.checkpoint == nil }
+        pendingCheckpointCopies.append(PendingCheckpointCopy(checkpoint: checkpoint))
+        return checkpoint
+    }
+
+    /// Registers an independent checkpoint on a copy of this cache.
+    package static func copyCheckpoint(
+        _ checkpoint: DeferredCheckpointCopy, from source: RotatingKVCache?,
+        to destination: RotatingKVCache?
+    ) -> DeferredCheckpointCopy {
+        let independent = DeferredCheckpointCopy(offset: checkpoint.offset)
+        independent.copy = checkpoint.copy
+        if independent.copy == nil, let source, let destination,
+            source.pendingCheckpointCopies.contains(where: { $0.checkpoint === checkpoint })
+        {
+            destination.pendingCheckpointCopies.append(
+                PendingCheckpointCopy(checkpoint: independent))
+        }
+        return independent
+    }
+
+    /// Copies the prefix of each pending checkpoint, before a write evicts it.
+    private func copyPendingCheckpoints() {
+        let pending = pendingCheckpointCopies.compactMap(\.checkpoint)
+        pendingCheckpointCopies.removeAll()
+        guard evictedTokenCount == 0 else { return }
+        for checkpoint in pending where checkpoint.copy == nil {
+            let prefix = copy() as! RotatingKVCache
+            prefix.trim(offset - checkpoint.offset)
+            let copy = prefix.copyForCheckpoint() as! RotatingKVCache
+            asyncEval(copy.innerState())
+            checkpoint.copy = copy
+        }
+    }
+
+    /// A later write would replace rows that checkpoints past `offset` still describe.
+    private func dropPendingCheckpointCopies(above offset: Int) {
+        pendingCheckpointCopies.removeAll { ($0.checkpoint?.offset ?? .max) > offset }
+    }
+
     package var preservedPrefixTokens: Int { keep }
 
     public override var maxSize: Int? { maxCacheSize }
@@ -935,6 +999,10 @@ public class RotatingKVCache: BaseKVCache, KVCacheAttentionProtocol, CustomDebug
             return logicalView(tail: maxCacheSize) ?? (keys, values)
         }
         let live = wrapped ? (self.keys?.dim(2) ?? 0) : idx
+        // Every write from here on evicts.
+        if live >= storageCapacity, !pendingCheckpointCopies.isEmpty {
+            copyPendingCheckpoints()
+        }
         let result =
             if count == 1 {
                 updateInPlace(keys: keys, values: values)
@@ -1061,6 +1129,7 @@ public class RotatingKVCache: BaseKVCache, KVCacheAttentionProtocol, CustomDebug
                 // arrays are available, then freeze the layout before any mutation.
                 self.wrappedFlag = nil
             }
+            dropPendingCheckpointCopies(above: offsetVal)
         }
     }
 
@@ -1115,6 +1184,7 @@ public class RotatingKVCache: BaseKVCache, KVCacheAttentionProtocol, CustomDebug
         idx = bound
         offset -= trimmed
         wrappedFlag = false
+        dropPendingCheckpointCopies(above: offset)
         return trimmed
     }
 
