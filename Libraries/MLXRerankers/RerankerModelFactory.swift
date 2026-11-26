@@ -110,6 +110,7 @@ public final class RerankerModelFactory: Sendable {
         let descriptor = try loadDescriptor(from: resolved.modelDirectory)
         let architecture = try descriptor.architecture(
             modelID: modelID, allowUnverifiedModel: allowUnverifiedModel)
+        let isInstructionAware = architecture?.isInstructionAware ?? false
 
         switch architecture {
         case .jina:
@@ -119,6 +120,7 @@ public final class RerankerModelFactory: Sendable {
             return RerankerContainer(
                 modelID: modelID,
                 scoreKind: .cosineSimilarity,
+                isInstructionAware: isInstructionAware,
                 memoryReporter: container
             ) { query, documents, instruction, options in
                 try await container.listwiseRerankerScores(
@@ -138,7 +140,8 @@ public final class RerankerModelFactory: Sendable {
                     "\(modelID) did not load an encoder reranker head.")
             }
             return RerankerContainer(
-                modelID: modelID, scoreKind: scoreKind, memoryReporter: container
+                modelID: modelID, scoreKind: scoreKind, isInstructionAware: isInstructionAware,
+                memoryReporter: container
             ) {
                 query, documents, _, options in
                 try await container.rerankerScores(
@@ -149,7 +152,8 @@ public final class RerankerModelFactory: Sendable {
                 configuration: resolved, tokenizerLoader: tokenizerLoader)
             let container = ModelContainer(context: context)
             return RerankerContainer(
-                modelID: modelID, scoreKind: .normalizedRelevance, memoryReporter: container
+                modelID: modelID, scoreKind: .normalizedRelevance,
+                isInstructionAware: isInstructionAware, memoryReporter: container
             ) {
                 query, documents, instruction, options in
                 try await container.causalRerankerScores(
@@ -189,6 +193,15 @@ package enum RerankerArchitecture: Sendable, Equatable {
     case encoder
     case qwen3
     case jina
+
+    /// Qwen3 renders the instruction in its prompt and Jina in its listwise prompt; a
+    /// sequence-classification encoder has no place for it.
+    package var isInstructionAware: Bool {
+        switch self {
+        case .encoder: false
+        case .qwen3, .jina: true
+        }
+    }
 }
 
 package struct RerankerDescriptor: Decodable, Sendable {

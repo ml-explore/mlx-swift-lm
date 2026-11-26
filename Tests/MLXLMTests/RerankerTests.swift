@@ -737,6 +737,21 @@ struct RerankerTests {
         #expect(model is JinaRerankerModel)
     }
 
+    @Test func onlyArchitecturesThatRenderTheInstructionAreInstructionAware() {
+        #expect(RerankerArchitecture.qwen3.isInstructionAware)
+        #expect(RerankerArchitecture.jina.isInstructionAware)
+        #expect(!RerankerArchitecture.encoder.isInstructionAware)
+    }
+
+    @Test func rerankersIgnoreTheInstructionUnlessTheyDeclareOtherwise() {
+        #expect(
+            !makeConstantReranker(scoreKind: .normalizedRelevance, scores: []).isInstructionAware)
+        #expect(
+            RerankerContainer(
+                modelID: "test/model", scoreKind: .normalizedRelevance, isInstructionAware: true
+            ) { _, _, _, _ in [] }.isInstructionAware)
+    }
+
     @Test func rerankerFactoryRoutesOnlyVerifiedRerankers() throws {
         let bge = try JSONDecoder().decode(
             RerankerDescriptor.self,
