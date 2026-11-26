@@ -1445,13 +1445,28 @@ public class Raon1MiniModelInner: Module {
     }
 }
 
-public class Raon1MiniModel: Module, LLMModel {
+public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding {
     public let vocabularySize: Int
 
     public let model: Raon1MiniModelInner
     let configuration: Raon1MiniConfiguration
 
     @ModuleInfo(key: "lm_head") var lmHead: Linear?
+    /// The 2-bit copy of `lm_head` that shortlists the decode candidates, when the checkpoint
+    /// ships one. See ``shortlistLogits(_:)``.
+    @ModuleInfo(key: "lm_head_stage1") var shortlistHead: QuantizedLinear?
+
+    /// KRAFTON's shortlist head: affine 2-bit, group 64, fitted with GPTQ on calibration
+    /// activations.
+    static let shortlistFile = "head_stage1_a2g64gm.safetensors"
+    /// Rows the shortlist head serves; more rows read the full head more cheaply.
+    static let shortlistMaximumRows = 16
+    /// Candidates whose logits are exact.
+    static let shortlistCandidates = 256
+    /// Every other logit is capped at the candidate of this rank.
+    static let shortlistTailRank = 64
+
+    public var additionalWeightFiles: [String] { [Self.shortlistFile] }
 
     public init(_ config: Raon1MiniConfiguration) {
         configuration = config
@@ -1463,8 +1478,66 @@ public class Raon1MiniModel: Module, LLMModel {
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        let out = model(inputs, cache: cache)
-        return lmHead.map { $0(out) } ?? model.embedTokens.asLinear(out)
+        projectLogits(hiddenStates(inputs, cache: cache))
+    }
+
+    /// Projects only the last position, through the shortlist head when the checkpoint ships one.
+    /// Every other forward, such as scoring or speculative verification, keeps the exact head.
+    public func nextTokenLogits(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        let last = hiddenStates(input.tokens, cache: cache)[0..., (-1)...]
+        return .init(logits: shortlistLogits(last) ?? projectLogits(last))
+    }
+
+    /// The logits of the final hidden states `h` `[..., H]` through the shortlist head, or `nil`
+    /// without one or for more than ``shortlistMaximumRows`` rows.
+    ///
+    /// A 2-bit pass scores the vocabulary and the full head recomputes the best
+    /// ``shortlistCandidates``, so their logits are exact. Every other logit keeps its 2-bit
+    /// score, capped at the exact logit of rank ``shortlistTailRank``. The arg max and any top-k
+    /// up to that rank are exact whenever the 2-bit pass ranks the true candidates within the
+    /// shortlist.
+    ///
+    /// Measured over 2,047 teacher-forced tokens: the arg max matched every time, and the
+    /// mean KL divergence from the full head was 0.004.
+    func shortlistLogits(_ h: MLXArray) -> MLXArray? {
+        let hidden = h.dim(-1)
+        let rows = h.size / hidden
+        guard !training, let shortlistHead, let head = lmHead as? QuantizedLinear,
+            head.bias == nil, head.globalScale == nil, rows <= Self.shortlistMaximumRows
+        else { return nil }
+
+        let x = h.reshaped(rows, hidden)
+        let scores = shortlistHead(x)
+        let count = Self.shortlistCandidates
+        let candidates = Self.largest(count, of: scores)
+        let flat = candidates.reshaped(-1)
+        func candidateRows(_ tensor: MLXArray) -> MLXArray {
+            tensor.take(flat, axis: 0).reshaped(rows, count, -1)
+        }
+        let exact = quantizedMM(
+            x.expandedDimensions(axis: 1), candidateRows(head.weight),
+            scales: candidateRows(head.scales), biases: head.biases.map(candidateRows),
+            transpose: true, groupSize: head.groupSize, bits: head.bits, mode: head.mode
+        ).reshaped(rows, count)
+        let cap = sorted(exact, axis: -1)[0..., (count - Self.shortlistTailRank)...][0..., ..<1]
+        let logits = putAlong(minimum(scores, cap), candidates, values: exact, axis: -1)
+        return logits.reshaped(Array(h.shape.dropLast()) + [vocabularySize])
+    }
+
+    /// The indices of the `count` largest values of each row of `scores` `[N, V]`.
+    ///
+    /// The `count` 256-value chunks with the largest maxima hold every value of rank up to
+    /// `count`, so the second partition reads `count × 256` values instead of `V`.
+    static func largest(_ count: Int, of scores: MLXArray) -> MLXArray {
+        let (rows, vocabulary) = (scores.dim(0), scores.dim(1))
+        let chunks = scores.reshaped(rows, vocabulary / 256, 256)
+        let top = argPartition(-chunks.max(axis: -1), kth: count - 1, axis: -1)[0..., ..<count]
+        let values = takeAlong(chunks, top.expandedDimensions(axis: -1), axis: 1)
+            .reshaped(rows, count * 256)
+        let local = argPartition(-values, kth: count - 1, axis: -1)[0..., ..<count]
+        return takeAlong(top, floorDivide(local, 256), axis: -1) * 256 + local % 256
     }
 
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
@@ -1483,6 +1556,32 @@ public class Raon1MiniModel: Module, LLMModel {
             layer.mlp?.prepare()
             layer.moe?.sharedExperts?.prepare()
         }
+    }
+
+    /// Attaches the shortlist head when the checkpoint ships a file that matches `lm_head`.
+    /// Its tensors are unscoped: `weight`, `scales` and `biases`.
+    public func prepareCheckpoint(_ checkpoint: ModelCheckpoint) throws -> ModelCheckpoint {
+        var checkpoint = checkpoint
+        var weights = checkpoint.weights
+        let names = ["weight", "scales", "biases"]
+        let tensors = names.compactMap { weights.removeValue(forKey: $0) }
+        let (vocabulary, hidden) = (configuration.vocabularySize, configuration.hiddenSize)
+        if lmHead != nil, tensors.count == names.count,
+            vocabulary % 256 == 0, vocabulary / 256 >= Self.shortlistCandidates,
+            tensors[0].shape == [vocabulary, hidden / 16], tensors[0].dtype == .uint32,
+            tensors[1].shape == [vocabulary, hidden / 64], tensors[2].shape == tensors[1].shape
+        {
+            let head = QuantizedLinear(
+                weight: tensors[0], scales: tensors[1], biases: tensors[2], groupSize: 64,
+                bits: 2, mode: .affine)
+            try update(
+                modules: ModuleChildren.unflattened(["lm_head_stage1": head]), verify: .none)
+            for (name, tensor) in zip(names, tensors) {
+                weights["lm_head_stage1.\(name)"] = tensor
+            }
+        }
+        checkpoint.weights = try sanitize(weights: weights)
+        return checkpoint
     }
 
     public func sanitize(weights: [String: MLXArray]) throws -> [String: MLXArray] {
@@ -1548,6 +1647,16 @@ public class Raon1MiniModel: Module, LLMModel {
             }
         }
         return weights
+    }
+}
+
+extension Raon1MiniModel: HiddenStateLanguageModel {
+    package func hiddenStates(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        model(inputs, cache: cache)
+    }
+
+    package func projectLogits(_ hiddenStates: MLXArray) -> MLXArray {
+        lmHead?(hiddenStates) ?? model.embedTokens.asLinear(hiddenStates)
     }
 }
 

@@ -86,6 +86,12 @@ LLMRegistry.glm4_9b_4bit          // mlx-community/GLM-4-9B-0414-4bit
 
 Each request uses the steering alpha of the config's default reasoning effort.
 
+When the checkpoint ships `head_stage1_a2g64gm.safetensors`, decode uses it as a 2-bit
+shortlist for the output head: the 256 best candidates get exact logits, and the other logits
+are approximate. Greedy decoding and top-k sampling up to 64 match the exact head whenever the
+2-bit pass ranks those tokens among its candidates, which held for every token of a 2,047-token
+test. Remove the file to use the exact head for every token.
+
 ### Mellum
 
 ```swift

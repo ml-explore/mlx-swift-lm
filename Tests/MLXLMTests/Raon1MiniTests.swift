@@ -279,6 +279,96 @@ struct Raon1MiniTests {
         #expect(Self.relativeDrift(kernels, operations) < 1e-2)
     }
 
+    @Test("The shortlist head keeps the full head's arg max and its exact top logits")
+    func shortlistHeadKeepsTheTopLogits() throws {
+        let model = Raon1MiniModel(try Self.configuration(vocabulary: 65_536))
+        let (weight, h) = withRandomState(MLXRandom.RandomState(seed: 30)) {
+            (
+                MLXRandom.normal([65_536, 256]) * 0.1,
+                MLXRandom.normal([1, 3, 256]).asType(.bfloat16)
+            )
+        }
+        let head = QuantizedLinear(weight: weight, bias: nil, groupSize: 32, bits: 8, mode: .mxfp8)
+        let shortlist = QuantizedLinear(weight: weight, bias: nil, groupSize: 64, bits: 8)
+        model.update(
+            modules: ModuleChildren.unflattened(["lm_head": head, "lm_head_stage1": shortlist]))
+        model.train(false)
+
+        // One row per product, as the shortlist recomputes each row.
+        let full = concatenated((0 ..< 3).map { head(h[0..., $0 ..< ($0 + 1)]) }, axis: 1)
+            .asType(.float32)[0]
+        let logits = try #require(model.shortlistLogits(h)).asType(.float32)[0]
+        let top = argSort(-full, axis: -1)[0..., ..<Raon1MiniModel.shortlistTailRank]
+
+        #expect(
+            argMax(logits, axis: -1).asArray(Int32.self)
+                == argMax(full, axis: -1).asArray(Int32.self))
+        #expect(
+            arrayEqual(takeAlong(logits, top, axis: -1), takeAlong(full, top, axis: -1)).item(
+                Bool.self))
+        let cap = takeAlong(full, top[0..., (-1)...], axis: -1)
+        #expect((logits .<= takeAlong(full, top[0..., ..<1], axis: -1)).all().item(Bool.self))
+        #expect(logicalOr(logits .<= cap, logits .== full).all().item(Bool.self))
+    }
+
+    @Test("Generation shortlists the last position; every other forward keeps the exact head")
+    func shortlistServesOnlyNextTokenLogits() throws {
+        let model = try Self.preparedModel(vocabulary: 65_536)
+        let weight = try #require(model.lmHead).weight
+        let head = QuantizedLinear(weight: weight, bias: nil, groupSize: 32, bits: 8, mode: .mxfp8)
+        let shortlist = QuantizedLinear(weight: weight, bias: nil, groupSize: 64, bits: 2)
+        model.update(
+            modules: ModuleChildren.unflattened(["lm_head": head, "lm_head_stage1": shortlist]))
+        let tokens = MLXArray((0 ..< 6).map { Int32($0 * 5 + 1) })[.newAxis]
+
+        let hidden = model.hiddenStates(tokens, cache: try model.newCache(parameters: nil))
+        let full = model(tokens, cache: try model.newCache(parameters: nil))
+        let next = model.nextTokenLogits(
+            LMInput.Text(tokens: tokens), cache: try model.newCache(parameters: nil), state: nil
+        ).logits
+
+        #expect(arrayEqual(full, model.projectLogits(hidden)).item(Bool.self))
+        #expect(next.shape == [1, 1, 65_536])
+        let expected = try #require(model.shortlistLogits(hidden[0..., (-1)...]))
+        #expect(arrayEqual(next, expected).item(Bool.self))
+        #expect(!arrayEqual(next, full[0..., (-1)...]).item(Bool.self))
+    }
+
+    @Test("The candidate search returns the largest values of each row")
+    func largestFindsTheTopValues() {
+        // Distinct values, so the largest 256 are one set.
+        let scores = withRandomState(MLXRandom.RandomState(seed: 31)) {
+            argSort(MLXRandom.uniform(low: 0, high: 1, [2, 65_536]), axis: -1).asType(.float32)
+        }
+        let found = sorted(Raon1MiniModel.largest(256, of: scores).asType(.int32), axis: -1)
+        let expected = sorted(argSort(-scores, axis: -1)[0..., ..<256].asType(.int32), axis: -1)
+        #expect(arrayEqual(found, expected).item(Bool.self))
+    }
+
+    @Test("A checkpoint attaches the shortlist head only when its tensors match lm_head")
+    func checkpointAttachesTheShortlistHead() throws {
+        let config = try Self.configuration(vocabulary: 65_536)
+        let tensors: [String: MLXArray] = [
+            "weight": MLXArray.zeros([65_536, 16], dtype: .uint32),
+            "scales": MLXArray.zeros([65_536, 4], dtype: .bfloat16),
+            "biases": MLXArray.zeros([65_536, 4], dtype: .bfloat16),
+        ]
+
+        let model = Raon1MiniModel(config)
+        let checkpoint = try model.prepareCheckpoint(ModelCheckpoint(weights: tensors))
+        #expect(model.shortlistHead?.bits == 2)
+        #expect(checkpoint.weights["lm_head_stage1.weight"]?.shape == [65_536, 16])
+        #expect(checkpoint.weights["weight"] == nil)
+
+        let mismatched = Raon1MiniModel(config)
+        var wrong = tensors
+        wrong["scales"] = MLXArray.zeros([65_536, 2], dtype: .bfloat16)
+        let dropped = try mismatched.prepareCheckpoint(ModelCheckpoint(weights: wrong))
+        #expect(mismatched.shortlistHead == nil)
+        #expect(
+            dropped.weights.keys.allSatisfy { !$0.hasPrefix("lm_head_stage1") && $0 != "weight" })
+    }
+
     // MARK: - Helpers
 
     private static func configuration(
@@ -333,8 +423,8 @@ struct Raon1MiniTests {
     }
 
     /// A tiny bfloat16 model with random parameters, prepared for inference as the factory does.
-    private static func preparedModel() throws -> Raon1MiniModel {
-        let model = Raon1MiniModel(try configuration())
+    private static func preparedModel(vocabulary: Int = 64) throws -> Raon1MiniModel {
+        let model = Raon1MiniModel(try configuration(vocabulary: vocabulary))
         model.train(false)
         randomize(model, dtype: .bfloat16)
         try model.prepare()
