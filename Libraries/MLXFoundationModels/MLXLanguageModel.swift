@@ -185,7 +185,7 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         await cache.makeTokenizerBias(modelID: modelID, tokenizer: tokenizer)
     }
 
-    /// Gets a constraint by cloning a cached compiled template (or compiling one first).
+    /// Gets a constraint over a cached compiled grammar (compiling it on first use).
     static func makeConstraint(
         modelID: String,
         kind: ConstraintKind,
@@ -209,6 +209,17 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// `warmUp()` pre-created the tokenizer.
     static func hasCachedGrammarTokenizer(modelID: String) async -> Bool {
         await cache.hasCachedGrammarTokenizer(modelID: modelID)
+    }
+
+    /// Number of compiled grammars the shared cache holds for the model.
+    /// Internal test seam for `ConstraintTemplateCacheTests`.
+    static func cachedConstraintTemplateCount(modelID: String) async -> Int {
+        await cache.cachedConstraintTemplateCount(modelID: modelID)
+    }
+
+    /// Number of grammars the shared cache has compiled. Internal test seam.
+    static func constraintCompilationCount() async -> Int {
+        await cache.constraintCompilationCount
     }
 
     /// Evicts every cached model, tokenizer, constraint template, and per-model

@@ -5,19 +5,17 @@ import Testing
 
 @testable import MLXGuidedGeneration
 
-/// Tests for grammar compilation caching via constraint cloning.
+/// Tests for `GrammarConstraint.clone()`, a fork of a matcher mid-generation.
 ///
-/// The ModelCache stores compiled "template" constraints and clones them
-/// for each request, avoiding repeated grammar compilation (~5-20ms savings).
+/// The ModelCache does not use `clone()`: it reuses compiled grammars through
+/// `freshMatcher()`, covered by `FreshMatcherTests` and `ConstraintTemplateCacheTests`.
 @Suite(
     .disabled(
         """
         GrammarConstraint.clone() requires xgrammar's GrammarMatcher::Fork() (xgrammar >= \
         v0.1.33); the vendored version (v0.1.30) does not provide it, so every clone() \
-        in this suite throws. Production handles the absence gracefully — makeConstraint() \
-        catches forkFailed and recompiles a fresh constraint — so constraint caching is a \
-        perf-only optimization, not a correctness gap. Re-enable when the vendored \
-        xgrammar is bumped to a version with Fork() and xg_matcher_fork calls it.
+        in this suite throws. Re-enable when the vendored xgrammar is bumped to a version \
+        with Fork() and xg_matcher_fork calls it.
         """))
 struct ConstraintCachingTests {
 
