@@ -42,6 +42,13 @@ public final class ModelContainer: ModelMemoryReporting {
         }
     }
 
+    /// Native reasoning efforts supported by the loaded checkpoint.
+    public var supportedReasoningEfforts: Set<ReasoningEffort> {
+        get async {
+            await context.read { $0.model.supportedReasoningEfforts }
+        }
+    }
+
     public var processor: UserInputProcessor {
         get async {
             await context.read { $0.processor }

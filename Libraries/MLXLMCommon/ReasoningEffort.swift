@@ -2,10 +2,9 @@
 
 /// How much a model that steers its own reasoning should think.
 ///
-/// The names follow the `reasoning_effort` of OpenAI-compatible servers. A model that steers its
-/// reasoning maps each name to its own setting; other models ignore it. The chat template still
-/// controls whether the model thinks: set ``off`` when the template's thinking is disabled, so a
-/// model steered for that case gets its setting.
+/// Names are model-specific. Discover them through ``LanguageModel/supportedReasoningEfforts``.
+/// The named constants are conveniences, not guarantees of support or equivalent behavior.
+/// Native steering does not change chat-template controls or the reasoning-token budget.
 ///
 /// ## See Also
 /// - ``GenerateParameters/reasoningEffort``
@@ -18,7 +17,7 @@ public struct ReasoningEffort: Hashable, Sendable, CustomStringConvertible {
 
     public var description: String { name }
 
-    /// Thinking off, `reasoning_effort` `none`.
+    /// Native off steering (`none`). This does not disable thinking in the chat template.
     public static let off = ReasoningEffort("none")
     public static let low = ReasoningEffort("low")
     public static let medium = ReasoningEffort("medium")

@@ -242,8 +242,11 @@ public struct GenerateParameters: Sendable {
     public var seed: UInt64?
 
     /// The reasoning effort of a model that steers its own reasoning, or `nil` for the model's
-    /// default. Models without steering ignore it. It applies to the tokens of this request, so it
-    /// can change between turns of a session without rebuilding the cache.
+    /// default. Models without native steering ignore it. See
+    /// ``LanguageModel/supportedReasoningEfforts`` for supported names.
+    ///
+    /// Only newly evaluated tokens use this value. Rebuild the prompt cache to apply a new
+    /// effort to an already cached prefix.
     public var reasoningEffort: ReasoningEffort?
 
     /// Penalty factor for repeating tokens

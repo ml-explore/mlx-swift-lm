@@ -1483,6 +1483,13 @@ public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding {
 
     public var additionalWeightFiles: [String] { [Self.shortlistFile] }
 
+    public var supportedReasoningEfforts: Set<ReasoningEffort> {
+        guard let steering = configuration.effortSteering, !steering.layers.isEmpty else {
+            return []
+        }
+        return Set(steering.alpha.keys.map(ReasoningEffort.init)).union([.off])
+    }
+
     public init(_ config: Raon1MiniConfiguration) {
         configuration = config
         vocabularySize = config.vocabularySize

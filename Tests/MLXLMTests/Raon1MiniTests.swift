@@ -75,11 +75,25 @@ struct Raon1MiniTests {
         let model = try await LLMTypeRegistry.shared.createModel(
             configuration: Data(Self.json().utf8), modelType: "raon1_mini")
         #expect(model is Raon1MiniModel)
+        #expect(model.supportedReasoningEfforts == [.off, .high, .max])
         #expect(model.toolCallFormat == .xmlFunction)
         #expect(model.reasoningConfig?.startDelimiter == "<think>")
         #expect(
             model.reasoningConfig?.budgetTransition
                 == ReasoningBudgetTransition(beforeEndDelimiter: "\n", afterEndDelimiter: "\n\n"))
+    }
+
+    @Test("Native discovery preserves checkpoint names and excludes inactive steering")
+    func nativeEffortDiscovery() throws {
+        var config = try Self.configuration()
+        config.effortSteering?.alpha = ["deep": 0.25]
+        #expect(Raon1MiniModel(config).supportedReasoningEfforts == [.off, .init("deep")])
+
+        config.effortSteering?.layers = []
+        #expect(Raon1MiniModel(config).supportedReasoningEfforts.isEmpty)
+
+        config.effortSteering = nil
+        #expect(Raon1MiniModel(config).supportedReasoningEfforts.isEmpty)
     }
 
     // MARK: - Checkpoint

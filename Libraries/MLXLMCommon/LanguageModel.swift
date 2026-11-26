@@ -409,6 +409,10 @@ public protocol LanguageModel: BaseLanguageModel, ChatConventionsProviding {
     /// Feature flags that describe generation behavior supported by the model.
     var capabilities: LMModelCapabilities { get }
 
+    /// Native reasoning efforts supported by this checkpoint. An empty set means no native
+    /// steering. This does not describe chat-template controls or include the implicit default.
+    var supportedReasoningEfforts: Set<ReasoningEffort> { get }
+
     /// Prepare the cache state and consume the ``LMInput``.
     ///
     /// `state` is the ``LMOutput/state`` a caller carried over from earlier
@@ -537,6 +541,8 @@ extension BlockDiffusionLanguageModel {
 }
 
 extension LanguageModel {
+    public var supportedReasoningEfforts: Set<ReasoningEffort> { [] }
+
     public func nextTokenLogits(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
