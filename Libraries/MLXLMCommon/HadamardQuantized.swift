@@ -12,32 +12,33 @@ import MLXNN
 /// ±1 signs. The transform runs in float32 and returns the input's dtype, like the reference.
 public struct SignedBlockHadamard: Sendable, Equatable {
 
-    /// The largest block one threadgroup of the rotation kernel holds.
-    public static let maximumBlockSize = 4096
+    /// The largest block one threadgroup of the rotation kernel holds. Larger blocks use ops.
+    public static let maximumKernelBlockSize = 4096
 
     /// Elements per Hadamard block along the last axis. A power of two.
     public let blockSize: Int
 
     /// Creates a rotation over blocks of `blockSize` elements.
     public init(blockSize: Int) {
-        precondition(
-            Self.isValidBlockSize(blockSize),
-            "blockSize must be a power of two no larger than \(Self.maximumBlockSize)")
+        precondition(Self.isValidBlockSize(blockSize), "blockSize must be a power of two")
         self.blockSize = blockSize
     }
 
     /// Whether `blockSize` is a positive power of two, the only order Sylvester's construction
-    /// defines, that the rotation kernel can hold.
+    /// defines.
     public static func isValidBlockSize(_ blockSize: Int) -> Bool {
-        blockSize > 0 && blockSize & (blockSize - 1) == 0 && blockSize <= maximumBlockSize
+        blockSize > 0 && blockSize & (blockSize - 1) == 0
     }
 
     /// `R·x` along the last axis: flip signs, then transform each block.
     ///
-    /// - Parameter useKernel: Whether to run the fused Metal kernel. It has no gradient, so a
-    ///   module in training passes `false` and gets the same transform as differentiable ops.
-    public func forward(_ x: MLXArray, signs: MLXArray, useKernel: Bool = true) -> MLXArray {
-        guard useKernel else {
+    /// - Parameters:
+    ///   - x: Values whose last axis is a multiple of ``blockSize``.
+    ///   - signs: One ±1 per element of the last axis.
+    ///   - useKernel: Whether to run the fused Metal kernel, for blocks up to
+    ///     ``maximumKernelBlockSize``. It has no gradient, so pass `true` only outside training.
+    public func forward(_ x: MLXArray, signs: MLXArray, useKernel: Bool = false) -> MLXArray {
+        guard useKernel, blockSize <= Self.maximumKernelBlockSize else {
             return transform(x.asType(.float32) * signs).asType(x.dtype)
         }
         return SignedBlockHadamardKernel.rotate(
@@ -47,9 +48,12 @@ public struct SignedBlockHadamard: Sendable, Equatable {
 
     /// `Rᵀ·x` along the last axis: transform each block, then flip signs.
     ///
-    /// - Parameter useKernel: As in ``forward(_:signs:useKernel:)``.
-    public func inverse(_ x: MLXArray, signs: MLXArray, useKernel: Bool = true) -> MLXArray {
-        guard useKernel else {
+    /// - Parameters:
+    ///   - x: Values whose last axis is a multiple of ``blockSize``.
+    ///   - signs: One ±1 per element of the last axis.
+    ///   - useKernel: As in ``forward(_:signs:useKernel:)``.
+    public func inverse(_ x: MLXArray, signs: MLXArray, useKernel: Bool = false) -> MLXArray {
+        guard useKernel, blockSize <= Self.maximumKernelBlockSize else {
             return (transform(x.asType(.float32)) * signs).asType(x.dtype)
         }
         return SignedBlockHadamardKernel.rotate(
@@ -432,8 +436,7 @@ public enum HadamardQuantizedCheckpointError: LocalizedError, Equatable {
             "Rotated checkpoint module \(path) is a \(found), not a plain Linear or Embedding."
         case .unsupportedBlockSize(let path, let block, let width):
             "Rotated checkpoint module \(path) declares block \(block) for input width \(width); "
-                + "a block must be a power of two no larger than "
-                + "\(SignedBlockHadamard.maximumBlockSize) that divides the width."
+                + "a block must be a power of two that divides the width."
         case .invalidSigns(let path):
             "Rotated checkpoint module \(path) has signs other than -1 and +1."
         }
@@ -566,5 +569,3 @@ public struct HadamardQuantizedCheckpointPolicy: Sendable {
         return String(key[..<dot])
     }
 }
-
-let probeMode = ProcessInfo.processInfo.environment["BONSAI_PROBE"] ?? ""

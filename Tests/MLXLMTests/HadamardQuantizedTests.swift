@@ -82,10 +82,11 @@ final class HadamardQuantizedTests: XCTestCase {
     }
 
     /// Blocks of 8 share a simdgroup, 32 and 256 fill one, 1024 and 4096 exchange slices.
+    /// Larger blocks are valid and use ops.
     func testKernelMatchesTheOpsTransformForEveryBlockLayout() {
-        XCTAssertFalse(
-            SignedBlockHadamard.isValidBlockSize(2 * SignedBlockHadamard.maximumBlockSize))
-        for block in [8, 32, 256, 1024, 4096] {
+        let largest = SignedBlockHadamard.maximumKernelBlockSize
+        XCTAssertTrue(SignedBlockHadamard.isValidBlockSize(2 * largest))
+        for block in [8, 32, 256, 1024, largest, 2 * largest] {
             let rotation = SignedBlockHadamard(blockSize: block)
             let signs = Self.signs(3 * block)
             for dtype in [DType.float32, .float16, .bfloat16] {
@@ -93,18 +94,31 @@ final class HadamardQuantizedTests: XCTestCase {
                 let tolerance = dtype == .float32 ? 1e-5 : dtype == .float16 ? 2e-3 : 1e-2
                 let message = "block \(block) \(dtype)"
 
-                let forward = rotation.forward(x, signs: signs)
+                let forward = rotation.forward(x, signs: signs, useKernel: true)
                 XCTAssertEqual(forward.dtype, dtype, message)
                 assertClose(
                     forward.asType(.float32),
-                    rotation.forward(x, signs: signs, useKernel: false).asType(.float32),
+                    rotation.forward(x, signs: signs).asType(.float32),
                     rtol: tolerance, atol: tolerance, message)
                 assertClose(
+                    rotation.inverse(x, signs: signs, useKernel: true).asType(.float32),
                     rotation.inverse(x, signs: signs).asType(.float32),
-                    rotation.inverse(x, signs: signs, useKernel: false).asType(.float32),
                     rtol: tolerance, atol: tolerance, message)
             }
         }
+    }
+
+    /// The kernel has no gradient, so the rotation uses differentiable ops unless asked.
+    func testRotationIsDifferentiableByDefault() {
+        let rotation = SignedBlockHadamard(blockSize: 64)
+        let signs = Self.signs(128)
+        let x = Self.values([2, 128])
+        let cotangent = Self.values([2, 128], phase: 1)
+        let forward = grad { (rotation.forward($0, signs: signs) * cotangent).sum() }(x)
+        let inverse = grad { (rotation.inverse($0, signs: signs) * cotangent).sum() }(x)
+        // R is orthogonal, so each direction's gradient is the other direction.
+        assertClose(forward, rotation.inverse(cotangent, signs: signs), rtol: 1e-5, atol: 1e-5)
+        assertClose(inverse, rotation.forward(cotangent, signs: signs), rtol: 1e-5, atol: 1e-5)
     }
 
     // MARK: - Layers
