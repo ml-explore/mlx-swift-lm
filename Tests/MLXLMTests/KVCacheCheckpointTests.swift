@@ -206,12 +206,14 @@ final class KVCacheCheckpointTests: XCTestCase {
     func testRequestedCapacityTrimsBackToACheckpointWithoutACopy() throws {
         let live = KVCacheStorage([try requested(maxSize: 16), KVCacheSimple()], plan: .disabled)
         write(0 ..< 6, into: live)
-        XCTAssertFalse(live.needsCheckpoint)
+        // A later write can evict, so the session still has to take a checkpoint.
+        XCTAssertTrue(live.needsCheckpoint)
         let checkpoint = try XCTUnwrap(live.checkpoint())
         XCTAssertEqual(checkpoint.retainedBytes, 0)
 
         write(6 ..< 14, into: live)
         XCTAssertTrue(live.restore(checkpoint))
+        XCTAssertEqual(checkpoint.retainedBytes, 0)
 
         let reference = KVCacheStorage(
             [try requested(maxSize: 16), KVCacheSimple()], plan: .disabled)
@@ -233,13 +235,77 @@ final class KVCacheCheckpointTests: XCTestCase {
         assertSameNextAttention(live, reference)
     }
 
-    func testRequestedCapacityThatEvictsAfterItsCheckpointRefusesIt() throws {
+    func testRequestedCapacityFilledToItsSizeStillTrimsBack() throws {
         let live = KVCacheStorage([try requested(maxSize: 8)], plan: .disabled)
         write(0 ..< 4, into: live)
         let checkpoint = try XCTUnwrap(live.checkpoint())
-        write(4 ..< 12, into: live)
+        write(4 ..< 8, into: live)
+
+        XCTAssertEqual(checkpoint.retainedBytes, 0)
+        XCTAssertTrue(live.restore(checkpoint))
+        let reference = KVCacheStorage([try requested(maxSize: 8)], plan: .disabled)
+        write(0 ..< 4, into: reference)
+        assertSameNextAttention(live, reference)
+    }
+
+    func testRequestedCapacityCopiesItsCheckpointBeforeItEvicts() throws {
+        let live = KVCacheStorage([try requested(maxSize: 8)], plan: .disabled)
+        write(0 ..< 6, into: live)
+        let checkpoint = try XCTUnwrap(live.checkpoint())
+        write(6 ..< 12, into: live)
+        XCTAssertEqual(checkpoint.retainedBytes, 2 * 6 * MemoryLayout<Float>.size)
+
+        let reference = KVCacheStorage([try requested(maxSize: 8)], plan: .disabled)
+        write(0 ..< 6, into: reference)
+        XCTAssertTrue(live.restore(checkpoint))
+        assertSameContents(live, reference)
+
+        write(6 ..< 12, into: live)
+        XCTAssertTrue(live.restore(checkpoint))
+        assertSameNextAttention(live, reference)
+    }
+
+    func testRequestedCapacityCopiesItsCheckpointBeforeAPrefillEvicts() throws {
+        let entry = try requested(maxSize: 8)
+        let live = KVCacheStorage([entry], plan: .disabled)
+        write(0 ..< 6, into: live)
+        let checkpoint = try XCTUnwrap(live.checkpoint())
+        for chunk in [6 ..< 12, 12 ..< 16] {
+            _ = entry.update(keys: rows(chunk), values: rows(chunk))
+            live.commitProcessedTokens(chunk.count)
+        }
+        XCTAssertEqual(checkpoint.retainedBytes, 2 * 6 * MemoryLayout<Float>.size)
+
+        XCTAssertTrue(live.restore(checkpoint))
+        let reference = KVCacheStorage([try requested(maxSize: 8)], plan: .disabled)
+        write(0 ..< 6, into: reference)
+        assertSameNextAttention(live, reference)
+    }
+
+    func testCopiedRequestedCapacityCopiesASharedCheckpoint() throws {
+        let live = KVCacheStorage([try requested(maxSize: 8)], plan: .disabled)
+        write(0 ..< 6, into: live)
+        let checkpoint = try XCTUnwrap(live.checkpoint())
+        let fork = KVCacheStorage(
+            live.cache.map { $0.copy() }, plan: .disabled, processedTokenCount: 6)
+        write(6 ..< 12, into: fork)
+
+        XCTAssertEqual(checkpoint.retainedBytes, 2 * 6 * MemoryLayout<Float>.size)
+        XCTAssertTrue(fork.restore(checkpoint))
+        let reference = KVCacheStorage([try requested(maxSize: 8)], plan: .disabled)
+        write(0 ..< 6, into: reference)
+        assertSameNextAttention(fork, reference)
+    }
+
+    func testRequestedCapacityTrimmedBelowItsCheckpointDropsIt() throws {
+        let live = KVCacheStorage([try requested(maxSize: 8)], plan: .disabled)
+        write(0 ..< 6, into: live)
+        let checkpoint = try XCTUnwrap(live.checkpoint())
+        live.trim(3)
+        write(3 ..< 12, into: live)
         let before = contents(live)
 
+        XCTAssertEqual(checkpoint.retainedBytes, 0)
         XCTAssertFalse(live.canRestore(checkpoint))
         XCTAssertFalse(live.restore(checkpoint))
         XCTAssertEqual(live.processedTokenCount, 12)

@@ -709,6 +709,55 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
     /// window and do not participate in requested-capacity validation.
     package var capacityOrigin = CapacityOrigin.modelNative
 
+    /// A checkpoint of this cache taken before it evicted anything.
+    ///
+    /// A trim restores it until the cache evicts. The write that first evicts copies the
+    /// checkpoint's prefix here first, so the checkpoint holds no copy unless it needs one.
+    package final class DeferredCheckpointCopy {
+        package let offset: Int
+        package fileprivate(set) var copy: RotatingKVCache?
+
+        fileprivate init(offset: Int) {
+            self.offset = offset
+        }
+    }
+
+    private struct PendingCheckpointCopy {
+        weak var checkpoint: DeferredCheckpointCopy?
+    }
+
+    /// Checkpoints whose prefix this cache still holds. Copies share them.
+    private var pendingCheckpointCopies = [PendingCheckpointCopy]()
+
+    /// Records a checkpoint at the current offset. The cache must not have evicted.
+    package func deferCheckpointCopy() -> DeferredCheckpointCopy {
+        precondition(evictedTokenCount == 0, "an evicting cache must copy its checkpoint now")
+        let checkpoint = DeferredCheckpointCopy(offset: offset)
+        pendingCheckpointCopies.removeAll { $0.checkpoint == nil }
+        pendingCheckpointCopies.append(PendingCheckpointCopy(checkpoint: checkpoint))
+        return checkpoint
+    }
+
+    /// Copies the prefix of each pending checkpoint, before a write evicts it.
+    private func copyPendingCheckpoints() {
+        let pending = pendingCheckpointCopies.compactMap(\.checkpoint)
+        pendingCheckpointCopies.removeAll()
+        guard evictedTokenCount == 0 else { return }
+        for checkpoint in pending where checkpoint.copy == nil {
+            let prefix = copy() as! RotatingKVCache
+            prefix.pendingCheckpointCopies = []
+            prefix.trim(offset - checkpoint.offset)
+            let copy = prefix.copyForCheckpoint() as! RotatingKVCache
+            asyncEval(copy.innerState())
+            checkpoint.copy = copy
+        }
+    }
+
+    /// A later write would replace rows that checkpoints past `offset` still describe.
+    private func dropPendingCheckpointCopies(above offset: Int) {
+        pendingCheckpointCopies.removeAll { ($0.checkpoint?.offset ?? .max) > offset }
+    }
+
     package var preservedPrefixTokens: Int { keep }
 
     public override var maxSize: Int? { maxCacheSize }
@@ -923,6 +972,10 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
             return logicalView(tail: maxCacheSize) ?? (keys, values)
         }
         let live = wrapped ? (self.keys?.dim(2) ?? 0) : idx
+        // Every write from here on evicts.
+        if live >= storageCapacity, !pendingCheckpointCopies.isEmpty {
+            copyPendingCheckpoints()
+        }
         let result =
             if count == 1 {
                 updateInPlace(keys: keys, values: values)
@@ -1023,6 +1076,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
                 // arrays are available, then freeze the layout before any mutation.
                 self.wrappedFlag = nil
             }
+            dropPendingCheckpointCopies(above: offsetVal)
         }
     }
 
@@ -1077,6 +1131,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         idx = bound
         offset -= trimmed
         wrappedFlag = false
+        dropPendingCheckpointCopies(above: offset)
         return trimmed
     }
 
@@ -1152,12 +1207,14 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
             new.state = s.map { $0[.ellipsis] }
         }
         new.metaState = self.metaState
+        new.pendingCheckpointCopies = pendingCheckpointCopies
         return new
     }
 
     /// Excludes a multi-token prefill's temporary rows beyond the configured history.
     package func copyForCheckpoint() -> any KVCache {
         let new = copy() as! RotatingKVCache
+        new.pendingCheckpointCopies = []
         if (keys?.dim(2) ?? 0) > storageCapacity,
             let (keys, values) = retainedView(tail: storageCapacity)
         {

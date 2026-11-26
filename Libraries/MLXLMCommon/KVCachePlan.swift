@@ -370,6 +370,7 @@ package final class KVCacheStorage {
                 switch leaf.recovery {
                 case .trim: []
                 case .copy(let copy): copy.innerState()
+                case .deferredCopy(let checkpoint): checkpoint.copy?.innerState() ?? []
                 case .varianceNormalized(let checkpoint): checkpoint.innerState()
                 }
             }
@@ -383,6 +384,7 @@ package final class KVCacheStorage {
         fileprivate enum Recovery {
             case trim
             case copy(KVCache)
+            case deferredCopy(RotatingKVCache.DeferredCheckpointCopy)
             case varianceNormalized(VarianceNormalizedKVCache.Checkpoint)
 
             func canRestore(_ leaf: KVCacheLeaf, trimming count: Int) -> Bool {
@@ -392,6 +394,11 @@ package final class KVCacheStorage {
                 case .copy(let copy):
                     return type(of: leaf.cache) == type(of: copy)
                         && leaf.cache.maxSize == copy.maxSize
+                case .deferredCopy(let checkpoint):
+                    if let copy = checkpoint.copy {
+                        return Recovery.copy(copy).canRestore(leaf, trimming: count)
+                    }
+                    return leaf.cache is RotatingKVCache && leaf.cache.maxTrimCount >= count
                 case .varianceNormalized(let checkpoint):
                     return (leaf.cache as? VarianceNormalizedKVCache)
                         .map { $0.canRestore(checkpoint) } ?? false
@@ -407,6 +414,9 @@ package final class KVCacheStorage {
                     return cache
                 case .copy(let copy):
                     return copy.copy()
+                case .deferredCopy(let checkpoint):
+                    return checkpoint.copy?.copy()
+                        ?? Recovery.trim.restore(cache, trimming: count)
                 case .varianceNormalized(let checkpoint):
                     let cache = cache as! VarianceNormalizedKVCache
                     cache.restore(checkpoint)
@@ -433,6 +443,8 @@ package final class KVCacheStorage {
             let recovery: Checkpoint.Recovery
             switch leaf.checkpointStrategy {
             case .trim: recovery = .trim
+            case .deferredCopy:
+                recovery = .deferredCopy((leaf.cache as! RotatingKVCache).deferCheckpointCopy())
             case .copy:
                 recovery = .copy(
                     (leaf.cache as? RotatingKVCache)?.copyForCheckpoint()
