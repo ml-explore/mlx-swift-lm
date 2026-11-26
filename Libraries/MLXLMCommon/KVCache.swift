@@ -2134,6 +2134,13 @@ public final class RewindableGatedDeltaCache: MambaCache {
         positions >= 0 && positions <= rollbackCapacity
     }
 
+    public override func innerState() -> [MLXArray] {
+        let state = super.innerState()
+        guard let replay else { return state }
+        return state + [replay.convolutionState, replay.recurrentState].compactMap { $0 }
+            + replay.convolutionInputs + [replay.q, replay.k, replay.v, replay.g, replay.beta]
+    }
+
     public override var maxTrimCount: Int { min(offset, replay?.length ?? 0) }
 
     fileprivate func canRewind(_ positions: Int) -> Bool {

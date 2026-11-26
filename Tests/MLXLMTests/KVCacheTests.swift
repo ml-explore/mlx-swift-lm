@@ -98,6 +98,30 @@ func testNativeHybridRewindChecksTheWrittenWindow(length: Int, convolutionFirst:
     }
 }
 
+@Test func testGatedDeltaCacheStatusIncludesReplayBuffers() throws {
+    let cache = RewindableGatedDeltaCache(rollbackCapacity: 1)
+    let convolution = MLXArray.zeros([1, 2, 3])
+    let recurrent = MLXArray.zeros([1, 1, 1, 1])
+    cache[0] = convolution
+    cache[1] = recurrent
+
+    let input = MLXArray.ones([1, 1, 1])
+    let newConvolution = MLXArray.ones(like: convolution)
+    let newRecurrent = MLXArray.ones(like: recurrent)
+    cache.update(
+        convolutionState: newConvolution, recurrentState: newRecurrent,
+        convolutionInputs: [input, input, input],
+        q: input, k: input, v: input, g: input, beta: input)
+
+    let status = try #require(kvCacheLayerStatuses(cache: [cache], configuration: nil).first)
+    let stateBytes = convolution.nbytes + recurrent.nbytes
+    #expect(status.memoryBytes == 2 * stateBytes + 8 * input.nbytes)
+
+    #expect(cache.trim(1) == 1)
+    let trimmed = try #require(kvCacheLayerStatuses(cache: [cache], configuration: nil).first)
+    #expect(trimmed.memoryBytes == stateBytes)
+}
+
 // MARK: - Helper
 
 private func tempURL() -> URL {
