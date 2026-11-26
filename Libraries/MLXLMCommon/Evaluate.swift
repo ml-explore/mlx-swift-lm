@@ -1426,16 +1426,11 @@ public struct TokenIterator: TokenIteratorProtocol {
             // compute the next state and async eval the next token
             let token = step(previous: previousY)
             y = .init(tokens: token)
-            // Evaluate the cache state together with the token: caches update
-            // through functional ops (concatenation, slice assignment), and an
-            // unevaluated chain of those updates keeps every prior step's
-            // intermediates alive. Python mlx-lm settles cache state the same
-            // way in its generation loop.
-            if let deferredLogProbabilities {
-                asyncEval([token] + cache.flatMap { $0.state } + deferredLogProbabilities.arrays)
-            } else {
-                asyncEval([token] + cache.flatMap { $0.state })
-            }
+            // Evaluating all cache state with each token slows decode as the cache grows (mlx-lm
+            // evaluates only the token). Evaluate only state the next forward pass will not settle.
+            // Collect the leaves each step: kvCachePlan.apply can replace caches mid-generation.
+            let unreadState = KVCacheTree.leaves(in: cache).flatMap(\.cache.unreadState)
+            asyncEval([token] + unreadState + (deferredLogProbabilities?.arrays ?? []))
 
             // Periodically return freed buffers that cannot be reused (odd or
             // monotonically growing sizes accumulate in the pool otherwise).
