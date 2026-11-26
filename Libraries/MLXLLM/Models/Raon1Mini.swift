@@ -1127,6 +1127,17 @@ final class Raon1MLP: Raon1PreparedModule, UnaryLayer {
     func prepare() { fused.prepare([upProj, gateProj]) }
 
     override func invalidate() { fused.invalidate() }
+
+    /// The projections for ``Raon1MoEKernels``, or `nil` unless each is a ``Raon1ScaledLinear``.
+    var kernelProjections: Raon1MoEKernels.Projections? {
+        guard let up = upProj as? Raon1ScaledLinear, let gate = gateProj as? Raon1ScaledLinear,
+            let down = downProj as? Raon1ScaledLinear
+        else { return nil }
+        func weights(_ p: Raon1ScaledLinear) -> Raon1MoEKernels.Weights {
+            (p.weight, p.scales, p.globalScale.reshaped(1))
+        }
+        return .init(up: weights(up), gate: weights(gate), down: weights(down))
+    }
 }
 
 /// Sigmoid router whose expert bias only ranks the experts.
@@ -1147,11 +1158,18 @@ final class Raon1MoEArithmetic: @unchecked Sendable {
     let route: @Sendable ([MLXArray]) -> [MLXArray]
     /// `[routed outputs, weights, shared output]` to the MoE output.
     let combine: @Sendable ([MLXArray]) -> [MLXArray]
+    let topK: Int
+    let renormalize: Bool
+    /// float32 `[SiTU beta, SiTU linear beta, routed scale]` for ``Raon1MoEKernels``.
+    let kernelParameters: MLXArray
 
     init(_ config: Raon1MiniConfiguration) {
         let topK = config.expertsPerToken
         let renormalize = config.moeRenormalize
         let scale = config.routedScalingFactor
+        self.topK = topK
+        self.renormalize = renormalize
+        kernelParameters = MLXArray([config.situBeta, config.situLinearBeta, scale])
         route = compile { inputs in
             let scores = sigmoid(matmul(inputs[0].asType(.float32), inputs[1].T))
             let ranked = scores + inputs[2]
@@ -1215,6 +1233,20 @@ final class Raon1SwitchGLU: Module {
         }
         return y.squeezed(axis: -2)
     }
+
+    /// The projections for ``Raon1MoEKernels``, or `nil` unless each is NVFP4 with global scales.
+    var kernelProjections: Raon1MoEKernels.Projections? {
+        func weights(_ p: Raon1ExpertProjection) -> Raon1MoEKernels.Weights? {
+            guard let quantization = p.quantization, quantization.mode == .nvfp4,
+                quantization.groupSize == 16, quantization.bits == 4, let scales = p.scales,
+                let globalScale = p.globalScale
+            else { return nil }
+            return (p.weight, scales, globalScale)
+        }
+        guard let up = weights(upProj), let gate = weights(gateProj), let down = weights(downProj)
+        else { return nil }
+        return .init(up: up, gate: gate, down: down)
+    }
 }
 
 final class Raon1MoE: Module {
@@ -1246,11 +1278,39 @@ final class Raon1MoE: Module {
     }
 
     func callAsFunction(_ x: MLXArray, effort: Float) -> MLXArray {
-        let route = arithmetic.route([x, gate.weight, gate.bias])
-        let shared = sharedExperts?(x) ?? MLXArray.zeros(like: x)
-        let out = arithmetic.combine([switchMLP(x, route[0]), route[1], shared])[0]
+        let out: MLXArray
+        if let kernelOut = kernelOutput(x) {
+            out = kernelOut
+        } else {
+            let route = arithmetic.route([x, gate.weight, gate.bias])
+            let shared = sharedExperts?(x) ?? MLXArray.zeros(like: x)
+            out = arithmetic.combine([switchMLP(x, route[0]), route[1], shared])[0]
+        }
         guard let steering, effort != 0 else { return out }
         return (out.asType(.float32) + effort * steering).asType(out.dtype)
+    }
+
+    /// The output through ``Raon1MoEKernels`` for decode-sized inputs, or `nil`.
+    private func kernelOutput(_ x: MLXArray) -> MLXArray? {
+        guard !training, gate.weight.dtype == .float32, gate.bias.dtype == .float32,
+            let routed = switchMLP.kernelProjections,
+            Raon1MoEKernels.supports(
+                x, experts: gate.weight.dim(0), intermediate: routed.up.weight.dim(1),
+                topK: arithmetic.topK)
+        else { return nil }
+        var shared: Raon1MoEKernels.Projections?
+        if let sharedExperts {
+            guard let projections = sharedExperts.kernelProjections,
+                projections.up.weight.dim(0) == routed.up.weight.dim(1)
+            else { return nil }
+            shared = projections
+        }
+        let hidden = x.dim(-1)
+        return Raon1MoEKernels.apply(
+            x.reshaped(-1, hidden), router: (gate.weight, gate.bias), routed: routed,
+            shared: shared, topK: arithmetic.topK, renormalize: arithmetic.renormalize,
+            parameters: arithmetic.kernelParameters
+        ).reshaped(x.shape)
     }
 }
 

@@ -579,3 +579,313 @@ enum Raon1RDAKernels {
                 }
             """)
 }
+
+/// One-token MoE in three kernels: the router, the gated up projections of the routed and shared
+/// experts, and the down projections summed with the routing weights.
+///
+/// The products repeat the arithmetic of the MLX NVFP4 matrix-vector kernels, so the projections
+/// round as the operation path does.
+enum Raon1MoEKernels {
+    /// Inputs with at most this many rows take the kernels.
+    static let maximumRows = 8
+
+    private static let rowsPerSIMDGroup = 4
+    private static let simdGroups = 2
+    private static let routeThreads = 128
+
+    /// An NVFP4 projection: packed weight, E4M3 block scales and float32 global scale.
+    typealias Weights = (weight: MLXArray, scales: MLXArray, globalScale: MLXArray)
+
+    /// The three projections of the routed experts, with MLX global scales `[E]`, or of the
+    /// shared expert, with per-tensor output scales `[1]`.
+    struct Projections {
+        let up: Weights
+        let gate: Weights
+        let down: Weights
+    }
+
+    /// Whether the kernels support `x` `[..., H]` with `experts` routed experts of width
+    /// `intermediate`.
+    static func supports(_ x: MLXArray, experts: Int, intermediate: Int, topK: Int) -> Bool {
+        let hidden = x.dim(-1)
+        let tile = rowsPerSIMDGroup * simdGroups
+        return x.dtype == .bfloat16 && x.size / hidden <= maximumRows && hidden % 512 == 0
+            && hidden % tile == 0 && intermediate % tile == 0 && intermediate % 16 == 0
+            && experts % 32 == 0 && experts <= 1024 && topK <= 32
+    }
+
+    /// - Parameters:
+    ///   - x: the rows `[N, H]`, bfloat16.
+    ///   - router: the float32 router weight `[E, H]` and expert bias `[E]`.
+    ///   - parameters: float32 `[SiTU beta, SiTU linear beta, routed scale]`.
+    /// - Returns: the MoE output `[N, H]`.
+    static func apply(
+        _ x: MLXArray, router: (weight: MLXArray, bias: MLXArray), routed: Projections,
+        shared: Projections?, topK: Int, renormalize: Bool, parameters: MLXArray
+    ) -> MLXArray {
+        let (rows, hidden) = (x.dim(0), x.dim(1))
+        let experts = router.weight.dim(0)
+        let intermediate = routed.up.weight.dim(1)
+        let slots = topK + (shared == nil ? 0 : 1)
+        let tile = rowsPerSIMDGroup * simdGroups
+        let threads = 32 * simdGroups
+
+        let logits = routeKernel(
+            [x, router.weight],
+            template: [("E", experts), ("H", hidden)],
+            grid: (routeThreads * experts, rows, 1),
+            threadGroup: (routeThreads, 1, 1),
+            outputShapes: [[rows, experts]],
+            outputDTypes: [.float32])[0]
+        let selection: [(String, any KernelTemplateArg)] = [
+            ("E", experts), ("TOPK", topK), ("RENORM", renormalize),
+            ("HAS_SHARED", shared != nil), ("R", rowsPerSIMDGroup), ("NSG", simdGroups),
+            ("H", hidden), ("I", intermediate),
+        ]
+
+        // Inputs under eight elements bind as `constant`, so the placeholders take eight.
+        let placeholder = MLXArray.zeros([8], dtype: .uint32)
+        let shared8 = MLXArray.zeros([8], dtype: .uint8)
+        let one = MLXArray.ones([1], dtype: .float32)
+        let upInputs: [MLXArray] = [
+            x, logits, router.bias, parameters,
+            routed.up.weight, routed.up.scales, routed.up.globalScale,
+            routed.gate.weight, routed.gate.scales, routed.gate.globalScale,
+            shared?.up.weight ?? placeholder, shared?.up.scales ?? shared8,
+            shared?.up.globalScale ?? one,
+            shared?.gate.weight ?? placeholder, shared?.gate.scales ?? shared8,
+            shared?.gate.globalScale ?? one,
+        ]
+        let activated = upKernel(
+            upInputs,
+            template: selection,
+            grid: (threads, intermediate / tile, rows * slots),
+            threadGroup: (threads, 1, 1),
+            outputShapes: [[rows, slots, intermediate]],
+            outputDTypes: [.bfloat16])[0]
+
+        return downKernel(
+            [
+                activated, logits, router.bias, parameters,
+                routed.down.weight, routed.down.scales, routed.down.globalScale,
+                shared?.down.weight ?? placeholder, shared?.down.scales ?? shared8,
+                shared?.down.globalScale ?? one,
+            ],
+            template: selection,
+            grid: (threads, hidden / tile, rows),
+            threadGroup: (threads, 1, 1),
+            outputShapes: [[rows, hidden]],
+            outputDTypes: [.bfloat16])[0]
+    }
+
+    private static let header = """
+        inline float raon_fp4(uint16_t bits) {
+          half v = as_type<half>(ushort((bits & 7) << 9)) * 16384.0h;
+          return static_cast<float>(bits & 8 ? -v : v);
+        }
+        inline float raon_e4m3(uint8_t bits) {
+          uint16_t v = bits & 127;
+          uint16_t u = (v << 7) | (((v + 1) >> 7) << 14) | (((uint16_t)((bits >> 7) & 1)) << 15);
+          return static_cast<float>(as_type<half>(u) * 256.0h);
+        }
+        template <int N>
+        inline float raon_qdot(const device uint8_t* w, const thread float* x, float scale) {
+          const device uint16_t* ws = (const device uint16_t*)w;
+          float accum = 0;
+          for (int i = 0; i < N / 4; i++) {
+            accum += (x[4 * i] * raon_fp4(ws[i]) + x[4 * i + 1] * raon_fp4(ws[i] >> 4) +
+                      x[4 * i + 2] * raon_fp4(ws[i] >> 8) + x[4 * i + 3] * raon_fp4(ws[i] >> 12));
+          }
+          return scale * accum;
+        }
+        inline float raon_sigmoid(float z) {
+          float y = 1.0f / (1.0f + metal::precise::exp(metal::abs(z)));
+          return (z < 0.0f) ? y : 1.0f - y;
+        }
+        // One SIMD group ranks sigmoid(logits) + bias and writes the top k experts and their
+        // routing weights.
+        template <int E, int TOPK, bool RENORM>
+        inline void raon_select(
+            const device float* logits, const device float* bias, float scale, uint lane,
+            threadgroup uint* chosen, threadgroup float* weights) {
+          constexpr int PER_LANE = E / 32;
+          float score[PER_LANE], ranked[PER_LANE];
+          for (int j = 0; j < PER_LANE; ++j) {
+            score[j] = raon_sigmoid(logits[lane * PER_LANE + j]);
+            ranked[j] = score[j] + bias[lane * PER_LANE + j];
+          }
+          float picked[TOPK];
+          float total = 0.0f;
+          for (int k = 0; k < TOPK; ++k) {
+            float best = -INFINITY, best_score = 0.0f;
+            uint where = E;
+            for (int j = 0; j < PER_LANE; ++j) {
+              if (ranked[j] > best) { best = ranked[j]; best_score = score[j]; where = lane * PER_LANE + j; }
+            }
+            const uint e = simd_min(best == simd_max(best) ? where : (uint)E);
+            picked[k] = simd_shuffle(best_score, (ushort)(e / PER_LANE));
+            if (e / PER_LANE == lane) ranked[e % PER_LANE] = -INFINITY;
+            total += picked[k];
+            if (lane == 0) chosen[k] = e;
+          }
+          if (lane == 0) {
+            for (int k = 0; k < TOPK; ++k)
+              weights[k] = (RENORM ? picked[k] / (total + 1e-20f) : picked[k]) * scale;
+          }
+        }
+        """
+
+    /// Each threadgroup scores one expert: the router logits `[N, E]`.
+    private static let routeKernel = MLXFast.metalKernel(
+        name: "raon1_moe_route",
+        inputNames: ["x", "w"],
+        outputNames: ["logits"],
+        source: """
+                const uint e = threadgroup_position_in_grid.x;
+                const uint n = threadgroup_position_in_grid.y;
+                const uint t = thread_position_in_threadgroup.x;
+                const uint T = threads_per_threadgroup.x;
+                const device bfloat16_t* xr = x + n * H;
+                const device float* wr = w + e * H;
+                float acc = 0.0f;
+                for (int h = 4 * t; h < H; h += 4 * T) {
+                    const float4 wv = *(const device float4*)(wr + h);
+                    acc = metal::fma((float)xr[h], wv.x, acc);
+                    acc = metal::fma((float)xr[h + 1], wv.y, acc);
+                    acc = metal::fma((float)xr[h + 2], wv.z, acc);
+                    acc = metal::fma((float)xr[h + 3], wv.w, acc);
+                }
+                acc = simd_sum(acc);
+                threadgroup float partial[32];
+                if (thread_index_in_simdgroup == 0) partial[simdgroup_index_in_threadgroup] = acc;
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                if (t == 0) {
+                    float total = 0.0f;
+                    for (uint g = 0; g < T / 32; ++g) total += partial[g];
+                    logits[n * E + e] = total;
+                }
+            """)
+
+    /// Each SIMD group computes `R` rows of one expert's up and gate projections and their SiTU.
+    private static let upKernel = MLXFast.metalKernel(
+        name: "raon1_moe_up_gate",
+        inputNames: [
+            "x", "logits", "bias", "prm", "wu", "su", "gu", "wg", "sg", "gg", "swu", "ssu", "sgu",
+            "swg", "ssg", "sgg",
+        ],
+        outputNames: ["act"],
+        source: """
+                constexpr int SLOTS = TOPK + (HAS_SHARED ? 1 : 0);
+                constexpr int BLK = 512;
+                constexpr int KW = H / 2;
+                constexpr int KG = H / 16;
+                const uint lane = thread_index_in_simdgroup;
+                const uint group = simdgroup_index_in_threadgroup;
+                const uint z = threadgroup_position_in_grid.z;
+                const uint n = z / SLOTS;
+                const uint slot = z - n * SLOTS;
+                const int row0 = (threadgroup_position_in_grid.y * NSG + group) * R;
+                const bool is_shared = HAS_SHARED && slot == TOPK;
+                threadgroup uint chosen[TOPK];
+                threadgroup float route_w[TOPK];
+                if (group == 0 && !is_shared)
+                    raon_select<E, TOPK, RENORM>(logits + n * E, bias, prm[2], lane, chosen, route_w);
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                const uint e = is_shared ? 0 : chosen[slot];
+                const size_t expert_w = (size_t)e * I * KW, expert_s = (size_t)e * I * KG;
+                const device uint8_t* bu = (is_shared ? (const device uint8_t*)swu : (const device uint8_t*)wu + expert_w)
+                    + row0 * KW + lane * 8;
+                const device uint8_t* bg = (is_shared ? (const device uint8_t*)swg : (const device uint8_t*)wg + expert_w)
+                    + row0 * KW + lane * 8;
+                const device uint8_t* cu = (is_shared ? ssu : su + expert_s) + row0 * KG + lane;
+                const device uint8_t* cg = (is_shared ? ssg : sg + expert_s) + row0 * KG + lane;
+                const device bfloat16_t* xr = x + n * H + lane * 16;
+                float au[R] = {0}, ag[R] = {0};
+                for (int k = 0; k < H; k += BLK) {
+                    float xt[16];
+                    for (int i = 0; i < 16; ++i) xt[i] = xr[k + i];
+                    for (int r = 0; r < R; ++r) {
+                        au[r] += raon_qdot<16>(bu + r * KW + k / 2, xt, raon_e4m3(cu[r * KG + k / 16]));
+                        ag[r] += raon_qdot<16>(bg + r * KW + k / 2, xt, raon_e4m3(cg[r * KG + k / 16]));
+                    }
+                }
+                const float beta = prm[0], linear_beta = prm[1];
+                for (int r = 0; r < R; ++r) {
+                    const float u = simd_sum(au[r]);
+                    const float g = simd_sum(ag[r]);
+                    if (lane == 0) {
+                        float uv, gv;
+                        if (is_shared) {
+                            uv = (float)(bfloat16_t)((float)(bfloat16_t)u * sgu[0]);
+                            gv = (float)(bfloat16_t)((float)(bfloat16_t)g * sgg[0]);
+                        } else {
+                            uv = (float)(bfloat16_t)(u * (gu[e] / (448.0f * 6.0f)));
+                            gv = (float)(bfloat16_t)(g * (gg[e] / (448.0f * 6.0f)));
+                        }
+                        act[(size_t)z * I + row0 + r] = (bfloat16_t)(beta * metal::precise::tanh(gv / beta)
+                            * raon_sigmoid(gv) * (linear_beta * metal::precise::tanh(uv / linear_beta)));
+                    }
+                }
+            """,
+        header: header)
+
+    /// Each SIMD group computes `R` output rows over all experts and sums them with the routing
+    /// weights and the shared expert.
+    private static let downKernel = MLXFast.metalKernel(
+        name: "raon1_moe_down_combine",
+        inputNames: ["act", "logits", "bias", "prm", "wd", "sd", "gd", "swd", "ssd", "sgd"],
+        outputNames: ["y"],
+        source: """
+                constexpr int SLOTS = TOPK + (HAS_SHARED ? 1 : 0);
+                constexpr int BLK = 256;
+                constexpr int NIT = (I - BLK + BLK - 1) / BLK;
+                constexpr int KT = NIT * BLK;
+                constexpr int KW = I / 2;
+                constexpr int KG = I / 16;
+                const uint lane = thread_index_in_simdgroup;
+                const uint group = simdgroup_index_in_threadgroup;
+                const uint n = threadgroup_position_in_grid.z;
+                const int row0 = (threadgroup_position_in_grid.y * NSG + group) * R;
+                const int tail = metal::clamp(I - KT - (int)lane * 8, 0, 8);
+                threadgroup uint chosen[TOPK];
+                threadgroup float route_w[TOPK];
+                if (group == 0)
+                    raon_select<E, TOPK, RENORM>(logits + n * E, bias, prm[2], lane, chosen, route_w);
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                float total[R] = {0}, shared_out[R] = {0};
+                for (int slot = 0; slot < SLOTS; ++slot) {
+                    const bool is_shared = HAS_SHARED && slot == TOPK;
+                    const uint e = is_shared ? 0 : chosen[slot];
+                    const device uint8_t* wb = (is_shared ? (const device uint8_t*)swd
+                        : (const device uint8_t*)wd + (size_t)e * H * KW) + row0 * KW + lane * 4;
+                    const device uint8_t* sb = (is_shared ? ssd : sd + (size_t)e * H * KG)
+                        + row0 * KG + lane / 2;
+                    const device bfloat16_t* xr = act + ((size_t)n * SLOTS + slot) * I + lane * 8;
+                    float xt[NIT + 1][8];
+                    for (int it = 0; it < NIT; ++it)
+                        for (int i = 0; i < 8; ++i) xt[it][i] = xr[it * BLK + i];
+                    for (int i = 0; i < 8; ++i) xt[NIT][i] = i < tail ? (float)xr[KT + i] : 0.0f;
+                    for (int r = 0; r < R; ++r) {
+                        float acc = 0.0f;
+                        for (int it = 0; it < NIT; ++it)
+                            acc += raon_qdot<8>(wb + r * KW + it * (BLK / 2), xt[it],
+                                raon_e4m3(sb[r * KG + it * (BLK / 16)]));
+                        if (tail > 0)
+                            acc += raon_qdot<8>(wb + r * KW + NIT * (BLK / 2), xt[NIT],
+                                raon_e4m3(sb[r * KG + NIT * (BLK / 16)]));
+                        const float v = simd_sum(acc);
+                        if (is_shared) {
+                            shared_out[r] = (float)(bfloat16_t)((float)(bfloat16_t)v * sgd[0]);
+                        } else {
+                            total[r] += (float)(bfloat16_t)(v * (gd[e] / (448.0f * 6.0f)))
+                                * route_w[slot];
+                        }
+                    }
+                }
+                if (lane == 0) {
+                    for (int r = 0; r < R; ++r)
+                        y[(size_t)n * H + row0 + r] = (bfloat16_t)((float)(bfloat16_t)total[r] + shared_out[r]);
+                }
+            """,
+        header: header)
+}

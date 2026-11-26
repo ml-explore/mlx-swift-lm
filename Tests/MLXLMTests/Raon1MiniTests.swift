@@ -244,47 +244,92 @@ struct Raon1MiniTests {
         #expect(Self.relativeDrift(after, prepared) < 1e-2)
     }
 
+    @Test("The MoE decode kernels match the routed and shared expert operations")
+    func moeKernelsMatchOperations() throws {
+        let config = try Self.configuration(hidden: 512, experts: 32, quantized: true)
+        let moe = withRandomState(MLXRandom.RandomState(seed: 20)) {
+            Raon1MoE(
+                config, steered: false, arithmetic: Raon1Arithmetic(config),
+                linear: { _, input, output in Self.scaledLinear(input: input, output: output) })
+        }
+        withRandomState(MLXRandom.RandomState(seed: 21)) {
+            var parameters = [String: MLXArray]()
+            for name in ["up_proj", "gate_proj", "down_proj"] {
+                let shape = name == "down_proj" ? [32, 512, 64] : [32, 64, 512]
+                let (weight, scales, _) = MLX.quantized(
+                    MLXRandom.normal(shape), groupSize: 16, bits: 4, mode: .nvfp4)
+                parameters["switch_mlp.\(name).weight"] = weight
+                parameters["switch_mlp.\(name).scales"] = scales
+                parameters["switch_mlp.\(name).global_scale"] =
+                    MLXRandom.uniform(low: 1000, high: 3000, [32])
+            }
+            parameters["gate.weight"] = MLXRandom.normal([32, 512]) * 0.05
+            parameters["gate.e_score_correction_bias"] = MLXRandom.normal([32]) * 0.01
+            moe.update(parameters: ModuleParameters.unflattened(parameters))
+        }
+        let x = withRandomState(MLXRandom.RandomState(seed: 22)) {
+            MLXRandom.normal([2, 1, 512]).asType(.bfloat16)
+        }
+
+        moe.train(false)
+        let kernels = moe(x, effort: 0)
+        moe.train(true)
+        let operations = moe(x, effort: 0)
+
+        #expect(Self.relativeDrift(kernels, operations) < 1e-2)
+    }
+
     // MARK: - Helpers
 
     private static func configuration(
-        gateLowerBound: String = "-5.0", mlaLayers: String = "[4]"
+        gateLowerBound: String = "-5.0", mlaLayers: String = "[4]", hidden: Int = 256,
+        experts: Int = 8, vocabulary: Int = 64, quantized: Bool = false
     ) throws -> Raon1MiniConfiguration {
         try JSONDecoder().decode(
             Raon1MiniConfiguration.self,
-            from: Data(json(gateLowerBound: gateLowerBound, mlaLayers: mlaLayers).utf8))
+            from: Data(
+                json(
+                    gateLowerBound: gateLowerBound, mlaLayers: mlaLayers, hidden: hidden,
+                    experts: experts, vocabulary: vocabulary, quantized: quantized
+                ).utf8))
     }
 
-    private static func json(gateLowerBound: String = "-5.0", mlaLayers: String = "[4]") -> String {
-        """
-        {
-          "model_type": "raon1_mini",
-          "hidden_size": 256,
-          "num_hidden_layers": 4,
-          "num_attention_heads": 2,
-          "head_dim": 128,
-          "vocab_size": 64,
-          "intermediate_size": 128,
-          "num_experts": 8,
-          "num_experts_per_token": 2,
-          "moe_intermediate_size": 64,
-          "num_shared_experts": 1,
-          "first_k_dense_replace": 1,
-          "q_lora_rank": 32,
-          "kv_lora_rank": 64,
-          "qk_nope_head_dim": 128,
-          "qk_rope_head_dim": 64,
-          "v_head_dim": 128,
-          "rda_config": {
-            "num_heads": 2, "head_dim": 128, "conv_kernel_size": 4,
-            "full_rank_gate": true, "gate_lower_bound": \(gateLowerBound),
-            "rda_layers": [1, 2, 3], "mla_layers": \(mlaLayers)
-          },
-          "reasoning_effort_steering": {
-            "alpha": {"none": 0, "high": 0.05, "max": 0}, "default": "high", "layers": [2]
-          },
-          "tie_word_embeddings": false
-        }
-        """
+    private static func json(
+        gateLowerBound: String = "-5.0", mlaLayers: String = "[4]", hidden: Int = 256,
+        experts: Int = 8, vocabulary: Int = 64, quantized: Bool = false
+    ) -> String {
+        let quantization =
+            quantized ? #""quantization": {"group_size": 16, "bits": 4, "mode": "nvfp4"},"# : ""
+        return """
+            {
+              "model_type": "raon1_mini",\(quantization)
+              "hidden_size": \(hidden),
+              "num_hidden_layers": 4,
+              "num_attention_heads": 2,
+              "head_dim": 128,
+              "vocab_size": \(vocabulary),
+              "intermediate_size": 128,
+              "num_experts": \(experts),
+              "num_experts_per_token": 2,
+              "moe_intermediate_size": 64,
+              "num_shared_experts": 1,
+              "first_k_dense_replace": 1,
+              "q_lora_rank": 32,
+              "kv_lora_rank": 64,
+              "qk_nope_head_dim": 128,
+              "qk_rope_head_dim": 64,
+              "v_head_dim": 128,
+              "rda_config": {
+                "num_heads": 2, "head_dim": 128, "conv_kernel_size": 4,
+                "full_rank_gate": true, "gate_lower_bound": \(gateLowerBound),
+                "rda_layers": [1, 2, 3], "mla_layers": \(mlaLayers)
+              },
+              "reasoning_effort_steering": {
+                "alpha": {"none": 0, "high": 0.05, "max": 0}, "default": "high", "layers": [2]
+              },
+              "tie_word_embeddings": false
+            }
+            """
     }
 
     /// A tiny bfloat16 model with random parameters, prepared for inference as the factory does.
