@@ -56,6 +56,9 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     /// its first proposal. Qwen's private decoder cache requires this.
     var requiresPromptPrefill: Bool { get }
 
+    /// Whether the compatible target can collect prompt features in chunks.
+    var supportsChunkedPromptPrefill: Bool { get }
+
     /// Whether this drafter is currently supported only for greedy decoding.
     /// This keeps stochastic generation on the ordinary target path until a
     /// probability-ratio acceptance sampler is available.
@@ -131,6 +134,7 @@ extension MTPDrafterModel {
     public var maximumBlockSize: Int? { nil }
     public var requiresSharedTargetKV: Bool { true }
     public var requiresPromptPrefill: Bool { false }
+    public var supportsChunkedPromptPrefill: Bool { false }
     public var requiresGreedySampling: Bool { false }
     public var targetLayerIds: [Int]? { nil }
     public var targetContextLength: Int? { nil }

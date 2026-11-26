@@ -1625,6 +1625,11 @@ public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding,
         let context = min(total, state?[mtpTargetContextLengthKey] ?? total)
         let effort = state?[reasoningEffortKey]
 
+        var prefill = prefill
+        if total <= prefill.resolvedStepSize() {
+            prefill.chunking = .unchunked
+        }
+
         var features = [MLXArray]()
         let processed = try prefill.forEachChunk(total: total) { range in
             // Chunks before the drafter's context need no features.

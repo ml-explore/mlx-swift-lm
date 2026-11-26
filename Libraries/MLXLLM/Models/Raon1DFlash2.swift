@@ -294,6 +294,7 @@ public final class Raon1DFlash2DraftModel: Module, ResumableMTPDrafterModel {
     public var maximumBlockSize: Int? { configuration.dflash.blockSize }
     public let requiresSharedTargetKV = false
     public let requiresPromptPrefill = true
+    public let supportsChunkedPromptPrefill = true
     public let requiresGreedySampling = true
     public var targetLayerIds: [Int]? { configuration.dflash.targetLayerIDs }
     public var targetContextLength: Int? { configuration.dflash.window }

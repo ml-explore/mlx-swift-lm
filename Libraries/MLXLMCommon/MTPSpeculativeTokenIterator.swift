@@ -292,11 +292,11 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         let prefillStart = Date.timeIntervalSinceReferenceDate
         var mtpPrefill = parameters.prefill
-        if drafter.requiresPromptPrefill || continuationToResume != nil {
-            // The target must expose one hidden row per prompt token so a
-            // private MTP cache can be filled or resumed over the suffix.
-            // Until model-specific chunk aggregation is available, use the
-            // reference single-forward computation for this architecture.
+        if !drafter.supportsChunkedPromptPrefill,
+            drafter.requiresPromptPrefill || continuationToResume != nil
+        {
+            // A private MTP cache needs the target features for its prompt or suffix.
+            // Use one forward when the target cannot collect those features across chunks.
             mtpPrefill.stepSize = Int.max
             mtpPrefill.chunking = .unchunked
         }

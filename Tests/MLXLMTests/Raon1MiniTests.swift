@@ -4,6 +4,7 @@ import Foundation
 import MLX
 import MLXNN
 import Testing
+import os
 
 @testable import MLXLLM
 @testable import MLXLMCommon
@@ -244,8 +245,11 @@ struct Raon1MiniTests {
         #expect(Self.relativeDrift(actual, expected) < 1e-2)
     }
 
-    @Test("DFlash2 rejects a suffix and drops undelivered tokens before the next turn")
-    func dflashRewindsAfterEarlyStop() throws {
+    @Test(
+        "DFlash2 rejects a suffix and drops undelivered tokens before the next turn",
+        arguments: [2, 512]
+    )
+    func dflashRewindsAfterEarlyStop(prefillStepSize: Int) throws {
         let model = try Self.preparedModel()
         let draftConfiguration = Raon1DFlash2Configuration(
             architectures: ["DFlash2DraftModel"], hiddenSize: 256, hiddenLayers: 1,
@@ -264,12 +268,18 @@ struct Raon1MiniTests {
             modules: ModuleChildren.unflattened(["head": proposal]), verify: .none)
 
         let prompt: [Int32] = [1, 2, 3, 4]
+        var parameters = GenerateParameters(maxTokens: 32, temperature: 0)
+        parameters.prefill.stepSize = prefillStepSize
+        let progress = OSAllocatedUnfairLock(initialState: [Int]())
+        parameters.prefill.progress = { processed, _ in
+            progress.withLock { $0.append(processed) }
+        }
         let cache = try model.newCache(parameters: nil)
         var iterator = try MTPSpeculativeTokenIterator(
             input: LMInput(tokens: MLXArray(prompt)), mainModel: model, drafter: drafter,
-            mainCache: cache, parameters: GenerateParameters(maxTokens: 32, temperature: 0),
-            blockSize: 8,
+            mainCache: cache, parameters: parameters, blockSize: 8,
             components: GenerationComponents().appendingLogitProcessor { DraftAcceptance() })
+        #expect(progress.withLock { $0 } == (prefillStepSize == 2 ? [2, 3, 4] : [4]))
         #expect(iterator.next() == 7)
         #expect(iterator.next() == 7)
         #expect(iterator.proposedCount == 7)
