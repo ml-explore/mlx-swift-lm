@@ -98,6 +98,10 @@ for result in response.results {
 Document identifiers must be unique within a request. Metadata is carried through unchanged
 and does not affect scoring.
 
+Qwen3 and Jina reranker v3 read the request `instruction`; encoder rerankers ignore it and
+score the query alone. `isInstructionAware` reports which applies to a loaded reranker, so an
+application can place context in the instruction and know whether the model sees it.
+
 Each response declares its score semantics through `scoreKind`. Qwen and single-logit BGE
 rerankers return model-specific relevance scores normalized to `0...1`, while Jina reranker
 v3 returns cosine similarities. A normalized relevance score is not necessarily a calibrated

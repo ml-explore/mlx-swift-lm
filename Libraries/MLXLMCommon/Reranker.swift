@@ -227,6 +227,13 @@ public protocol Reranker: Sendable {
     /// Semantic meaning and numeric range of returned scores.
     var scoreKind: RerankScoreKind { get }
 
+    /// Whether the model reads the `instruction` of a request.
+    ///
+    /// An instruction-aware model scores each document against the instruction and the query.
+    /// Other models ignore the instruction and score the query alone, so context placed in the
+    /// instruction does not change their scores.
+    var isInstructionAware: Bool { get }
+
     /// Score documents while preserving their original order.
     func scores(
         query: String,
@@ -237,6 +244,9 @@ public protocol Reranker: Sendable {
 }
 
 extension Reranker {
+    /// A reranker that does not declare otherwise ignores the instruction.
+    public var isInstructionAware: Bool { false }
+
     /// Score documents without changing their original order.
     public func scores(
         query: String,
@@ -363,6 +373,9 @@ public final class RerankerContainer: Reranker, Sendable {
 
     /// Semantic meaning and numeric range of returned scores.
     public let scoreKind: RerankScoreKind
+
+    /// Whether the scoring operation reads the `instruction` of a request.
+    public let isInstructionAware: Bool
     private let scoreOperation: ScoreOperation
     private let memoryReporter: (any ModelMemoryReporting)?
 
@@ -370,14 +383,17 @@ public final class RerankerContainer: Reranker, Sendable {
     ///
     /// The operation must return one finite score per document in original input order.
     /// Pass the container that owns the model as `memoryReporter` to support ``memory()``.
+    /// Set `isInstructionAware` when the operation uses its `instruction` argument.
     public init(
         modelID: String,
         scoreKind: RerankScoreKind,
+        isInstructionAware: Bool = false,
         memoryReporter: (any ModelMemoryReporting)? = nil,
         scoreOperation: @escaping ScoreOperation
     ) {
         self.modelID = modelID
         self.scoreKind = scoreKind
+        self.isInstructionAware = isInstructionAware
         self.memoryReporter = memoryReporter
         self.scoreOperation = scoreOperation
     }
