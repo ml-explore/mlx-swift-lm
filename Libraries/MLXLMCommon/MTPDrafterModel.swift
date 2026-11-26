@@ -288,7 +288,32 @@ package func finalizeShiftedMTPDrafterState(
     state.seedToken = nil
     state.seedHidden = nil
     return state.nextPosition == targetProcessedTokenCount - 1
-        && state.cache.allSatisfy { $0.offset == state.nextPosition }
+        && mtpDrafterCacheIsAligned(state)
+}
+
+/// Whether every leaf of the drafter's cache sits at `state.nextPosition`.
+///
+/// A `CacheList` reports no offset of its own, so this reads its children.
+package func mtpDrafterCacheIsAligned(_ state: MTPDrafterState) -> Bool {
+    KVCacheTree.leaves(in: state.cache).allSatisfy { $0.cache.offset == state.nextPosition }
+}
+
+/// Run a drafter head over `count` positions in chunks, evaluating `cache` between them,
+/// and return the last chunk's output.
+///
+/// Chunks stay under 1024 queries: on NAX GPUs, MLX 0.33 fails to build the attention
+/// kernel for head dimension 256 at 1024 queries or more.
+package func mtpForwardInChunks<Output>(
+    count: Int, cache: [KVCache], stepSize: Int = PrefillParameters.defaultStepSize,
+    _ forward: (Range<Int>) -> Output
+) -> Output {
+    var start = 0
+    while count - start > stepSize {
+        _ = forward(start ..< (start + stepSize))
+        asyncEval(cache)
+        start += stepSize
+    }
+    return forward(start ..< count)
 }
 
 /// Iterator-owned MTP continuation carried atomically with a ChatSession's
@@ -452,6 +477,13 @@ public let mtpCacheCheckpointIndexKey =
 /// a guessed bound. A target outside this package cannot satisfy that contract without it.
 public let mtpSharedKVSourceIndicesKey =
     LMOutput.Key<[String: Int]>("mtp.sharedKVSourceIndices")
+
+/// A target that can prefill an MTP prompt in chunks.
+///
+/// Given ``mtpEmitFlagKey``, its `prepare` evaluates the whole prompt and returns `.logits` for
+/// the last position, with one ``mtpLastHiddenStatesKey`` row per prompt token. The MTP
+/// iterator then keeps the caller's prefill chunking, instead of one forward over the prompt.
+public protocol MTPChunkedPrefillModel: LanguageModel {}
 
 // MARK: - Iterator stats surface
 

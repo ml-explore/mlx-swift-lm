@@ -541,6 +541,142 @@ struct Qwen35MTPMetalTests {
         #expect(state.cache.allSatisfy { $0.offset == 5 })
     }
 
+    /// A chunked MTP prefill returns the hidden rows and last logits of one forward.
+    @Test
+    func testQwen35TargetsGatherEveryHiddenRowAcrossChunks() throws {
+        let tokens = (MLXArray(Int32(0) ..< 13) * 5) % 16
+        var emit = LMOutput.State()
+        emit[mtpEmitFlagKey] = true
+        let chunked = PrefillParameters(stepSize: 5)
+
+        let text = MLXLLM.Qwen35TextModel(
+            try JSONDecoder().decode(
+                MLXLLM.Qwen35TextConfiguration.self,
+                from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8)))
+        let textReference = text(
+            LMInput.Text(tokens: tokens.reshaped(1, -1)),
+            cache: try text.newCache(parameters: nil as GenerateParameters?), state: emit)
+        try expectSamePrefill(
+            try text.prepare(
+                LMInput(tokens: tokens),
+                cache: try text.newCache(parameters: nil as GenerateParameters?), state: emit,
+                prefill: chunked),
+            textReference)
+
+        let vlm = MLXVLM.Qwen35(
+            try JSONDecoder().decode(
+                MLXVLM.Qwen35Configuration.self,
+                from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8)))
+        let whole = try vlm.prepare(
+            LMInput(tokens: tokens),
+            cache: try vlm.newCache(parameters: nil as GenerateParameters?), state: emit,
+            prefill: PrefillParameters())
+        guard case .logits(let vlmReference) = whole else {
+            Issue.record("a one-window VLM prefill returns logits")
+            return
+        }
+        try expectSamePrefill(
+            try vlm.prepare(
+                LMInput(tokens: tokens),
+                cache: try vlm.newCache(parameters: nil as GenerateParameters?), state: emit,
+                prefill: chunked),
+            vlmReference)
+    }
+
+    /// The heads prefill a prompt longer than one chunk as one forward would.
+    @Test(arguments: [false, true])
+    func testQwen35HeadsPrefillALongPromptInChunks(vision: Bool) throws {
+        let length = 600
+        let prompt = ((MLXArray(Int32(0) ..< Int32(length)) * 7) % 16).reshaped(1, -1)
+        let hidden = MLXRandom.normal([1, length, 16], key: MLXRandom.key(3))
+        let bonus = MLXArray([Int32(4)])
+        let shifted = concatenated([prompt[0..., 1...], bonus.reshaped(1, 1)], axis: 1)
+        let sampler = GenerateParameters(temperature: 0).sampler()
+
+        var state: MTPDrafterState
+        let referenceCache: [KVCache]
+        let reference: MLXArray
+        if vision {
+            let cfg = try JSONDecoder().decode(
+                MLXVLM.Qwen35Configuration.self,
+                from: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8))
+            let target = MLXVLM.Qwen35(cfg)
+            let drafter = MLXVLM.Qwen35VLMNextNDraftModel(cfg)
+            let deltas = MLXArray([Int32(2)])
+            state = drafter.makeState(parameters: nil)
+            drafter.prepareDrafterState(
+                target: target, promptTokens: prompt, targetHidden: hidden, firstBonus: bonus,
+                positionDeltas: deltas, state: &state, sampler: sampler)
+            referenceCache = drafter.mtp.newCache()
+            reference = drafter.mtp(
+                inputsEmbeds: target.languageModel.model.embedTokens(shifted),
+                hiddenStates: hidden, cache: referenceCache, positionOffset: 0,
+                positionDeltas: deltas)
+        } else {
+            let cfg = try JSONDecoder().decode(
+                MLXLLM.Qwen35TextConfiguration.self,
+                from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+            let target = MLXLLM.Qwen35TextModel(cfg)
+            let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
+            state = drafter.makeState(parameters: nil)
+            drafter.prepareDrafterState(
+                target: target, promptTokens: prompt, targetHidden: hidden, firstBonus: bonus,
+                positionDeltas: nil, state: &state, sampler: sampler)
+            referenceCache = drafter.mtp.newCache()
+            reference = drafter.mtp(
+                inputsEmbeds: target.model.embedTokens(shifted), hiddenStates: hidden,
+                cache: referenceCache, positionOffset: 0)
+        }
+
+        #expect(state.nextPosition == length)
+        try expectSameHeadState(state, seed: reference, cache: referenceCache)
+    }
+
+    /// Resume runs a suffix longer than one chunk as one forward would.
+    @Test
+    func testQwen35TextDrafterResumesALongSuffixInChunks() throws {
+        let cfg = try JSONDecoder().decode(
+            MLXLLM.Qwen35TextConfiguration.self,
+            from: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8))
+        let target = MLXLLM.Qwen35TextModel(cfg)
+        let drafter = MLXLLM.Qwen35MTPDraftModel(cfg)
+        let sampler = GenerateParameters(temperature: 0).sampler()
+        let promptHidden = MLXRandom.normal([1, 3, 16], key: MLXRandom.key(4))
+        let boundary = promptHidden[0..., (-1)..., 0...]
+        func finalized() -> MTPDrafterState {
+            var state = drafter.makeState(parameters: nil)
+            drafter.prepareDrafterState(
+                target: target, promptTokens: MLXArray([Int32(1), 2, 3]).reshaped(1, 3),
+                targetHidden: promptHidden, firstBonus: MLXArray([Int32(4)]),
+                positionDeltas: nil, state: &state, sampler: sampler)
+            _ = drafter.finalizeDrafterState(
+                target: target, targetBoundaryHidden: boundary, targetProcessedTokenCount: 3,
+                discardedTargetTokens: 0, positionDeltas: nil, state: &state)
+            return state
+        }
+
+        let length = 600
+        let suffix = ((MLXArray(Int32(0) ..< Int32(length)) * 3) % 16).reshaped(1, -1)
+        let suffixHidden = MLXRandom.normal([1, length, 16], key: MLXRandom.key(5))
+        let bonus = MLXArray([Int32(9)])
+        var state = finalized()
+        #expect(state.nextPosition == 2)
+        #expect(
+            drafter.resumeDrafterState(
+                target: target, suffixTokens: suffix, suffixTargetHidden: suffixHidden,
+                targetBoundaryHidden: boundary, firstBonus: bonus, positionDeltas: nil,
+                state: &state, sampler: sampler))
+        #expect(state.nextPosition == 2 + length + 1)
+
+        let referenceCache = finalized().cache
+        let reference = drafter.mtp(
+            inputsEmbeds: target.model.embedTokens(
+                concatenated([suffix, bonus.reshaped(1, 1)], axis: 1)),
+            hiddenStates: concatenated([boundary, suffixHidden], axis: 1),
+            cache: referenceCache, positionOffset: 2)
+        try expectSameHeadState(state, seed: reference, cache: referenceCache)
+    }
+
     @Test
     func testQwen35TextChatSessionResumesActualDrafterState() async throws {
         let cfg = try JSONDecoder().decode(
@@ -776,6 +912,43 @@ private struct ReversibleQwenMTPInputProcessor: UserInputProcessor {
                     messages: messages,
                     tools: input.tools,
                     additionalContext: input.additionalContext)))
+    }
+}
+
+private let chunkTolerance = MatmulPrecision.tolerance(float32: 1e-4, reduced: 2e-2)
+
+private func expectSamePrefill(_ result: PrepareResult, _ reference: LMOutput) throws {
+    guard case .logits(let output) = result else {
+        Issue.record("a chunked MTP prefill returns logits")
+        return
+    }
+    let hidden = try #require(output.state?[mtpLastHiddenStatesKey])
+    let expected = try #require(reference.state?[mtpLastHiddenStatesKey])
+    #expect(hidden.shape == expected.shape)
+    #expect(allClose(hidden, expected, rtol: chunkTolerance, atol: chunkTolerance).item(Bool.self))
+    #expect(
+        allClose(
+            output.logits[0..., -1, 0...], reference.logits[0..., -1, 0...],
+            rtol: chunkTolerance, atol: chunkTolerance
+        ).item(Bool.self))
+}
+
+private func expectSameHeadState(
+    _ state: MTPDrafterState, seed reference: MLXArray, cache referenceCache: [KVCache]
+) throws {
+    let seed = try #require(state.seedHidden)
+    #expect(
+        allClose(
+            seed, reference[0..., (-1)..., 0...], rtol: chunkTolerance, atol: chunkTolerance
+        ).item(Bool.self))
+    let actual = state.cache.flatMap(\.state)
+    let expected = referenceCache.flatMap(\.state)
+    #expect(actual.count == expected.count)
+    for (slot, (a, e)) in zip(actual, expected).enumerated() {
+        #expect(a.shape == e.shape, "slot \(slot)")
+        #expect(
+            allClose(a, e, rtol: chunkTolerance, atol: chunkTolerance).item(Bool.self),
+            "slot \(slot)")
     }
 }
 
