@@ -288,17 +288,44 @@ final class KVCacheCheckpointTests: XCTestCase {
         let checkpoint = try XCTUnwrap(live.checkpoint())
         let fork = live.copy()
         let forkCheckpoint = live.copyCheckpoint(checkpoint, to: fork)
-        write(6 ..< 12, into: fork)
-
         XCTAssertEqual(checkpoint.retainedBytes, 0)
-        XCTAssertEqual(forkCheckpoint.retainedBytes, 2 * 6 * MemoryLayout<Float>.size)
-        XCTAssertTrue(fork.restore(forkCheckpoint))
-        write(6 ..< 12, into: live)
-        XCTAssertEqual(checkpoint.retainedBytes, 2 * 6 * MemoryLayout<Float>.size)
+        XCTAssertEqual(forkCheckpoint.retainedBytes, 0)
+
+        let prefixBytes = 2 * 6 * MemoryLayout<Float>.size
+        write(6 ..< 12, into: fork)
+        XCTAssertEqual(checkpoint.retainedBytes, 0)
+        XCTAssertEqual(forkCheckpoint.retainedBytes, prefixBytes)
+
+        write(30 ..< 36, into: live)
+        XCTAssertEqual(checkpoint.retainedBytes, prefixBytes)
+        XCTAssertEqual(forkCheckpoint.retainedBytes, prefixBytes)
         XCTAssertTrue(live.restore(checkpoint))
+        XCTAssertTrue(fork.restore(forkCheckpoint))
         let reference = KVCacheStorage([try requested(maxSize: 8)], plan: .disabled)
         write(0 ..< 6, into: reference)
         assertSameContents(live, reference)
+        assertSameNextAttention(fork, reference)
+    }
+
+    func testForkOfMaterializedCheckpointReusesTheSnapshot() throws {
+        let live = KVCacheStorage([try requested(maxSize: 8)], plan: .disabled)
+        write(0 ..< 6, into: live)
+        let checkpoint = try XCTUnwrap(live.checkpoint())
+        write(6 ..< 12, into: live)
+
+        let fork = live.copy()
+        let forkCheckpoint = live.copyCheckpoint(checkpoint, to: fork)
+        let originalArrays = checkpoint.innerState()
+        let forkArrays = forkCheckpoint.innerState()
+        XCTAssertEqual(originalArrays.count, 2)
+        XCTAssertEqual(forkArrays.count, originalArrays.count)
+        for (original, copied) in zip(originalArrays, forkArrays) {
+            XCTAssertTrue(original === copied)
+        }
+
+        XCTAssertTrue(fork.restore(forkCheckpoint))
+        let reference = KVCacheStorage([try requested(maxSize: 8)], plan: .disabled)
+        write(0 ..< 6, into: reference)
         assertSameNextAttention(fork, reference)
     }
 
