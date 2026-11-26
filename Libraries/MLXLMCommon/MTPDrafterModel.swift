@@ -129,6 +129,46 @@ extension MTPDrafterModel {
     public var targetLayerIds: [Int]? { nil }
 }
 
+/// A drafter that ``MTPDrafterTypeRegistry`` creates from `config.json`.
+///
+/// The library's drafters conform, and each module lists them through
+/// ``ModelFactoryTrampoline/drafters()``. Register another architecture with
+/// ``MTPDrafterTypeRegistry/register(_:)``.
+public protocol MTPDrafterArchitecture: MTPDrafterModel {
+    /// The `model_type` values of the drafter's checkpoints.
+    static var modelTypes: [String] { get }
+
+    /// The registry that creates the drafter. The default is `.shared`.
+    static var registry: MTPDrafterTypeRegistry.Kind { get }
+
+    /// The `architectures` entry of the drafter's checkpoints, when other
+    /// architectures share its `model_type`. The default, `nil`, accepts every
+    /// checkpoint of its model types.
+    static var architecture: String? { get }
+
+    /// Creates the drafter from the `config.json` of a `modelType` checkpoint.
+    init(modelType: String, configuration: Data) throws
+}
+
+extension MTPDrafterArchitecture {
+    public static var registry: MTPDrafterTypeRegistry.Kind { .shared }
+
+    public static var architecture: String? { nil }
+
+    /// Whether the checkpoint with `configuration` is this drafter's.
+    static func reads(_ configuration: Data) -> Bool {
+        guard let architecture else { return true }
+        let checkpoint = try? JSONDecoder.json5().decode(
+            CheckpointArchitectures.self, from: configuration)
+        return checkpoint?.architectures?.contains(architecture) == true
+    }
+}
+
+/// The `config.json` field that tells drafters with a shared `model_type` apart.
+private struct CheckpointArchitectures: Decodable {
+    let architectures: [String]?
+}
+
 /// Target-side capability for rewinding an in-place speculative verify pass.
 ///
 /// Rollback belongs to the target/cache implementation, not to the drafter.

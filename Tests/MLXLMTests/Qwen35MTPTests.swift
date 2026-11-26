@@ -795,14 +795,10 @@ private func collectQwenChatDetails(
 struct Qwen35MTPRegistrationTests {
     @Test
     func registrationsCreateTextAndVLMDrafters() async throws {
-        await MLXLLM.Qwen35TextMTPRegistration.register()
-
         let textModel = try await MTPDrafterTypeRegistry.shared.createModel(
             configuration: Data(qwen35TextConfigJSON(mtpLayers: 1).utf8),
             modelType: "qwen3_5_text")
         #expect(textModel is MLXLLM.Qwen35MTPDraftModel)
-
-        await MLXVLM.Qwen35VLMMTPRegistration.register()
 
         let wrappedTextModel = try await MTPDrafterTypeRegistry.shared.createModel(
             configuration: Data(qwen35WrappedTextConfigJSON(modelType: "qwen3_5").utf8),
@@ -843,11 +839,24 @@ struct Qwen35MTPRegistrationTests {
         #expect(!standaloneVLM.isCompatible(with: textTarget))
     }
 
+    /// A standalone checkpoint stores its norms converted, so an `mtp.` tensor without norm
+    /// metadata keeps its value.
+    @Test(
+        arguments: [MTPDrafterTypeRegistry.Kind.shared, .visionLanguage],
+        ["qwen3_5_mtp", "qwen3_8_mtp"])
+    func standaloneDraftersKeepTheirConvertedNorms(
+        registry: MTPDrafterTypeRegistry.Kind, modelType: String
+    ) async throws {
+        let drafter = try await MTPDrafterTypeRegistry[registry].createModel(
+            configuration: Data(qwen35StandaloneMTPConfigJSON().utf8), modelType: modelType)
+        let checkpoint = try drafter.prepareCheckpoint(
+            ModelCheckpoint(weights: ["mtp.norm.weight": MLXArray.ones([64])]))
+        let norm = try #require(checkpoint.weights["mtp.norm.weight"])
+        #expect(norm.asArray(Float.self) == Array(repeating: 1, count: 64))
+    }
+
     @Test
     func registrationsAreIsolatedByTargetArchitecture() async throws {
-        await MLXVLM.Qwen35VLMMTPRegistration.register()
-        await MLXLLM.Qwen35TextMTPRegistration.register()
-
         let vlmModel = try await MTPDrafterTypeRegistry.visionLanguage.createModel(
             configuration: Data(qwen35VLMConfigJSON(mtpLayers: 1).utf8),
             modelType: "qwen3_5")
@@ -1103,8 +1112,6 @@ struct Qwen35CheckpointLoadingTests {
 
     @Test(arguments: [false, true], [false, true])
     func registeredFactoriesLoadQwen38Components(vision: Bool, standalone: Bool) async throws {
-        await Qwen35TextMTPRegistration.register()
-        await Qwen35VLMMTPRegistration.register()
         let fixture = try await makeFixture(
             vision: vision, standalone: standalone,
             prefix: standalone ? "" : "language_model.mtp.", bits: 4, family: "qwen3_8")
@@ -1126,7 +1133,6 @@ struct Qwen35CheckpointLoadingTests {
 
     @Test(arguments: ["qwen3_5", "qwen3_8"])
     func standaloneVLMRegistrationUsesOuterModelType(family: String) async throws {
-        await Qwen35VLMMTPRegistration.register()
         let fixture = try await makeFixture(
             vision: true, standalone: true, bits: 4, family: family)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }

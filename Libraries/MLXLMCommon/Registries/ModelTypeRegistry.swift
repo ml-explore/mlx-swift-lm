@@ -23,6 +23,11 @@ public actor ModelTypeRegistry<T> {
         }
     }
 
+    /// Creates a registry with the model types of `drafters`.
+    init(drafters: [any MTPDrafterArchitecture.Type]) where T == any MTPDrafterModel {
+        self.creators = drafters.reduce(into: [:]) { Self.add($1, to: &$0) }
+    }
+
     /// Add a new model to the type registry.
     public func registerModelType(
         _ type: String, creator: @escaping (Data) throws -> T
@@ -38,6 +43,22 @@ public actor ModelTypeRegistry<T> {
         creator: @escaping (Data) throws -> T
     ) {
         creators[type, default: []].append(CreatorEntry(matches: matches, create: creator))
+    }
+
+    /// Adds the model types of `drafter`.
+    func register(_ drafter: any MTPDrafterArchitecture.Type) where T == any MTPDrafterModel {
+        Self.add(drafter, to: &creators)
+    }
+
+    private static func add(
+        _ drafter: any MTPDrafterArchitecture.Type, to creators: inout [String: [CreatorEntry]]
+    ) where T == any MTPDrafterModel {
+        for modelType in drafter.modelTypes {
+            creators[modelType, default: []].append(
+                CreatorEntry(
+                    matches: { drafter.reads($0) },
+                    create: { try drafter.init(modelType: modelType, configuration: $0) }))
+        }
     }
 
     /// Given a `modelType` and configuration data instantiate a new `LanguageModel`.

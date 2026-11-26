@@ -881,4 +881,8 @@ public class TrampolineModelFactory: NSObject, ModelFactoryTrampoline {
     public static func modelFactory() -> (any MLXLMCommon.ModelFactory)? {
         LLMModelFactory.shared
     }
+
+    public static func drafters() -> [any MTPDrafterArchitecture.Type] {
+        [Qwen35MTPDraftModel.self, LFM2DSparkDraftModel.self]
+    }
 }

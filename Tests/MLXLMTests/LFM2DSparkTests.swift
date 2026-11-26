@@ -110,7 +110,6 @@ func lfm2DSparkConfigurationAndCheckpointNamespaceMatchReleasedArchitecture() th
 
 @Test
 func lfm2DSparkRegistrationDisambiguatesTheQwen3ModelType() async throws {
-    await LFM2DSparkRegistration.register()
     let model = try await MTPDrafterTypeRegistry.shared.createModel(
         configuration: Data(tinyLFM2DSparkJSON.utf8), modelType: "qwen3")
 
@@ -338,7 +337,6 @@ func downloadedLFM2DSparkCheckpointLoadsAndGenerates() async throws {
         return
     }
 
-    await LFM2DSparkRegistration.register()
     let targetContext = try await LLMModelFactory.shared.load(
         from: URL(filePath: targetPath, directoryHint: .isDirectory),
         using: DSparkTokenizerLoaderStub())
@@ -403,7 +401,6 @@ func downloadedLFM2DSparkPerformance() async throws {
         return
     }
 
-    await LFM2DSparkRegistration.register()
     let targetContext = try await LLMModelFactory.shared.load(
         from: URL(filePath: targetPath, directoryHint: .isDirectory),
         using: DSparkTokenizerLoaderStub())

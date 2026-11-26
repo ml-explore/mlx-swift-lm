@@ -434,9 +434,6 @@ final class Qwen38Tests: XCTestCase {
     // MARK: - MTP Speculative Decoding Registration Tests
 
     func testQwen38MTPRegistrations() async throws {
-        await Qwen35TextMTPRegistration.register()
-        await Qwen35VLMMTPRegistration.register()
-
         let textData = Data(qwen38TextConfigJSON().utf8)
         let vlmData = Data(qwen38VLMConfigJSON().utf8)
 

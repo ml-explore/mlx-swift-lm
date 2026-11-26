@@ -39,7 +39,6 @@ extension ModelLoadingSuite.MTPGreedyVerificationIntegrationTests {
         ) {
             let target = try await LLMModelFactory.shared.load(
                 from: targetDirectory, using: tokenizerLoader)
-            await Qwen35TextMTPRegistration.register()
             let drafter = try await MTPDrafterModelFactory.shared.load(
                 from: drafterDirectory, using: tokenizerLoader)
             return (target, drafter)

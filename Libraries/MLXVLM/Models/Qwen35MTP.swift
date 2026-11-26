@@ -403,3 +403,52 @@ extension Qwen35VLMNextNDraftModel: ModelConversionMetadataProvider {
         [Qwen35CheckpointPolicy.normMetadataKey: "scale"]
     }
 }
+
+/// Standalone Qwen MTP checkpoints ship an empty `vision_config` for text and
+/// multimodal targets alike. The multimodal drafter therefore lives in its own
+/// registry, so neither configuration shape nor registration order selects it.
+extension Qwen35VLMNextNDraftModel: MTPDrafterArchitecture {
+    /// How a checkpoint stores the drafter.
+    private enum Layout {
+        /// The head inside a target checkpoint.
+        case embedded
+        /// A standalone drafter, with its norms already converted.
+        case standalone
+    }
+
+    private static let layouts: [String: Layout] = [
+        "qwen3_5": .embedded, "qwen3_5_moe": .embedded,
+        "qwen3_8": .embedded, "qwen3_8_moe": .embedded,
+        "qwen3_5_mtp": .standalone, "qwen3_8_mtp": .standalone,
+    ]
+
+    public static var modelTypes: [String] { layouts.keys.sorted() }
+
+    public static var registry: MTPDrafterTypeRegistry.Kind { .visionLanguage }
+
+    public convenience init(modelType: String, configuration: Data) throws {
+        let checkpoint = try JSONDecoder.json5().decode(
+            Qwen35MTPCheckpointConfiguration.self, from: configuration)
+        switch Self.layouts[modelType] {
+        case .embedded:
+            self.init(checkpoint.textConfiguration)
+        case .standalone:
+            self.init(
+                checkpoint.textConfiguration,
+                checkpointPolicy: .init(modelType: checkpoint.modelType, preconvertedNorms: true))
+        case nil:
+            throw ModelFactoryError.unsupportedModelType(modelType)
+        }
+    }
+}
+
+/// The fields a drafter reads from a Qwen3.5 checkpoint, whatever its `vision_config`.
+private struct Qwen35MTPCheckpointConfiguration: Decodable {
+    let modelType: String
+    let textConfiguration: Qwen35Configuration.TextConfiguration
+
+    enum CodingKeys: String, CodingKey {
+        case modelType = "model_type"
+        case textConfiguration = "text_config"
+    }
+}

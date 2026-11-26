@@ -655,4 +655,8 @@ public class TrampolineModelFactory: NSObject, ModelFactoryTrampoline {
     public static func modelFactory() -> (any MLXLMCommon.ModelFactory)? {
         VLMModelFactory.shared
     }
+
+    public static func drafters() -> [any MTPDrafterArchitecture.Type] {
+        [Gemma4AssistantDraftModel.self, Qwen35VLMNextNDraftModel.self]
+    }
 }

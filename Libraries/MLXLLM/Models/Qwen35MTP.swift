@@ -371,3 +371,40 @@ extension Qwen35MTPDraftModel: ModelConversionMetadataProvider {
         [Qwen35CheckpointPolicy.normMetadataKey: "scale"]
     }
 }
+
+extension Qwen35MTPDraftModel: MTPDrafterArchitecture {
+    /// How a checkpoint stores the drafter.
+    private enum Layout {
+        /// A flat text configuration.
+        case text
+        /// The head inside a target checkpoint.
+        case embedded
+        /// A standalone drafter, with its norms already converted.
+        case standalone
+    }
+
+    private static let layouts: [String: Layout] = [
+        "qwen3_5_text": .text, "qwen3_8_text": .text,
+        "qwen3_5": .embedded, "qwen3_5_moe": .embedded,
+        "qwen3_8": .embedded, "qwen3_8_moe": .embedded,
+        "qwen3_5_mtp": .standalone, "qwen3_8_mtp": .standalone,
+    ]
+
+    public static var modelTypes: [String] { layouts.keys.sorted() }
+
+    public convenience init(modelType: String, configuration: Data) throws {
+        let decoder = JSONDecoder.json5()
+        switch Self.layouts[modelType] {
+        case .text:
+            self.init(try decoder.decode(Qwen35TextConfiguration.self, from: configuration))
+        case .embedded:
+            self.init(try decoder.decode(Qwen35Configuration.self, from: configuration))
+        case .standalone:
+            self.init(
+                try decoder.decode(Qwen35Configuration.self, from: configuration),
+                preconvertedNorms: true)
+        case nil:
+            throw ModelFactoryError.unsupportedModelType(modelType)
+        }
+    }
+}

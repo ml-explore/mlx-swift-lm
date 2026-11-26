@@ -381,6 +381,8 @@ and already runs on the adapter and quantization paths.
 
 2. Optional: add a `ModelConfiguration` in `LLMRegistry` (also in `MLXLLM/LLMModelFactory.swift`). If that registry exposes a list (e.g., `all()`), include the new configuration there.
 
+3. For a speculative drafter, conform it to `MTPDrafterArchitecture` and list it in `drafters()` of the module's `TrampolineModelFactory`. `MTPDrafterTypeRegistry` starts with these drafters, so apps do not register them.
+
 ## Common pitfalls
 
 - Weight keys do not always match Python attribute names; verify `.safetensors` keys.
