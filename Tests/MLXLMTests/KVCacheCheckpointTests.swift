@@ -282,18 +282,23 @@ final class KVCacheCheckpointTests: XCTestCase {
         assertSameNextAttention(live, reference)
     }
 
-    func testCopiedRequestedCapacityCopiesASharedCheckpoint() throws {
+    func testCopiedRequestedCapacityCopiesAnIndependentCheckpoint() throws {
         let live = KVCacheStorage([try requested(maxSize: 8)], plan: .disabled)
         write(0 ..< 6, into: live)
         let checkpoint = try XCTUnwrap(live.checkpoint())
-        let fork = KVCacheStorage(
-            live.cache.map { $0.copy() }, plan: .disabled, processedTokenCount: 6)
+        let fork = live.copy()
+        let forkCheckpoint = live.copyCheckpoint(checkpoint, to: fork)
         write(6 ..< 12, into: fork)
 
+        XCTAssertEqual(checkpoint.retainedBytes, 0)
+        XCTAssertEqual(forkCheckpoint.retainedBytes, 2 * 6 * MemoryLayout<Float>.size)
+        XCTAssertTrue(fork.restore(forkCheckpoint))
+        write(6 ..< 12, into: live)
         XCTAssertEqual(checkpoint.retainedBytes, 2 * 6 * MemoryLayout<Float>.size)
-        XCTAssertTrue(fork.restore(checkpoint))
+        XCTAssertTrue(live.restore(checkpoint))
         let reference = KVCacheStorage([try requested(maxSize: 8)], plan: .disabled)
         write(0 ..< 6, into: reference)
+        assertSameContents(live, reference)
         assertSameNextAttention(fork, reference)
     }
 

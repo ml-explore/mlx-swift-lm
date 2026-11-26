@@ -502,6 +502,29 @@ package final class KVCacheStorage {
         return Swift.min(processedTokenCount, cache[index].maxSize ?? .max)
     }
 
+    /// Rebinds deferred checkpoints to an independent copy of this storage.
+    package func copyCheckpoint(_ checkpoint: Checkpoint, to destination: KVCacheStorage)
+        -> Checkpoint
+    {
+        let sourceLeaves = Dictionary(
+            uniqueKeysWithValues:
+                KVCacheTree.leaves(in: cache, includingAuxiliary: true).map { ($0.path, $0.cache) })
+        let destinationLeaves = Dictionary(
+            uniqueKeysWithValues:
+                KVCacheTree.leaves(in: destination.cache, includingAuxiliary: true)
+                .map { ($0.path, $0.cache) })
+        let leaves = checkpoint.leaves.map { saved in
+            guard case .deferredCopy(let deferred) = saved.recovery else { return saved }
+            let source = sourceLeaves[saved.path] as? RotatingKVCache
+            let target = destinationLeaves[saved.path] as? RotatingKVCache
+            let copy = RotatingKVCache.copyCheckpoint(deferred, from: source, to: target)
+            return Checkpoint.Leaf(path: saved.path, recovery: .deferredCopy(copy))
+        }
+        return Checkpoint(
+            processedTokenCount: checkpoint.processedTokenCount, plan: checkpoint.plan,
+            leaves: leaves)
+    }
+
     /// Create an independent snapshot while preserving plan and progress.
     package func copy() -> KVCacheStorage {
         precondition(!roundIsOpen, "cannot snapshot while a staged round is open")

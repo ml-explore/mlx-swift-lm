@@ -462,6 +462,24 @@ final class ChatSessionCheckpointTests: XCTestCase {
         assertResumes(model, from: prefix, of: prompt)
     }
 
+    func testForkEvictionDoesNotMaterializeTheSourceCheckpoint() async throws {
+        let (session, _) = try makeSession(
+            reply: "<think>reason</think>\n\nanswer",
+            kvCache: KVCacheConfiguration(capacity: try .init(maxTokens: 128)),
+            slidingWindowPattern: 1, recurrentState: false)
+        _ = try await respond(session, to: firstQuestion)
+        let before = try await session.cacheStatus()
+        XCTAssertEqual(before.checkpoint?.memory, 0)
+
+        let fork = await session.fork()
+        let longQuestion = String(repeating: "word ", count: 120)
+        let response = try await respond(fork, to: longQuestion)
+        XCTAssertEqual(response.info.cachedPromptTokenCount, before.checkpoint?.tokens)
+
+        let after = try await session.cacheStatus()
+        XCTAssertEqual(after.checkpoint, before.checkpoint)
+    }
+
     func testRequestedCapacityResumesFromTheCheckpointAfterTheReplyEvicts() async throws {
         // Every layer is a requested capacity. Each reply evicts from it; at 64 the first
         // prompt is longer than the capacity too.

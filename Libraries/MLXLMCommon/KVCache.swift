@@ -726,7 +726,7 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         weak var checkpoint: DeferredCheckpointCopy?
     }
 
-    /// Checkpoints whose prefix this cache still holds. Copies share them.
+    /// Checkpoints whose prefix this cache still holds.
     private var pendingCheckpointCopies = [PendingCheckpointCopy]()
 
     /// Records a checkpoint at the current offset. The cache must not have evicted.
@@ -738,6 +738,22 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         return checkpoint
     }
 
+    /// Registers an independent checkpoint on a copy of this cache.
+    package static func copyCheckpoint(
+        _ checkpoint: DeferredCheckpointCopy, from source: RotatingKVCache?,
+        to destination: RotatingKVCache?
+    ) -> DeferredCheckpointCopy {
+        let independent = DeferredCheckpointCopy(offset: checkpoint.offset)
+        independent.copy = checkpoint.copy
+        if independent.copy == nil, let source, let destination,
+            source.pendingCheckpointCopies.contains(where: { $0.checkpoint === checkpoint })
+        {
+            destination.pendingCheckpointCopies.append(
+                PendingCheckpointCopy(checkpoint: independent))
+        }
+        return independent
+    }
+
     /// Copies the prefix of each pending checkpoint, before a write evicts it.
     private func copyPendingCheckpoints() {
         let pending = pendingCheckpointCopies.compactMap(\.checkpoint)
@@ -745,7 +761,6 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
         guard evictedTokenCount == 0 else { return }
         for checkpoint in pending where checkpoint.copy == nil {
             let prefix = copy() as! RotatingKVCache
-            prefix.pendingCheckpointCopies = []
             prefix.trim(offset - checkpoint.offset)
             let copy = prefix.copyForCheckpoint() as! RotatingKVCache
             asyncEval(copy.innerState())
@@ -1207,14 +1222,12 @@ public class RotatingKVCache: BaseKVCache, CustomDebugStringConvertible {
             new.state = s.map { $0[.ellipsis] }
         }
         new.metaState = self.metaState
-        new.pendingCheckpointCopies = pendingCheckpointCopies
         return new
     }
 
     /// Excludes a multi-token prefill's temporary rows beyond the configured history.
     package func copyForCheckpoint() -> any KVCache {
         let new = copy() as! RotatingKVCache
-        new.pendingCheckpointCopies = []
         if (keys?.dim(2) ?? 0) > storageCapacity,
             let (keys, values) = retainedView(tail: storageCapacity)
         {
