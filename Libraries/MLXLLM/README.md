@@ -57,6 +57,7 @@ Currently supported model types are:
 - Qwen3
 - Qwen3-Next
 - Starcoder2
+- Spark-X2.5 / Spark-X2.6
 - MiMo
 - MiMo_v2_flash
 - MiniMax
@@ -64,6 +65,11 @@ Currently supported model types are:
 - GLM4MOE
 - AceReason
 - NemotronH
+
+Spark-X2.6 tool-enabled chat requires a tokenizer that supports Jinja's `tojson`
+separators, such as [swift-tokenizers](https://github.com/aleroot/swift-tokenizers) using
+[swift-jinja](https://github.com/huggingface/swift-jinja) 3.0 or later. Older template engines
+can fail when rendering tool definitions or tool-call history.
 
 See [llm-tool](../../Tools/llm-tool)
 
