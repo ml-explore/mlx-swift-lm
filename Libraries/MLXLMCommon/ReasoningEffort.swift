@@ -34,10 +34,13 @@ public struct ReasoningEffort: Hashable, Sendable, CustomStringConvertible {
 public let reasoningEffortKey = LMOutput.Key<ReasoningEffort>("reasoning.effort")
 
 extension Optional where Wrapped == LMOutput.State {
-    /// This state with ``reasoningEffortKey`` set to `effort`, or removed when it is `nil`.
-    package func applying(_ effort: ReasoningEffort?) -> LMOutput.State? {
+    /// Applies the current request's forward-pass options.
+    package func applying(
+        _ effort: ReasoningEffort?, logitsAccuracy: LogitsAccuracy = .exact
+    ) -> LMOutput.State? {
         var state = self ?? LMOutput.State()
         state[reasoningEffortKey] = effort
+        state[logitsAccuracyKey] = logitsAccuracy == .exact ? nil : logitsAccuracy
         return state.isEmpty ? nil : state
     }
 }

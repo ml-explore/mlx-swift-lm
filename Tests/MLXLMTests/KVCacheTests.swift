@@ -323,13 +323,13 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         }
     }
 
-    @Test func testPromptCacheStateDropsTheRequestReasoningEffort() throws {
+    @Test func testPromptCacheStateDropsRequestOptions() throws {
         let cache = KVCacheSimple()
         _ = cache.update(
             keys: MLXArray.ones([1, 1, 1, 4]),
             values: MLXArray.zeros([1, 1, 1, 4]))
         let anchorKey = LMOutput.Key<MLXArray>("test.anchor")
-        let effortOnly = LMOutput.State?.none.applying(.off)
+        let effortOnly = LMOutput.State?.none.applying(.off, logitsAccuracy: .allowApproximate)
         var withAnchor = try #require(effortOnly)
         withAnchor[anchorKey] = MLXArray([Int32(4)])
         let effortURL = tempURL()
@@ -348,6 +348,7 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         #expect(effortSnapshot.state == nil)
         #expect(anchorSnapshot.state?[anchorKey] != nil)
         #expect(anchorSnapshot.state?[reasoningEffortKey] == nil)
+        #expect(anchorSnapshot.state?[logitsAccuracyKey] == nil)
         #expect(effortOnly.applying(nil) == nil)
     }
 

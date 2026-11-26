@@ -73,6 +73,7 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
     var mainState: LMOutput.State?
     /// Kept so a state reset keeps the request's effort.
     private let reasoningEffort: ReasoningEffort?
+    private let logitsAccuracy: LogitsAccuracy
     let mainCacheStorage: KVCacheStorage
     var mainCache: [KVCache] { mainCacheStorage.cache }
     var kvCachePlan: KVCachePlan { mainCacheStorage.plan }
@@ -231,8 +232,10 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
         self.drafter = drafter
 
         self.mainCacheStorage = mainCacheStorage
-        self.mainState = mainState.applying(parameters.reasoningEffort)
+        self.mainState = mainState.applying(
+            parameters.reasoningEffort, logitsAccuracy: parameters.logitsAccuracy)
         self.reasoningEffort = parameters.reasoningEffort
+        self.logitsAccuracy = parameters.logitsAccuracy
         self.continuationToResume = mtpContinuation
         self.drafterState =
             mtpContinuation?.state
@@ -379,7 +382,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 lengths: mainCacheStorage.emittedLength(forLeaf:))
             {
                 switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
-                mainState = LMOutput.State?.none.applying(reasoningEffort)
+                mainState = LMOutput.State?.none.applying(
+                    reasoningEffort, logitsAccuracy: logitsAccuracy)
             }
             // Yield the bonus to the iterator's consumer. Without this,
             // the iterator silently starts 1 position ahead of an
@@ -409,7 +413,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                 lengths: mainCacheStorage.emittedLength(forLeaf:))
             if !placeable {
                 switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
-                mainState = LMOutput.State?.none.applying(reasoningEffort)
+                mainState = LMOutput.State?.none.applying(
+                    reasoningEffort, logitsAccuracy: logitsAccuracy)
             }
 
             // If prefill didn't emit drafter state, do one more forward call
@@ -432,7 +437,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
                     lengths: mainCacheStorage.emittedLength(forLeaf:))
                 {
                     switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
-                    mainState = LMOutput.State?.none.applying(reasoningEffort)
+                    mainState = LMOutput.State?.none.applying(
+                        reasoningEffort, logitsAccuracy: logitsAccuracy)
                 }
                 // Resample bonus from this forward's logits so the chain stays
                 // coherent at this position (the cache offset moves by 1, so
@@ -596,7 +602,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
             switchToPassthrough(
                 reason: "main KV cache cannot stage a speculative round; continuing without "
                     + "speculation")
-            mainState = LMOutput.State?.none.applying(reasoningEffort)
+            mainState = LMOutput.State?.none.applying(
+                reasoningEffort, logitsAccuracy: logitsAccuracy)
             return
         }
 
@@ -802,7 +809,8 @@ public struct MTPSpeculativeTokenIterator: TokenIteratorProtocol {
 
         guard snapshotPlaced else {
             switchToPassthrough(reason: Self.missingSharedKVSourcesReason)
-            mainState = LMOutput.State?.none.applying(reasoningEffort)
+            mainState = LMOutput.State?.none.applying(
+                reasoningEffort, logitsAccuracy: logitsAccuracy)
             y = .init(tokens: emittedFinalToken)
             return
         }

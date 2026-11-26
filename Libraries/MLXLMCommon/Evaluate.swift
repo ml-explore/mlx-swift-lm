@@ -249,6 +249,9 @@ public struct GenerateParameters: Sendable {
     /// effort to an already cached prefix.
     public var reasoningEffort: ReasoningEffort?
 
+    /// Whether a model may use approximate output logits for generation.
+    public var logitsAccuracy: LogitsAccuracy = .exact
+
     /// Penalty factor for repeating tokens
     public var repetitionPenalty: Float?
 
@@ -1195,7 +1198,8 @@ public struct TokenIterator: TokenIteratorProtocol {
         let cacheStorage = try kvCachePlan.validated(cacheStorage)
 
         self.model = model
-        self.state = state.applying(parameters.reasoningEffort)
+        self.state = state.applying(
+            parameters.reasoningEffort, logitsAccuracy: parameters.logitsAccuracy)
         self.y = input.text
         self.cacheStorage = cacheStorage
 
@@ -1642,7 +1646,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
         self.mainCacheStorage = mainCacheStorage
         self.draftCacheStorage = draftCacheStorage
-        self.state = mainState.applying(parameters.reasoningEffort)
+        self.state = mainState.applying(
+            parameters.reasoningEffort, logitsAccuracy: parameters.logitsAccuracy)
 
         self.sampler = parameters.sampler()
         self.logProbabilityTopK = parameters.logProbabilities.map { Swift.max($0, 0) }

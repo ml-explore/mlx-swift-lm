@@ -27,6 +27,12 @@ struct Raon1MiniTests {
         #expect(softplus.rda.gateLowerBound == nil)
     }
 
+    @Test func rejectsZeroMoELayerFrequency() throws {
+        var config = try Self.configuration()
+        config.moeLayerFreq = 0
+        #expect(throws: Raon1MiniError.self) { try config.validateModelConfiguration() }
+    }
+
     @Test("Each reasoning effort resolves to its alpha; thinking off falls back to 0.1")
     func effortAlphas() throws {
         let steering = try #require(try Self.configuration().effortSteering)
@@ -296,6 +302,34 @@ struct Raon1MiniTests {
         }
     }
 
+    @Test func mixedProjectionsPreserveAllOutputs() {
+        let parts: [Linear] = [
+            Self.scaledLinear(input: 64, output: 16),
+            Linear(64, 32, bias: false),
+            Self.scaledLinear(input: 64, output: 48),
+        ]
+        let slot = Raon1FusedSlot()
+        slot.prepare(parts)
+        let x = MLXArray.ones([1, 1, 64])
+        #expect(slot.project(x, parts, training: false).map { $0.dim(-1) } == [16, 32, 48])
+    }
+
+    @Test(arguments: ["weight", "global_scale"])
+    func directChildUpdateBypassesFusedProjection(key: String) {
+        let first = Self.scaledLinear(input: 64, output: 16)
+        let parts = [first, Self.scaledLinear(input: 64, output: 32)]
+        let slot = Raon1FusedSlot()
+        slot.prepare(parts)
+        let x = MLXArray.ones([1, 1, 64], dtype: .bfloat16)
+        let before = slot.project(x, parts, training: false)[0]
+        eval(before)
+        let replacement = key == "weight" ? MLXArray.zeros(first.weight.shape, dtype: first.weight.dtype) : MLXArray(Float(2))
+        first.update(parameters: ModuleParameters.unflattened([(key, replacement)]))
+        let after = slot.project(x, parts, training: false)[0]
+        #expect(!arrayEqual(before, after).item(Bool.self))
+        #expect(arrayEqual(after, first(x)).item(Bool.self))
+    }
+
     @Test("A parameter update drops the prepared state, so the next forward reads the update")
     func updateInvalidatesPreparedState() throws {
         let model = try Self.preparedModel()
@@ -382,7 +416,7 @@ struct Raon1MiniTests {
         #expect(logicalOr(logits .<= cap, logits .== full).all().item(Bool.self))
     }
 
-    @Test("Generation shortlists the last position; every other forward keeps the exact head")
+    @Test("Generation uses the exact head by default and shortlists only on opt-in")
     func shortlistServesOnlyNextTokenLogits() throws {
         let model = try Self.preparedModel(vocabulary: 65_536)
         let weight = try #require(model.lmHead).weight
@@ -394,15 +428,24 @@ struct Raon1MiniTests {
 
         let hidden = model.hiddenStates(tokens, cache: try model.newCache(parameters: nil))
         let full = model(tokens, cache: try model.newCache(parameters: nil))
-        let next = model.nextTokenLogits(
+        var parameters = GenerateParameters()
+        parameters.logitsAccuracy = .allowApproximate
+        let iterator = try TokenIterator(
+            input: LMInput(tokens: tokens.reshaped(-1)), model: model, parameters: parameters)
+        let last = hidden[0..., (-1)...]
+        let exact = model.nextTokenLogits(
             LMInput.Text(tokens: tokens), cache: try model.newCache(parameters: nil), state: nil
+        ).logits
+        let approximate = model.nextTokenLogits(
+            LMInput.Text(tokens: tokens), cache: try model.newCache(parameters: nil),
+            state: iterator.state
         ).logits
 
         #expect(arrayEqual(full, model.projectLogits(hidden)).item(Bool.self))
-        #expect(next.shape == [1, 1, 65_536])
-        let expected = try #require(model.shortlistLogits(hidden[0..., (-1)...]))
-        #expect(arrayEqual(next, expected).item(Bool.self))
-        #expect(!arrayEqual(next, full[0..., (-1)...]).item(Bool.self))
+        #expect(arrayEqual(exact, model.projectLogits(last)).item(Bool.self))
+        let expected = try #require(model.shortlistLogits(last))
+        #expect(arrayEqual(approximate, expected).item(Bool.self))
+        #expect(!arrayEqual(approximate, exact).item(Bool.self))
     }
 
     @Test("The candidate search returns the largest values of each row")

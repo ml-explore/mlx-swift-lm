@@ -93,11 +93,11 @@ The optional `dflash2/` checkpoint supports greedy speculative decoding. Registe
 `Raon1DFlash2Registration.register()` and load it through `MTPDrafterModelFactory`.
 Measure against plain decoding: the speed gain depends on draft acceptance.
 
-When the checkpoint ships `head_stage1_a2g64gm.safetensors`, decode uses it as a 2-bit
-shortlist for the output head: the 256 best candidates get exact logits, and the other logits
-are approximate. Greedy decoding and top-k sampling up to 64 match the exact head whenever the
-2-bit pass ranks those tokens among its candidates, which held for every token of a 2,047-token
-test. Remove the file to use the exact head for every token.
+Generation uses the full output head by default. Set
+`GenerateParameters.logitsAccuracy = .allowApproximate` to use the 2-bit shortlist
+when the checkpoint ships `head_stage1_a2g64gm.safetensors`. It rescores 256 candidates
+with the full head. Other scores remain approximate, and the shortlist can miss
+tokens that the full head would rank higher.
 
 ### Mellum
 

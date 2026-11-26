@@ -216,6 +216,8 @@ extension Raon1MiniConfiguration: ModelConfigurationValidating {
         func require(_ condition: Bool, _ message: String) throws {
             guard condition else { throw Raon1MiniError.unsupportedConfiguration(message) }
         }
+        try require(hiddenLayers > 0, "num_hidden_layers must be positive")
+        try require(moeLayerFreq > 0, "moe_layer_freq must be positive")
         try require(hiddenAct == "situ", "hidden_act must be situ")
         try require(routerActivation == "sigmoid", "moe_router_activation_func must be sigmoid")
         try require(!useGroupedTopK, "grouped top-k routing is not supported")
@@ -278,6 +280,8 @@ final class Raon1ScaledLinear: Linear, Quantized {
     let bits = 4
     let mode = QuantizationMode.nvfp4
 
+    private(set) var parameterRevision = 0
+
     @ParameterInfo var scales: MLXArray
     @ParameterInfo(key: "global_scale") var globalScale: MLXArray
 
@@ -286,6 +290,15 @@ final class Raon1ScaledLinear: Linear, Quantized {
         self._globalScale.wrappedValue = MLXArray(Float(1))
         super.init(weight: MLXArray.zeros([outputDims, inputDims / 8], dtype: .uint32))
         freeze()
+    }
+
+    override func update(
+        parameters: ModuleParameters, verify: VerifyUpdate, path: [String] = [],
+        modulePath: [String] = []
+    ) throws -> Self {
+        defer { parameterRevision &+= 1 }
+        return try super.update(
+            parameters: parameters, verify: verify, path: path, modulePath: modulePath)
     }
 
     override func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -312,8 +325,9 @@ final class Raon1FusedProjection: @unchecked Sendable {
 
     /// Stacks `parts`, or returns `nil` unless every part is a ``Raon1ScaledLinear``.
     init?(_ parts: [Linear]) {
-        let parts = parts.compactMap { $0 as? Raon1ScaledLinear }
-        guard parts.count > 1, Set(parts.map { $0.weight.dim(1) }).count == 1 else { return nil }
+        guard let parts = parts as? [Raon1ScaledLinear], parts.count > 1,
+            Set(parts.map { $0.weight.dim(1) }).count == 1
+        else { return nil }
         weight = concatenated(parts.map(\.weight))
         scales = concatenated(parts.map(\.scales))
         columnScale = concatenated(
@@ -344,26 +358,32 @@ final class Raon1FusedProjection: @unchecked Sendable {
 
 /// The fused projection of a module's parts, set by `prepare()`.
 ///
-/// It serves only the parts it was built from: a part replaced later, by an adapter for
-/// example, sends every input through the parts again. Training always takes the parts.
+/// Replacing or updating a part disables fusion until the next preparation.
+/// Training always takes the parts.
 final class Raon1FusedSlot: @unchecked Sendable {
     private var projection: Raon1FusedProjection?
     private var parts: [ObjectIdentifier] = []
+    private var revisions: [Int] = []
 
     func prepare(_ parts: [Linear]) {
         projection = Raon1FusedProjection(parts)
         self.parts = parts.map(ObjectIdentifier.init)
+        revisions = parts.compactMap { ($0 as? Raon1ScaledLinear)?.parameterRevision }
     }
 
     func invalidate() {
         projection = nil
         parts = []
+        revisions = []
     }
 
     /// The outputs of `parts` on `x`, fused for decode-sized inputs unless `training`.
     func project(_ x: MLXArray, _ parts: [Linear], training: Bool) -> [MLXArray] {
         if let projection, !training, x.size / x.dim(-1) <= Raon1FusedProjection.maximumRows,
-            parts.map(ObjectIdentifier.init) == self.parts
+            parts.map(ObjectIdentifier.init) == self.parts,
+            zip(parts, revisions).allSatisfy({ part, revision in
+                (part as? Raon1ScaledLinear)?.parameterRevision == revision
+            })
         {
             return projection(x)
         }
@@ -1549,8 +1569,7 @@ public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding,
     /// Steers with the request's ``reasoningEffortKey`` and returns `state` unchanged.
     ///
     /// When a drafter asks, it also emits the drafter's target features, and the logits of
-    /// every position go through the shortlist head as ``nextTokenLogits(_:cache:state:)``'s do:
-    /// a verify pass samples them as plain decoding would.
+    /// every position follow the same accuracy policy as plain decoding.
     public func callAsFunction(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
@@ -1561,7 +1580,7 @@ public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding,
         }
         let output = model.forward(input.tokens, cache: cache, effort: effort, tapping: tapping)
         return .init(
-            logits: shortlistLogits(output.hidden) ?? projectLogits(output.hidden),
+            logits: generationLogits(output.hidden, state: state),
             state: Self.drafterState(state, features: output.taps ?? output.hidden))
     }
 
@@ -1598,7 +1617,7 @@ public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding,
         let last = output.hidden[0..., (-1)...]
         return .logits(
             LMOutput(
-                logits: shortlistLogits(last) ?? projectLogits(last),
+                logits: generationLogits(last, state: state),
                 state: Self.drafterState(state, features: all[0..., (all.dim(1) - context)...])))
     }
 
@@ -1621,14 +1640,21 @@ public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding,
         return state
     }
 
-    /// Projects only the last position, through the shortlist head when the checkpoint ships one.
+    /// Projects only the last position. The shortlist head requires request opt-in.
     /// Scoring without a drafter uses the full head.
     public func nextTokenLogits(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
         let h = model(input.tokens, cache: cache, effort: state?[reasoningEffortKey])
         let last = h[0..., (-1)...]
-        return .init(logits: shortlistLogits(last) ?? projectLogits(last), state: state)
+        return .init(logits: generationLogits(last, state: state), state: state)
+    }
+
+    private func generationLogits(_ hidden: MLXArray, state: LMOutput.State?) -> MLXArray {
+        if state?[logitsAccuracyKey] == .allowApproximate, let logits = shortlistLogits(hidden) {
+            return logits
+        }
+        return projectLogits(hidden)
     }
 
     /// The logits of the final hidden states `h` `[..., H]` through the shortlist head, or `nil`
