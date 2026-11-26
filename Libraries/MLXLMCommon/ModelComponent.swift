@@ -23,6 +23,9 @@ public struct ModelComponent: Hashable, Sendable, CustomStringConvertible {
 
     /// Audio encoders, with the projectors that feed them to the language model.
     public static let audio = ModelComponent("audio")
+
+    /// Speech generation, including its codebook decoder and audio codec.
+    public static let speech = ModelComponent("speech")
 }
 
 private let logger = MLXLogger(label: "model-component")
@@ -99,7 +102,7 @@ extension [CheckpointComponent] {
 public class AnyOnDemandComponent: @unchecked Sendable {
     public let component: ModelComponent
 
-    let make: @Sendable () -> Module
+    let make: @Sendable () throws -> Module
     /// Guards `state`. Never held while the checkpoint is read.
     private let stateLock = NSLock()
     /// Serializes loads, so concurrent first uses share one load.
@@ -112,7 +115,7 @@ public class AnyOnDemandComponent: @unchecked Sendable {
         case loaded(Module)
     }
 
-    init(_ component: ModelComponent, make: @escaping @Sendable () -> Module) {
+    init(_ component: ModelComponent, make: @escaping @Sendable () throws -> Module) {
         self.component = component
         self.make = make
     }
@@ -165,7 +168,7 @@ public class AnyOnDemandComponent: @unchecked Sendable {
             case .pending(let source):
                 // Callers need not be in a withError scope, on any thread.
                 let module = try withLoaderThreadError {
-                    let module = make()
+                    let module = try make()
                     try applyCheckpoint(source.checkpoint(), to: module)
                     eval(module)
                     return module
@@ -209,7 +212,7 @@ public final class OnDemandComponent<Content: Module>: AnyOnDemandComponent, @un
     /// - Parameters:
     ///   - component: the component this loads
     ///   - make: builds new, unloaded modules for the component
-    public init(_ component: ModelComponent, make: @escaping @Sendable () -> Content) {
+    public init(_ component: ModelComponent, make: @escaping @Sendable () throws -> Content) {
         super.init(component, make: make)
     }
 
@@ -234,7 +237,10 @@ public enum OnDemandComponentError: LocalizedError {
 extension ModelComponent {
     /// The components that `input`'s media need.
     static func needed(by input: LMInput) -> Set<ModelComponent> {
-        input.image != nil || input.video != nil ? [.vision] : []
+        var needed = Set<ModelComponent>()
+        if input.image != nil || input.video != nil { needed.insert(.vision) }
+        if input.audio != nil { needed.insert(.audio) }
+        return needed
     }
 }
 
@@ -293,14 +299,20 @@ func prepareComponents(
                 : nil)
 
         // An earlier on-demand load removed these modules.
-        lazy var rebuilt = Dictionary(uniqueKeysWithValues: holder?.make().namedModules() ?? [])
+        var rebuilt: [String: Module]?
+        func rebuiltModule(at path: String) throws -> Module? {
+            if rebuilt == nil {
+                rebuilt = Dictionary(uniqueKeysWithValues: try holder?.make().namedModules() ?? [])
+            }
+            return rebuilt?[path]
+        }
         for part in parts {
             let isAttached = attached.contains(part.destination)
             if isExcluded || deferred {
                 if isAttached { try model.setModule(nil, at: part.destination) }
                 unread += part.namespaces
             } else if !isAttached {
-                if let module = rebuilt[part.destination] {
+                if let module = try rebuiltModule(at: part.destination) {
                     try model.setModule(module, at: part.destination)
                 } else {
                     unread += part.namespaces

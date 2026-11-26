@@ -144,6 +144,29 @@ private final class MisdeclaredCaptioner: Module, BaseLanguageModel, ModelCompon
 }
 
 final class ModelComponentTests: XCTestCase {
+    func testThrowingComponentConstructionCanRetry() throws {
+        enum ConstructionError: Error { case retry }
+        final class Attempts: @unchecked Sendable {
+            let lock = NSLock()
+            var count = 0
+        }
+        let attempts = Attempts()
+        let component = OnDemandComponent(.speech) {
+            let count = attempts.lock.withLock {
+                attempts.count += 1
+                return attempts.count
+            }
+            if count == 1 { throw ConstructionError.retry }
+            return Module()
+        }
+        component.setSource(
+            .init(urls: [], namespaces: [], perLayerQuantization: nil, prepare: { $0 }))
+        XCTAssertThrowsError(try component.load())
+        XCTAssertFalse(component.isLoaded)
+        XCTAssertNoThrow(try component.load())
+        XCTAssertTrue(component.isLoaded)
+        XCTAssertEqual(attempts.count, 2)
+    }
 
     private let quantization = BaseConfiguration.Quantization(groupSize: 64, bits: 4)
     private let visionNamespaces = ["model.vision_tower", "model.connector.projection"]
