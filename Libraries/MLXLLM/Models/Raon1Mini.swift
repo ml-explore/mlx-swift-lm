@@ -60,8 +60,19 @@ public struct Raon1MiniConfiguration: Codable, Sendable {
             case defaultEffort = "default"
         }
 
-        /// The alpha of the default effort, the one a request without an effort gets.
-        var defaultAlpha: Float { alpha[defaultEffort ?? "high"] ?? 0 }
+        /// The alpha of thinking off when the config lists none above 0, as released configs do.
+        static let thinkingOffAlpha: Float = 0.1
+
+        /// The alpha of `effort`: the default effort's for `nil` or a name the config does not
+        /// list, and for ``ReasoningEffort/off`` the config's `none` alpha when above 0, else
+        /// ``thinkingOffAlpha``.
+        func alpha(for effort: ReasoningEffort?) -> Float {
+            if effort == .off {
+                return alpha[ReasoningEffort.off.name].flatMap { $0 > 0 ? $0 : nil }
+                    ?? Self.thinkingOffAlpha
+            }
+            return effort.flatMap { alpha[$0.name] } ?? alpha[defaultEffort ?? "high"] ?? 0
+        }
     }
 
     var modelType: String
@@ -1401,14 +1412,14 @@ public class Raon1MiniModelInner: Module {
     @ModuleInfo var norm: RMSNorm
 
     let streams: Int
-    let effort: Float
+    let steering: Raon1MiniConfiguration.EffortSteering?
     let rdaIndex: Int?
     let mlaIndex: Int?
     private let arithmetic: Raon1Arithmetic
 
     init(_ config: Raon1MiniConfiguration) {
         streams = config.mhcStreams
-        effort = config.effortSteering?.defaultAlpha ?? 0
+        steering = config.effortSteering
         let arithmetic = Raon1Arithmetic(config)
         self.arithmetic = arithmetic
         _embedTokens.wrappedValue = Embedding(
@@ -1421,7 +1432,11 @@ public class Raon1MiniModelInner: Module {
         mlaIndex = (0 ..< config.hiddenLayers).first { !config.isRDALayer($0) }
     }
 
-    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+    /// The final hidden states, with the steering of `effort` added to the steered MoE layers.
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?, effort: ReasoningEffort?)
+        -> MLXArray
+    {
+        let effort = steering?.alpha(for: effort) ?? 0
         let h = embedTokens(inputs)
         let (B, L, hidden) = (h.dim(0), h.dim(1), h.dim(2))
 
@@ -1481,13 +1496,22 @@ public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding {
         projectLogits(hiddenStates(inputs, cache: cache))
     }
 
+    /// Steers with the request's ``reasoningEffortKey`` and returns `state` unchanged.
+    public func callAsFunction(
+        _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
+    ) -> LMOutput {
+        let h = model(input.tokens, cache: cache, effort: state?[reasoningEffortKey])
+        return .init(logits: projectLogits(h), state: state)
+    }
+
     /// Projects only the last position, through the shortlist head when the checkpoint ships one.
     /// Every other forward, such as scoring or speculative verification, keeps the exact head.
     public func nextTokenLogits(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
-        let last = hiddenStates(input.tokens, cache: cache)[0..., (-1)...]
-        return .init(logits: shortlistLogits(last) ?? projectLogits(last))
+        let h = model(input.tokens, cache: cache, effort: state?[reasoningEffortKey])
+        let last = h[0..., (-1)...]
+        return .init(logits: shortlistLogits(last) ?? projectLogits(last), state: state)
     }
 
     /// The logits of the final hidden states `h` `[..., H]` through the shortlist head, or `nil`
@@ -1652,7 +1676,7 @@ public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding {
 
 extension Raon1MiniModel: HiddenStateLanguageModel {
     package func hiddenStates(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        model(inputs, cache: cache)
+        model(inputs, cache: cache, effort: nil)
     }
 
     package func projectLogits(_ hiddenStates: MLXArray) -> MLXArray {

@@ -2,11 +2,11 @@
 
 import Foundation
 import MLX
-import MLXLMCommon
 import MLXNN
 import Testing
 
 @testable import MLXLLM
+@testable import MLXLMCommon
 
 struct Raon1MiniTests {
 
@@ -20,11 +20,48 @@ struct Raon1MiniTests {
         #expect(!config.isMoELayer(0))
         #expect((1 ..< 4).allSatisfy(config.isMoELayer))
         #expect(config.rda.gateLowerBound == -5)
-        #expect(config.effortSteering?.defaultAlpha == 0.05)
+        #expect(config.effortSteering?.alpha(for: nil) == 0.05)
         try config.validateModelConfiguration()
 
         let softplus = try Self.configuration(gateLowerBound: "null")
         #expect(softplus.rda.gateLowerBound == nil)
+    }
+
+    @Test("Each reasoning effort resolves to its alpha; thinking off falls back to 0.1")
+    func effortAlphas() throws {
+        let steering = try #require(try Self.configuration().effortSteering)
+        #expect(steering.alpha(for: nil) == 0.05)
+        #expect(steering.alpha(for: .high) == 0.05)
+        #expect(steering.alpha(for: .max) == 0)
+        #expect(steering.alpha(for: .off) == 0.1)
+        #expect(steering.alpha(for: .low) == 0.05)
+    }
+
+    @Test("The request's reasoning effort steers every forward of a token iterator")
+    func effortSteersTheIterator() throws {
+        let model = try Self.preparedModel()
+        let prompt = LMInput(tokens: MLXArray((0 ..< 6).map { Int32($0 * 3 + 2) }))
+        func step(_ effort: ReasoningEffort?) throws -> (MLXArray, LMOutput.State?) {
+            var parameters = GenerateParameters(maxTokens: 3, temperature: 0)
+            parameters.reasoningEffort = effort
+            var iterator = try TokenIterator(input: prompt, model: model, parameters: parameters)
+            _ = iterator.next()
+            let next = model.nextTokenLogits(
+                LMInput.Text(tokens: MLXArray([Int32(7)])[.newAxis]), cache: iterator.cache,
+                state: iterator.state)
+            return (next.logits, iterator.state)
+        }
+
+        let (high, defaultState) = try step(nil)
+        let (explicitHigh, _) = try step(.high)
+        let (off, offState) = try step(.off)
+        let (unsteered, _) = try step(.max)
+
+        #expect(defaultState?[reasoningEffortKey] == nil)
+        #expect(offState?[reasoningEffortKey] == .off)
+        #expect(arrayEqual(high, explicitHigh).item(Bool.self))
+        #expect(!arrayEqual(high, off).item(Bool.self))
+        #expect(!arrayEqual(high, unsteered).item(Bool.self))
     }
 
     @Test("A configuration whose layer lists do not partition the layers is rejected")
