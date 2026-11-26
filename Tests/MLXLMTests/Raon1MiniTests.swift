@@ -189,6 +189,26 @@ struct Raon1MiniTests {
 
     // MARK: - Decode paths
 
+    @Test("Rejecting a verify suffix preserves the convolution and recurrent state")
+    func speculativeRewindMatchesRetainedPrefix() throws {
+        let model = try Self.preparedModel()
+        let tokens = MLXArray((0 ..< 12).map { Int32(($0 * 7 + 3) % 64) })[.newAxis]
+        let rewound = try model.newCache(parameters: nil)
+        let reference = try model.newCache(parameters: nil)
+
+        for cache in [rewound, reference] {
+            eval(model(tokens[0..., ..<4], cache: cache))
+        }
+        eval(model(tokens[0..., 4 ..< 11], cache: rewound))
+        eval(model(tokens[0..., 4 ..< 8], cache: reference))
+        #expect(rewindSpeculativePromptCache(rewound, numTokens: 3) == 3)
+
+        let next = tokens[0..., 8 ..< 9]
+        let actual = model(next, cache: rewound)
+        let expected = model(next, cache: reference)
+        #expect(Self.relativeDrift(actual, expected) < 1e-2)
+    }
+
     @Test("Token-by-token decode reproduces the logits of one prompt pass")
     func decodeMatchesPrompt() throws {
         let model = try Self.preparedModel()

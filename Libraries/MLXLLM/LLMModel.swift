@@ -27,6 +27,13 @@ extension LLMModel {
     ) throws
         -> PrepareResult
     {
+        try prepareInChunks(input, cache: cache, state: state, prefill: prefill)
+    }
+
+    /// The default ``prepare(_:cache:state:prefill:)``, for models that override it.
+    func prepareInChunks(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
         let stepSize = prefill.resolvedStepSize()
         let y = input.text
         let total = y.tokens.size

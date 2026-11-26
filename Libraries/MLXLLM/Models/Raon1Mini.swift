@@ -768,9 +768,10 @@ final class Raon1RDA: Raon1PreparedModule {
                 state: cache[1]
                     ?? MLXArray.zeros([B, heads, headDim, headDim], dtype: .float32),
                 gate: p[3], constants: constants)
-            cache[0] = step[5]
-            cache[1] = state
-            cache.advance(L)
+            Self.store(
+                convolutionState: step[5], recurrentState: state,
+                convolutionInputs: Array(p[0 ..< 3]), recurrence: Array(step[0 ..< 5]),
+                in: cache)
             return oProj(gated.reshaped(B, L, -1))
         }
 
@@ -803,11 +804,31 @@ final class Raon1RDA: Raon1PreparedModule {
                     state: cache?[1], mask: mask, useKernel: !training)
             }
         if let cache {
-            cache[0] = Raon1ShortConvolution.nextState(convState, inputs: convInputs, keep: keep)
-            cache[1] = state
-            cache.advance(L)
+            Self.store(
+                convolutionState: Raon1ShortConvolution.nextState(
+                    convState, inputs: convInputs, keep: keep),
+                recurrentState: state, convolutionInputs: convInputs,
+                recurrence: Array(gates[0 ..< 5]), in: cache)
         }
         return oProj(arithmetic.output([out, p[3], oNorm.weight])[0].reshaped(B, L, -1))
+    }
+
+    /// Stores a call's states in `cache`; a rewindable cache also keeps the call's inputs
+    /// `[q, k, v, g, beta]`, so a speculative round can take it back.
+    private static func store(
+        convolutionState: MLXArray, recurrentState: MLXArray, convolutionInputs: [MLXArray],
+        recurrence: [MLXArray], in cache: MambaCache
+    ) {
+        if let cache = cache as? RewindableGatedDeltaCache {
+            cache.update(
+                convolutionState: convolutionState, recurrentState: recurrentState,
+                convolutionInputs: convolutionInputs, q: recurrence[0], k: recurrence[1],
+                v: recurrence[2], g: recurrence[3], beta: recurrence[4])
+        } else {
+            cache[0] = convolutionState
+            cache[1] = recurrentState
+            cache.advance(recurrence[0].dim(1))
+        }
     }
 
     /// The projections of the layer input, in the order ``callAsFunction(_:mask:cache:)`` reads.
@@ -1375,10 +1396,11 @@ final class Raon1DecoderLayer: Module {
     /// Runs the layer on the streams `[B * L, n, H]`. Each branch output stays pending until the
     /// next site mixes it in, so the arithmetic between two branches is one compiled call.
     ///
+    /// Also returns the streams the layer entered: the previous layer's output, `[B * L, n, H]`.
     func callAsFunction(
         _ rows: MLXArray, pending: Raon1PendingBranch?, shape: (B: Int, L: Int),
         ssmMask: MLXArray?, attentionMask: Raon1PromptMask, cache: KVCache?, effort: Float
-    ) -> (rows: MLXArray, pending: Raon1PendingBranch) {
+    ) -> (rows: MLXArray, pending: Raon1PendingBranch, entered: MLXArray) {
         let hidden = rows.dim(-1)
         let attentionSite = attentionMHC.enter(rows, pending: pending, norm: inputLayerNorm)
         let x = attentionSite.x.reshaped(shape.B, shape.L, hidden)
@@ -1401,7 +1423,8 @@ final class Raon1DecoderLayer: Module {
             mlpSite.rows,
             Raon1PendingBranch(
                 output: branch.reshaped(-1, hidden), post: mlpSite.post,
-                residual: mlpSite.residual)
+                residual: mlpSite.residual),
+            attentionSite.rows
         )
     }
 }
@@ -1436,6 +1459,14 @@ public class Raon1MiniModelInner: Module {
     func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?, effort: ReasoningEffort?)
         -> MLXArray
     {
+        forward(inputs, cache: cache, effort: effort, tapping: []).hidden
+    }
+
+    /// The final hidden states and the streams after each layer in `tapping`, in layer order,
+    /// concatenated to `[B, L, layers * n * H]`, or `nil` when `tapping` is empty.
+    func forward(
+        _ inputs: MLXArray, cache: [KVCache]?, effort: ReasoningEffort?, tapping: Set<Int>
+    ) -> (hidden: MLXArray, taps: MLXArray?) {
         let effort = steering?.alpha(for: effort) ?? 0
         let h = embedTokens(inputs)
         let (B, L, hidden) = (h.dim(0), h.dim(1), h.dim(2))
@@ -1447,20 +1478,29 @@ public class Raon1MiniModelInner: Module {
 
         var rows = repeated(h.reshaped(B * L, 1, hidden), count: streams, axis: 1)
         var pending: Raon1PendingBranch?
+        var taps = [MLXArray]()
         for (index, layer) in layers.enumerated() {
-            (rows, pending) = layer(
+            let entered: MLXArray
+            (rows, pending, entered) = layer(
                 rows, pending: pending, shape: (B, L), ssmMask: ssmMask,
                 attentionMask: attentionMask, cache: cache?[index], effort: effort)
+            if tapping.contains(index - 1) { taps.append(entered.reshaped(B, L, -1)) }
         }
         if let pending {
             rows = arithmetic.mhc.arithmetic.mix(rows, pending)
         }
+        if tapping.contains(layers.count - 1) { taps.append(rows.reshaped(B, L, -1)) }
         let merged = rows.asType(.float32).mean(axis: 1).asType(h.dtype)
-        return norm(merged.reshaped(B, L, hidden))
+        return (
+            norm(merged.reshaped(B, L, hidden)),
+            taps.isEmpty ? nil : concatenated(taps, axis: -1)
+        )
     }
 }
 
-public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding {
+public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding,
+    SpeculativeCacheRewindModel
+{
     public let vocabularySize: Int
 
     public let model: Raon1MiniModelInner
@@ -1490,6 +1530,9 @@ public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding {
         return Set(steering.alpha.keys.map(ReasoningEffort.init)).union([.off])
     }
 
+    /// Positions a speculative round can take back: the RDA caches replay what they keep.
+    public let maximumNativeTargetCacheRewind = 16
+
     public init(_ config: Raon1MiniConfiguration) {
         configuration = config
         vocabularySize = config.vocabularySize
@@ -1504,15 +1547,82 @@ public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding {
     }
 
     /// Steers with the request's ``reasoningEffortKey`` and returns `state` unchanged.
+    ///
+    /// When a drafter asks, it also emits the drafter's target features, and the logits of
+    /// every position go through the shortlist head as ``nextTokenLogits(_:cache:state:)``'s do:
+    /// a verify pass samples them as plain decoding would.
     public func callAsFunction(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
-        let h = model(input.tokens, cache: cache, effort: state?[reasoningEffortKey])
-        return .init(logits: projectLogits(h), state: state)
+        let effort = state?[reasoningEffortKey]
+        guard let tapping = Self.drafterTaps(state) else {
+            let h = model(input.tokens, cache: cache, effort: effort)
+            return .init(logits: projectLogits(h), state: state)
+        }
+        let output = model.forward(input.tokens, cache: cache, effort: effort, tapping: tapping)
+        return .init(
+            logits: shortlistLogits(output.hidden) ?? projectLogits(output.hidden),
+            state: Self.drafterState(state, features: output.taps ?? output.hidden))
+    }
+
+    /// Prefills in chunks. When a drafter asks, also emits the drafter's target features of the
+    /// last prompt positions it attends, and returns the logits of the last position.
+    public func prepare(
+        _ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters
+    ) throws -> PrepareResult {
+        guard let tapping = Self.drafterTaps(state) else {
+            return try prepareInChunks(input, cache: cache, state: state, prefill: prefill)
+        }
+        var tokens = input.text.tokens
+        if tokens.ndim == 1 { tokens = tokens.expandedDimensions(axis: 0) }
+        let total = tokens.dim(1)
+        let context = min(total, state?[mtpTargetContextLengthKey] ?? total)
+        let effort = state?[reasoningEffortKey]
+
+        var features = [MLXArray]()
+        let processed = try prefill.forEachChunk(total: total) { range in
+            // Chunks before the drafter's context need no features.
+            let tapped = range.upperBound > total - context
+            let output = model.forward(
+                tokens[0..., range], cache: cache, effort: effort, tapping: tapped ? tapping : [])
+            if tapped { features.append(output.taps ?? output.hidden) }
+            asyncEval(cache, features)
+        }
+        if processed > 0 { eval(cache) }
+        let output = model.forward(
+            tokens[0..., processed...], cache: cache, effort: effort, tapping: tapping)
+        features.append(output.taps ?? output.hidden)
+        prefill.progress?(total, total)
+
+        let all = concatenated(features, axis: 1)
+        let last = output.hidden[0..., (-1)...]
+        return .logits(
+            LMOutput(
+                logits: shortlistLogits(last) ?? projectLogits(last),
+                state: Self.drafterState(state, features: all[0..., (all.dim(1) - context)...])))
+    }
+
+    /// The layers whose streams a drafter reads, or `nil` when no drafter asks. Without layers a
+    /// drafter reads the final hidden states.
+    private static func drafterTaps(_ state: LMOutput.State?) -> Set<Int>? {
+        guard state?[mtpEmitFlagKey] ?? false else { return nil }
+        return Set(state?[mtpTargetLayerIdsKey] ?? [])
+    }
+
+    /// `state` with the drafter's features `[B, L, F]`. The drafter reads no K/V.
+    private static func drafterState(_ state: LMOutput.State?, features: MLXArray)
+        -> LMOutput.State
+    {
+        var state = state ?? LMOutput.State()
+        state[mtpLastHiddenStatesKey] = features
+        state[mtpSharedKVStatesKey] = [:]
+        state[mtpSharedKVOffsetsKey] = [:]
+        state[mtpSharedKVSourceIndicesKey] = [:]
+        return state
     }
 
     /// Projects only the last position, through the shortlist head when the checkpoint ships one.
-    /// Every other forward, such as scoring or speculative verification, keeps the exact head.
+    /// Scoring without a drafter uses the full head.
     public func nextTokenLogits(
         _ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?
     ) -> LMOutput {
@@ -1573,7 +1683,9 @@ public class Raon1MiniModel: Module, LLMModel, AdditionalWeightFilesProviding {
 
     public func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
         try model.layers.map { layer in
-            if layer.isRDA { return MambaCache() }
+            if layer.isRDA {
+                return RewindableGatedDeltaCache(rollbackCapacity: maximumNativeTargetCacheRewind)
+            }
             return try makeAttentionKVCache(parameters: parameters)
         }
     }
