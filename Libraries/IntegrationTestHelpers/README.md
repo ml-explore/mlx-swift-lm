@@ -35,3 +35,29 @@ xcodebuild test \
   -destination 'platform=macOS' \
   -only-testing:IntegrationTestingTests/ModelLoadingSuite/RerankerModelIntegrationTests
 ```
+
+The decision model tests download LiquidAI d1-3B (6.2 GB), so they are skipped unless
+`MLX_RUN_DECISION_INTEGRATION=1`. With `xcodebuild`, prefix the variable with `TEST_RUNNER_`:
+
+```bash
+TEST_RUNNER_MLX_RUN_DECISION_INTEGRATION=1 xcodebuild test \
+  -project IntegrationTesting/IntegrationTesting.xcodeproj \
+  -scheme IntegrationTesting \
+  -destination 'platform=macOS' \
+  -skipPackagePluginValidation \
+  -only-testing:IntegrationTestingTests/DecisionModelIntegrationTests
+```
+
+They load d1-3B through `DecisionModelFactory` and check the README examples (a support
+ticket and the two cats photo) against its PyTorch reference's probabilities on the same
+pinned checkpoint. The photo comes from a pinned Hugging Face dataset. d1-3B runs in
+bfloat16, the precision it ships in, and must match to 0.05. swift-transformers before 1.4.0,
+which the test project still allows, encodes some d1-3B text differently from Hugging Face
+tokenizers, for example a word followed by `"\n\n"`, so the token counts are not compared.
+
+A further test checks that the generic `loadModelContainer` still loads d1-3B as a chat
+model.
+
+`Tests/MLXLMTests` also has a gated suite that compares d1-3B with its reference more
+tightly, from a local checkpoint and fixture files; see
+[Tests/MLXLMTests/README.md](../../Tests/MLXLMTests/README.md).

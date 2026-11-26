@@ -577,6 +577,12 @@ func resolveProcessorConfiguration(
     guard let processorType else {
         throw missingProcessorTypeError(filename: configuration.filename)
     }
+    // LFM2-VL image settings can span both files.
+    if processorType == "Lfm2VlProcessor",
+        let data = try LFM2VLImageSettings.resolvedConfiguration(directory: modelDirectory)
+    {
+        return VLMProcessorConfiguration(data: data, processorType: processorType)
+    }
     return VLMProcessorConfiguration(data: configuration.data, processorType: processorType)
 }
 

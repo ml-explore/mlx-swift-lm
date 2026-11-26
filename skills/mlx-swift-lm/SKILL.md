@@ -29,6 +29,7 @@ mlx-swift-lm is a Swift package for running Large Language Models (LLMs) and Vis
 - Tool calling / function calling with models
 - LoRA adapter training and fine-tuning
 - Text embeddings for RAG/semantic search
+- Typed decisions (choice, score, yes/no) about text, JSON, or images with decision models
 - Porting model architectures from Python MLX-LM to Swift
 
 ### Architecture Overview
@@ -37,6 +38,7 @@ MLXLMCommon     - Core infra (ModelContainer, ChatSession, Evaluate, KVCache, wi
 MLXLLM          - Text-only LLM support (Llama, Qwen, Gemma, Phi, DeepSeek, etc.)
 MLXVLM          - Vision-Language Models (Qwen-VL, PaliGemma, Gemma3, etc.)
 MLXEmbedders    - Embedding models and pooling utilities
+MLXDecisions    - Decision models and their API (LiquidAI d1-3B)
 ```
 
 ## 2. Key File Reference
@@ -57,6 +59,9 @@ MLXEmbedders    - Embedding models and pooling utilities
 | VLM factory & registry | `Libraries/MLXVLM/VLMModelFactory.swift` |
 | LoRA configuration | `Libraries/MLXLMCommon/Adapters/LoRA/LoRAContainer.swift` |
 | LoRA training | `Libraries/MLXLLM/LoraTrain.swift` |
+| Decision API | `Libraries/MLXDecisions/Decision.swift` |
+| Decision container | `Libraries/MLXDecisions/DecisionContainer.swift` |
+| Decision model factory | `Libraries/MLXDecisions/DecisionModelFactory.swift` |
 
 ## 3. Quick Start
 
@@ -422,6 +427,7 @@ await session.clear()
 | [references/lora-adapters.md](references/lora-adapters.md) | LoRA/DoRA/QLoRA, loading adapters |
 | [references/training.md](references/training.md) | LoRATrain API, fine-tuning |
 | [references/embeddings.md](references/embeddings.md) | EmbeddingModel, pooling, use cases |
+| [references/decisions.md](references/decisions.md) | Decision models: typed questions, answers, token budget |
 | [references/model-porting.md](references/model-porting.md) | Porting models from Python MLX-LM to Swift |
 
 ## 8. Deprecated Patterns Summary
