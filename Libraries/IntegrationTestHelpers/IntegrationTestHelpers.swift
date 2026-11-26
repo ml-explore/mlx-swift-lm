@@ -4,6 +4,7 @@
 
 import Foundation
 import MLX
+import MLXDecisions
 import MLXEmbedders
 import MLXLLM
 import MLXLMCommon
@@ -934,6 +935,206 @@ public enum RerankerIntegrationTests {
             score > 0 && score < 1,
             "\(modelID) returned a normalized score at a non-invertible boundary")
         return Foundation.log(score / (1 - score))
+    }
+}
+
+// MARK: - Decision Tests
+
+/// The README examples of the LiquidAI d1 decision models, checked against their Python
+/// references.
+///
+/// The expected probabilities come from the same pinned checkpoints and inputs, each in the
+/// precision it ships in: d1-3B from its own code (`modeling_d1.py`) in bfloat16, as
+/// `tools/d1_fixtures.py readme` prints them, and d1-omni-600M from mlx-vlm's `predict` at
+/// commit 370f4ccf in float32.
+public enum DecisionIntegrationTests {
+    private static let d1Configuration = ModelConfiguration(
+        id: "LiquidAI/d1-3B", revision: "051bcc464b01b9f92942b364d9586b0ef5912432")
+    private static let d1OmniConfiguration = ModelConfiguration(
+        id: "LiquidAI/d1-omni-600M", revision: "02b55d7076f15129e59ab3f94783f32c4b088674")
+
+    private static let ticket: DecisionState = "I was charged twice, please refund one."
+    private static let urgency = DecisionQuestion.score(
+        "How urgent is this?", levels: ["Can wait", "Today", "Blocking the customer now"])
+    private static let cats: KeyValuePairs<String, DecisionQuestion> = [
+        "cats": .choice("How many cats are there?", options: ["one", "two", "more"])
+    ]
+
+    /// The two cats photo the READMEs use (COCO val2017 39769), the same JPEG bytes.
+    private static func catsImage() async throws -> UserInput.Image {
+        let directory = try await downloadDataset(
+            repo: "hf-internal-testing/fixtures_image_utils",
+            revision: "4539dd3e9faa39d54e606b4c875f85c7561f5423", matching: ["cats.jpg"])
+        return .url(directory.appending(component: "cats.jpg"))
+    }
+
+    /// The speech clip of the d1-omni README: 10.4 s of 16 kHz mono FLAC.
+    private static func speechClip() async throws -> UserInput.Audio {
+        let directory = try await downloadDataset(
+            repo: "Narsil/asr_dummy", revision: "8d141c84e3f84c54cd7bbaa851d24edd0f559734",
+            matching: ["1.flac"])
+        return .url(directory.appending(component: "1.flac"))
+    }
+
+    /// d1-3B answers the README's support ticket and the two cats photo like the reference.
+    ///
+    /// The tolerance covers tokenizer differences, bfloat16 and JPEG decoding; see README.md.
+    public static func d1(
+        downloader: any Downloader,
+        tokenizerLoader: any TokenizerLoader
+    ) async throws {
+        let decider = try await DecisionModelFactory.shared.loadContainer(
+            from: downloader, using: tokenizerLoader, configuration: d1Configuration,
+            progressHandler: logProgress(d1Configuration.name))
+        try check(decider.capabilities.media == [.images], "d1-3B must read images only")
+
+        let text = try await decider.predict(
+            state: ticket,
+            questions: [
+                "refund": .bool("Is the customer asking for a refund?"),
+                "team": .choice(
+                    "Which team should handle this?",
+                    options: [
+                        DecisionOption("billing", description: "Charges, refunds"),
+                        DecisionOption("technical", description: "App faults"),
+                    ]),
+                "urgency": urgency,
+            ])
+        try checkAnswers(
+            text, label: "d1-3B text", tolerance: 0.05,
+            expected: [
+                "refund": [0.989_013_057_369_406_8],
+                "team": [0.984_093_608_288_185_3, 0.015_906_391_711_814_71],
+                "urgency": [
+                    0.401_020_709_375_377_37, 0.514_920_783_456_132_6, 0.084_058_507_168_490_12,
+                ],
+            ])
+
+        let photo = try await decider.predict(
+            state: nil, questions: cats, images: [try await catsImage()])
+        try checkAnswers(
+            photo, label: "d1-3B image", tolerance: 0.05,
+            expected: [
+                "cats": [
+                    0.007_918_135_022_506_026, 0.974_238_072_254_425_4, 0.017_843_792_723_068_574,
+                ]
+            ])
+    }
+
+    /// d1-3B keeps LFM2-VL's `model_type`, so the generic loader still returns a chat model.
+    public static func d1Chat(
+        downloader: any Downloader,
+        tokenizerLoader: any TokenizerLoader
+    ) async throws {
+        let container = try await loadModelContainer(
+            from: downloader, using: tokenizerLoader, configuration: d1Configuration,
+            progress: .download(logProgress(d1Configuration.name)))
+        let isLFM2VL = await container.perform { $0.model is LFM2VL }
+        try check(isLFM2VL, "d1-3B must load as an LFM2-VL model")
+
+        let session = ChatSession(
+            container, generateParameters: GenerateParameters(maxTokens: 20, temperature: 0))
+        let reply = try await session.respond(to: "What is the capital of France?")
+        // mlx-vlm replies "Paris is the capital of France."
+        try check(reply.contains("Paris"), "Expected 'Paris' in d1-3B's reply, got: \(reply)")
+    }
+
+    /// d1-omni-600M answers the README's support ticket, the two cats photo and the speech
+    /// clip like mlx-vlm. The image tolerance covers Core Image decoding JPEG a few levels away
+    /// from libjpeg-turbo.
+    public static func d1Omni(
+        downloader: any Downloader,
+        tokenizerLoader: any TokenizerLoader
+    ) async throws {
+        let decider = try await DecisionModelFactory.shared.loadContainer(
+            from: downloader, using: tokenizerLoader, configuration: d1OmniConfiguration,
+            progressHandler: logProgress(d1OmniConfiguration.name))
+        try check(
+            decider.capabilities.media == [.images, .audio], "d1-omni must read images and audio")
+
+        let text = try await decider.predict(
+            state: ticket,
+            questions: [
+                "refund": .bool("Is the customer asking for a refund?"),
+                "team": .choice(
+                    "Which team should handle this?",
+                    options: [
+                        DecisionOption("billing", description: "Charges, refunds, invoices"),
+                        DecisionOption("technical", description: "App or site faults"),
+                        DecisionOption("fraud", description: "Suspected unauthorised use"),
+                    ]),
+                "urgency": urgency,
+            ])
+        try checkAnswers(
+            text, label: "d1-omni text", tolerance: 1e-4, inputTokens: 142,
+            expected: [
+                "refund": [0.998_614_311_218_261_7],
+                "team": [
+                    0.992_582_440_376_281_7, 0.005_665_129_050_612_45, 0.001_752_396_579_831_838_6,
+                ],
+                "urgency": [
+                    0.012_962_193_228_304_386, 0.650_820_314_884_185_8, 0.336_217_552_423_477_2,
+                ],
+            ])
+
+        let photo = try await decider.predict(
+            state: nil, questions: cats, images: [try await catsImage()])
+        try checkAnswers(
+            photo, label: "d1-omni image", tolerance: 0.02, inputTokens: 256,
+            expected: [
+                "cats": [
+                    0.055_680_528_283_119_2, 0.933_421_969_413_757_3, 0.010_897_504_165_768_623,
+                ]
+            ])
+
+        let speech = try await decider.predict(
+            state: nil, questions: ["speaking": .bool("Is anyone speaking in this clip?")],
+            audio: try await speechClip())
+        try checkAnswers(
+            speech, label: "d1-omni audio", tolerance: 1e-4, inputTokens: 155,
+            expected: ["speaking": [0.991_984_426_975_250_2]])
+    }
+
+    /// Check each answer's probabilities, P(true) for a bool, and that the most probable
+    /// option is the reference's.
+    private static func checkAnswers(
+        _ response: DecisionResponse, label: String, tolerance: Double, inputTokens: Int? = nil,
+        expected: KeyValuePairs<String, [Double]>
+    ) throws {
+        try check(
+            response.answers.map(\.name) == expected.map(\.key),
+            "\(label): unexpected answers \(response.answers.map(\.name))")
+        var largest = 0.0
+        for (name, reference) in expected {
+            guard let answer = response[name] else { continue }
+            let actual =
+                if case .bool = answer.value { [answer.probabilities[1]] } else {
+                    answer.probabilities
+                }
+            try check(
+                actual.count == reference.count,
+                "\(label) \(name): expected \(reference.count) probabilities, got \(actual)")
+            let difference = zip(actual, reference).map { abs($0 - $1) }.max() ?? 0
+            largest = max(largest, difference)
+            try check(
+                difference <= tolerance,
+                "\(label) \(name): probabilities \(actual) differ from the reference \(reference) by \(difference)"
+            )
+            try check(
+                top(actual) == top(reference),
+                "\(label) \(name): answered \(answer.value), not the reference's answer")
+        }
+        if let inputTokens {
+            try check(
+                response.inputTokens == inputTokens,
+                "\(label): read \(response.inputTokens) tokens, the reference read \(inputTokens)")
+        }
+        print("\(label): max |dp| \(largest) (tolerance \(tolerance))")
+    }
+
+    /// The most probable option, or for a bool (`[P(true)]`) 1 when it is true.
+    private static func top(_ p: [Double]) -> Int? {
+        p.count == 1 ? (p[0] >= 0.5 ? 1 : 0) : p.indices.max { p[$0] < p[$1] }
     }
 }
 
