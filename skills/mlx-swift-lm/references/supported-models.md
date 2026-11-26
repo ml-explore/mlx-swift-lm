@@ -84,7 +84,14 @@ LLMRegistry.glm4_9b_4bit          // mlx-community/GLM-4-9B-0414-4bit
 // Note: Raon uses Qwen-style <think> reasoning and .xmlFunction tool calls
 ```
 
-Each request uses the steering alpha of the config's default reasoning effort.
+Set `GenerateParameters.reasoningEffort` to use a native steering level reported by
+`ModelContainer.supportedReasoningEfforts`. Leave it unset to use the checkpoint default.
+To turn thinking off, set `enable_thinking: false` in the template context and use `.off`
+for native steering. Changing the effort does not recompute the cached prefix.
+
+The optional `dflash2/` checkpoint supports greedy speculative decoding. Register it with
+`Raon1DFlash2Registration.register()` and load it through `MTPDrafterModelFactory`.
+Measure against plain decoding: the speed gain depends on draft acceptance.
 
 When the checkpoint ships `head_stage1_a2g64gm.safetensors`, decode uses it as a 2-bit
 shortlist for the output head: the 256 best candidates get exact logits, and the other logits
