@@ -15,9 +15,9 @@ final class LFM2MoeRoutingTests: XCTestCase {
         }
     }
 
-    private func makeConfig(useExpertBias: Bool, normTopkProb: Bool = false) throws
-        -> LFM2MoEConfiguration
-    {
+    private func makeConfig(
+        useExpertBias: Bool, normTopkProb: Bool = false, numExpertsPerToken: Int = 2
+    ) throws -> LFM2MoEConfiguration {
         let json = """
             {
                 "model_type": "lfm2_moe",
@@ -27,7 +27,7 @@ final class LFM2MoeRoutingTests: XCTestCase {
                 "moe_intermediate_size": 8,
                 "num_hidden_layers": 1,
                 "num_experts": 4,
-                "num_experts_per_tok": 2,
+                "num_experts_per_tok": \(numExpertsPerToken),
                 "norm_topk_prob": \(normTopkProb),
                 "num_attention_heads": 1,
                 "num_key_value_heads": 1,
@@ -112,6 +112,60 @@ final class LFM2MoeRoutingTests: XCTestCase {
         XCTAssertEqual(
             prepared.perLayerQuantization?.quantization(layer: "model.layers.1.feed_forward.gate")?
                 .bits, 8)
+    }
+
+    /// mlx-lm takes the last k of `argpartition(scores, kth=-k)`. On the GPU MLX
+    /// computes argpartition with the same sort as argsort, so that is the top k
+    /// in ascending score order, the last k of `argSort`. The order is the order
+    /// in which `weightedExpertSum` adds the k expert outputs, and with k > 2 and
+    /// bfloat16 accumulation a different order rounds differently.
+    private func assertExpertOrderMatchesMLXLM(
+        expertBias: [Float]?, file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let k = 3
+        let config = try makeConfig(useExpertBias: expertBias != nil, numExpertsPerToken: k)
+        let (block, x) = withRandomState(MLXRandom.RandomState(seed: 53)) {
+            let block = Lfm2MoeSparseMoeBlock(config)
+            // The gate stays float32 so that no two experts tie on a score.
+            block.switchMLP.update(
+                parameters: block.switchMLP.parameters().mapValues { $0.asType(.bfloat16) })
+            return (block, MLXRandom.normal([1, 64, 4]).asType(.bfloat16))
+        }
+        if let expertBias {
+            try block.update(
+                parameters: ModuleParameters.unflattened(["expert_bias": MLXArray(expertBias)]),
+                verify: [])
+        }
+
+        // expert_bias steers the selection only; the weights come from the scores.
+        let scores = MLX.sigmoid(block.gate(x).asType(.float32))
+        let selection = expertBias.map { scores + MLXArray($0) } ?? scores
+        let ascending = argSort(selection, axis: -1)[.ellipsis, (-k)...]
+        let descending = argSort(-selection, axis: -1)[.ellipsis, ..<k]
+        func output(_ indices: MLXArray) -> MLXArray {
+            weightedExpertSum(
+                block.switchMLP(x, indices),
+                takeAlong(scores, indices, axis: -1).asType(x.dtype))
+        }
+
+        XCTAssertEqual(
+            block.route(x).indices.asArray(UInt32.self), ascending.asArray(UInt32.self),
+            file: file, line: line)
+        let y = block(x)
+        XCTAssertEqual(y.dtype, .bfloat16, file: file, line: line)
+        XCTAssertTrue(MLX.arrayEqual(y, output(ascending)).item(Bool.self), file: file, line: line)
+        // Same experts in the other order: the bfloat16 sums differ.
+        XCTAssertFalse(
+            MLX.arrayEqual(output(descending), output(ascending)).item(Bool.self),
+            file: file, line: line)
+    }
+
+    func testExpertOrderMatchesMLXLMInBFloat16() throws {
+        try assertExpertOrderMatchesMLXLM(expertBias: nil)
+    }
+
+    func testBiasedExpertOrderMatchesMLXLMInBFloat16() throws {
+        try assertExpertOrderMatchesMLXLM(expertBias: [0, 0, 0.5, 0])
     }
 
     func testExpertBiasSteersSelectionOnly() throws {
