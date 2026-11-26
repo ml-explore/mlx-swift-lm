@@ -355,7 +355,7 @@ final class Qwen35GatedDeltaNet: Module {
             cache?[0] ?? zeroStates(batch: inputs.dim(0), dtype: inputs.dtype).conv
         let (out, newConvState, newRecState, checkpoint) = forward(
             inputs, convState: convState, recState: cache?[1], mask: mask,
-            checkpointAfter: checkpointAfter)
+            lengths: cache?.currentLengths, checkpointAfter: checkpointAfter)
         if let cache {
             cache[0] = newConvState
             cache[1] = newRecState
@@ -381,12 +381,14 @@ final class Qwen35GatedDeltaNet: Module {
     }
 
     /// The GDN body with state passed explicitly in and out so it can be
-    /// traced.
+    /// traced. `lengths` keeps each right-padded row's conv state at its last
+    /// real token.
     func forward(
         _ x: MLXArray,
         convState: MLXArray,
         recState: MLXArray?,
         mask: MLXArray?,
+        lengths: MLXArray? = nil,
         checkpointAfter: Int? = nil
     ) -> (
         output: MLXArray,
@@ -404,11 +406,12 @@ final class Qwen35GatedDeltaNet: Module {
         }
 
         let fusedDecode =
-            S == 1 && mask == nil && (qkv.dtype == .float16 || qkv.dtype == .bfloat16)
+            S == 1 && mask == nil && lengths == nil
+            && (qkv.dtype == .float16 || qkv.dtype == .bfloat16)
         let (convPre, newConvState) =
             fusedDecode
             ? decodeConv(convState: convState, qkv: qkv)
-            : generalConv(convState: convState, qkv: qkv)
+            : generalConv(convState: convState, qkv: qkv, lengths: lengths)
         let convOut = silu(convPre)
 
         let convSplit = MLX.split(convOut, indices: [keyDim, 2 * keyDim], axis: -1)
@@ -515,13 +518,19 @@ final class Qwen35GatedDeltaNet: Module {
     /// The sliding-window conv via MLX's `Convolution` kernel — the reference
     /// `decodeConv` is pinned against.
     func generalConv(
-        convState: MLXArray, qkv: MLXArray
+        convState: MLXArray, qkv: MLXArray, lengths: MLXArray? = nil
     ) -> (conv: MLXArray, state: MLXArray) {
         let convInput = concatenated([convState, qkv], axis: 1)
-        return (
-            conv1d(convInput),
-            contiguous(convInput[0..., (-(convKernelSize - 1))..., 0...])
-        )
+        let nKeep = convKernelSize - 1
+        let state: MLXArray
+        if let lengths {
+            let ends = clip(lengths, min: 0, max: qkv.dim(1))
+            let positions = (ends[0..., .newAxis] + MLXArray(0 ..< nKeep))[.ellipsis, .newAxis]
+            state = takeAlong(convInput, positions, axis: 1)
+        } else {
+            state = contiguous(convInput[0..., (-nKeep)..., 0...])
+        }
+        return (conv1d(convInput), state)
     }
 }
 

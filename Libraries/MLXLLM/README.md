@@ -56,6 +56,7 @@ Currently supported model types are:
 - Qwen2
 - Qwen3
 - Qwen3-Next
+- Qwen3.8-Flash-Next
 - Starcoder2
 - MiMo
 - MiMo_v2_flash
