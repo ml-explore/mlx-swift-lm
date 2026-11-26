@@ -45,7 +45,9 @@ public struct Gemma4Configuration: Codable, Sendable {
 
 // MARK: - Model
 
-public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider {
+public class Gemma4Model: Module, LLMModel, KVCacheDimensionProvider, InputOnlyEmbeddingsProviding {
+    public var inputOnlyEmbeddings: [Embedding] { languageModel.inputOnlyEmbeddings }
+
     public var vocabularySize: Int { languageModel.vocabularySize }
     public var kvHeads: [Int] { languageModel.kvHeads }
 

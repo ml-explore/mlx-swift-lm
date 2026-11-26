@@ -91,6 +91,9 @@ public struct ResolvedModelConfiguration: Sendable {
     /// - ``ModelConfiguration/excludedComponents``
     public var excludedComponents: Set<ModelComponent>
 
+    /// Storage for supported frozen, lookup-only embedding tables.
+    public var embeddingStorage: EmbeddingStoragePolicy
+
     public init(
         modelDirectory: URL,
         tokenizerDirectory: URL,
@@ -104,7 +107,8 @@ public struct ResolvedModelConfiguration: Sendable {
         messageGenerator: (any MessageGenerator)? = nil,
         generationConfig: GenerationConfigFile? = nil,
         weightFileSelection: WeightFileSelection = .automatic,
-        excludedComponents: Set<ModelComponent> = []
+        excludedComponents: Set<ModelComponent> = [],
+        embeddingStorage: EmbeddingStoragePolicy = .automatic
     ) {
         self.modelDirectory = modelDirectory
         self.tokenizerDirectory = tokenizerDirectory
@@ -119,6 +123,7 @@ public struct ResolvedModelConfiguration: Sendable {
         self.generationConfig = generationConfig
         self.weightFileSelection = weightFileSelection
         self.excludedComponents = excludedComponents
+        self.embeddingStorage = embeddingStorage
     }
 }
 

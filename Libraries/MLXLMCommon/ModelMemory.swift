@@ -33,15 +33,22 @@ public struct ModelMemory: Sendable, Equatable {
     public let components: [Component]
     /// Total bytes attributed to the model and its loaded components.
     public var total: Int { model + components.reduce(0) { $0 + $1.bytes } }
+    /// Bytes of ``model`` in file-backed embedding tables.
+    ///
+    /// The system reads these pages when a lookup uses them and can reclaim them later,
+    /// so the resident share is usually smaller. See ``EmbeddingStoragePolicy``.
+    public let fileBacked: Int
 
     public init(model: Int) {
         self.model = model
         self.components = []
+        self.fileBacked = 0
     }
 
-    init(model: Int, components: [Component]) {
+    init(model: Int, components: [Component], fileBacked: Int) {
         self.model = model
         self.components = components
+        self.fileBacked = fileBacked
     }
 }
 
@@ -86,7 +93,9 @@ extension BaseLanguageModel {
                     totalBytes = currentBytes
                 }
             }
-            return ModelMemory(model: model, components: breakdown)
+            return ModelMemory(
+                model: model, components: breakdown,
+                fileBacked: Memory.bufferSize(fileBackedEmbeddingArrays(in: self)))
         }
     }
 }
