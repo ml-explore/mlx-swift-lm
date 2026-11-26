@@ -323,6 +323,34 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
         }
     }
 
+    @Test func testPromptCacheStateDropsTheRequestReasoningEffort() throws {
+        let cache = KVCacheSimple()
+        _ = cache.update(
+            keys: MLXArray.ones([1, 1, 1, 4]),
+            values: MLXArray.zeros([1, 1, 1, 4]))
+        let anchorKey = LMOutput.Key<MLXArray>("test.anchor")
+        let effortOnly = LMOutput.State?.none.applying(.off)
+        var withAnchor = try #require(effortOnly)
+        withAnchor[anchorKey] = MLXArray([Int32(4)])
+        let effortURL = tempURL()
+        let anchorURL = tempURL()
+        defer {
+            try? FileManager.default.removeItem(at: effortURL)
+            try? FileManager.default.removeItem(at: anchorURL)
+        }
+
+        try savePromptCache(url: effortURL, cache: [cache], state: effortOnly)
+        try savePromptCache(url: anchorURL, cache: [cache], state: withAnchor)
+        let effortSnapshot = try loadPromptCacheSnapshot(url: effortURL)
+        let anchorSnapshot = try loadPromptCacheSnapshot(url: anchorURL)
+
+        #expect(effortOnly?[reasoningEffortKey] == .off)
+        #expect(effortSnapshot.state == nil)
+        #expect(anchorSnapshot.state?[anchorKey] != nil)
+        #expect(anchorSnapshot.state?[reasoningEffortKey] == nil)
+        #expect(effortOnly.applying(nil) == nil)
+    }
+
     @Test func testPromptCacheStateRoundTrip() throws {
         let cache = KVCacheSimple()
         let keys = MLXArray.ones([1, 2, 4, 8], dtype: .bfloat16)

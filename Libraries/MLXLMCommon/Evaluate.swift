@@ -241,6 +241,11 @@ public struct GenerateParameters: Sendable {
     /// block diffusion still uses it to initialize denoising canvases.
     public var seed: UInt64?
 
+    /// The reasoning effort of a model that steers its own reasoning, or `nil` for the model's
+    /// default. Models without steering ignore it. It applies to the tokens of this request, so it
+    /// can change between turns of a session without rebuilding the cache.
+    public var reasoningEffort: ReasoningEffort?
+
     /// Penalty factor for repeating tokens
     public var repetitionPenalty: Float?
 
@@ -1187,7 +1192,7 @@ public struct TokenIterator: TokenIteratorProtocol {
         let cacheStorage = try kvCachePlan.validated(cacheStorage)
 
         self.model = model
-        self.state = state
+        self.state = state.applying(parameters.reasoningEffort)
         self.y = input.text
         self.cacheStorage = cacheStorage
 
@@ -1634,7 +1639,7 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
         self.mainCacheStorage = mainCacheStorage
         self.draftCacheStorage = draftCacheStorage
-        self.state = mainState
+        self.state = mainState.applying(parameters.reasoningEffort)
 
         self.sampler = parameters.sampler()
         self.logProbabilityTopK = parameters.logProbabilities.map { Swift.max($0, 0) }

@@ -326,7 +326,7 @@ public struct LMOutput {
 
         func serializedArrays() throws -> [String: MLXArray] {
             var arrays: [String: MLXArray] = [:]
-            for (key, value) in contents {
+            for (key, value) in contents where key != reasoningEffortKey.id {
                 guard let array = value as? MLXArray else {
                     throw SerializationError.unsupportedValue(
                         key: key, type: String(describing: type(of: value)))
