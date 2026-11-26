@@ -408,23 +408,36 @@ extension Qwen35VLMNextNDraftModel: ModelConversionMetadataProvider {
 /// multimodal targets alike. The multimodal drafter therefore lives in its own
 /// registry, so neither configuration shape nor registration order selects it.
 extension Qwen35VLMNextNDraftModel: MTPDrafterArchitecture {
-    public static let modelTypes = [
-        "qwen3_5", "qwen3_5_moe", "qwen3_8", "qwen3_8_moe",
-        "qwen3_5_mtp", "qwen3_8_mtp",
+    /// How a checkpoint stores the drafter.
+    private enum Layout {
+        /// The head inside a target checkpoint.
+        case embedded
+        /// A standalone drafter, with its norms already converted.
+        case standalone
+    }
+
+    private static let layouts: [String: Layout] = [
+        "qwen3_5": .embedded, "qwen3_5_moe": .embedded,
+        "qwen3_8": .embedded, "qwen3_8_moe": .embedded,
+        "qwen3_5_mtp": .standalone, "qwen3_8_mtp": .standalone,
     ]
+
+    public static var modelTypes: [String] { layouts.keys.sorted() }
 
     public static var registry: MTPDrafterTypeRegistry.Kind { .visionLanguage }
 
-    /// A standalone `_mtp` checkpoint stores its norms already converted.
     public convenience init(modelType: String, configuration: Data) throws {
         let checkpoint = try JSONDecoder.json5().decode(
             Qwen35MTPCheckpointConfiguration.self, from: configuration)
-        if modelType.hasSuffix("_mtp") {
+        switch Self.layouts[modelType] {
+        case .embedded:
+            self.init(checkpoint.textConfiguration)
+        case .standalone:
             self.init(
                 checkpoint.textConfiguration,
                 checkpointPolicy: .init(modelType: checkpoint.modelType, preconvertedNorms: true))
-        } else {
-            self.init(checkpoint.textConfiguration)
+        case nil:
+            throw ModelFactoryError.unsupportedModelType(modelType)
         }
     }
 }

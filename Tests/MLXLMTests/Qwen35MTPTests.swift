@@ -839,6 +839,22 @@ struct Qwen35MTPRegistrationTests {
         #expect(!standaloneVLM.isCompatible(with: textTarget))
     }
 
+    /// A standalone checkpoint stores its norms converted, so an `mtp.` tensor without norm
+    /// metadata keeps its value.
+    @Test(
+        arguments: [MTPDrafterTypeRegistry.Kind.shared, .visionLanguage],
+        ["qwen3_5_mtp", "qwen3_8_mtp"])
+    func standaloneDraftersKeepTheirConvertedNorms(
+        registry: MTPDrafterTypeRegistry.Kind, modelType: String
+    ) async throws {
+        let drafter = try await MTPDrafterTypeRegistry[registry].createModel(
+            configuration: Data(qwen35StandaloneMTPConfigJSON().utf8), modelType: modelType)
+        let checkpoint = try drafter.prepareCheckpoint(
+            ModelCheckpoint(weights: ["mtp.norm.weight": MLXArray.ones([64])]))
+        let norm = try #require(checkpoint.weights["mtp.norm.weight"])
+        #expect(norm.asArray(Float.self) == Array(repeating: 1, count: 64))
+    }
+
     @Test
     func registrationsAreIsolatedByTargetArchitecture() async throws {
         let vlmModel = try await MTPDrafterTypeRegistry.visionLanguage.createModel(

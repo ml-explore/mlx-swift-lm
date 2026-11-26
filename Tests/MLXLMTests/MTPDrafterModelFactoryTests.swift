@@ -31,6 +31,7 @@ func testARegisteredDrafterKeepsItsConfigurationMatch() async {
     let qwen3 = Data(#"{"architectures": ["Qwen3ForCausalLM"]}"#.utf8)
     #expect(await registry.contains("qwen3", configuration: dspark))
     #expect(await !registry.contains("qwen3", configuration: qwen3))
+    #expect(await !registry.contains("qwen3", configuration: Data("{}".utf8)))
 }
 
 @Test

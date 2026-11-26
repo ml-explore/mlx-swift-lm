@@ -56,7 +56,7 @@ public actor ModelTypeRegistry<T> {
         for modelType in drafter.modelTypes {
             creators[modelType, default: []].append(
                 CreatorEntry(
-                    matches: { drafter.matches($0) },
+                    matches: { drafter.reads($0) },
                     create: { try drafter.init(modelType: modelType, configuration: $0) }))
         }
     }

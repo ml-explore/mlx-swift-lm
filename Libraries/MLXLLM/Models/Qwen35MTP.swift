@@ -373,22 +373,38 @@ extension Qwen35MTPDraftModel: ModelConversionMetadataProvider {
 }
 
 extension Qwen35MTPDraftModel: MTPDrafterArchitecture {
-    public static let modelTypes = [
-        "qwen3_5_text", "qwen3_8_text",
-        "qwen3_5", "qwen3_5_moe", "qwen3_8", "qwen3_8_moe",
-        "qwen3_5_mtp", "qwen3_8_mtp",
+    /// How a checkpoint stores the drafter.
+    private enum Layout {
+        /// A flat text configuration.
+        case text
+        /// The head inside a target checkpoint.
+        case embedded
+        /// A standalone drafter, with its norms already converted.
+        case standalone
+    }
+
+    private static let layouts: [String: Layout] = [
+        "qwen3_5_text": .text, "qwen3_8_text": .text,
+        "qwen3_5": .embedded, "qwen3_5_moe": .embedded,
+        "qwen3_8": .embedded, "qwen3_8_moe": .embedded,
+        "qwen3_5_mtp": .standalone, "qwen3_8_mtp": .standalone,
     ]
 
-    /// A `_text` checkpoint has a flat text configuration. A standalone `_mtp`
-    /// checkpoint stores its norms already converted.
+    public static var modelTypes: [String] { layouts.keys.sorted() }
+
     public convenience init(modelType: String, configuration: Data) throws {
         let decoder = JSONDecoder.json5()
-        if modelType.hasSuffix("_text") {
+        switch Self.layouts[modelType] {
+        case .text:
             self.init(try decoder.decode(Qwen35TextConfiguration.self, from: configuration))
-        } else {
+        case .embedded:
+            self.init(try decoder.decode(Qwen35Configuration.self, from: configuration))
+        case .standalone:
             self.init(
                 try decoder.decode(Qwen35Configuration.self, from: configuration),
-                preconvertedNorms: modelType.hasSuffix("_mtp"))
+                preconvertedNorms: true)
+        case nil:
+            throw ModelFactoryError.unsupportedModelType(modelType)
         }
     }
 }

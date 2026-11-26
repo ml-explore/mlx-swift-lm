@@ -141,9 +141,10 @@ public protocol MTPDrafterArchitecture: MTPDrafterModel {
     /// The registry that creates the drafter. The default is `.shared`.
     static var registry: MTPDrafterTypeRegistry.Kind { get }
 
-    /// Whether `configuration` is this drafter's when other architectures share
-    /// its `model_type`. The default accepts every configuration.
-    static func matches(_ configuration: Data) -> Bool
+    /// The `architectures` entry of the drafter's checkpoints, when other
+    /// architectures share its `model_type`. The default, `nil`, accepts every
+    /// checkpoint of its model types.
+    static var architecture: String? { get }
 
     /// Creates the drafter from the `config.json` of a `modelType` checkpoint.
     init(modelType: String, configuration: Data) throws
@@ -152,7 +153,20 @@ public protocol MTPDrafterArchitecture: MTPDrafterModel {
 extension MTPDrafterArchitecture {
     public static var registry: MTPDrafterTypeRegistry.Kind { .shared }
 
-    public static func matches(_ configuration: Data) -> Bool { true }
+    public static var architecture: String? { nil }
+
+    /// Whether the checkpoint with `configuration` is this drafter's.
+    static func reads(_ configuration: Data) -> Bool {
+        guard let architecture else { return true }
+        let checkpoint = try? JSONDecoder.json5().decode(
+            CheckpointArchitectures.self, from: configuration)
+        return checkpoint?.architectures?.contains(architecture) == true
+    }
+}
+
+/// The `config.json` field that tells drafters with a shared `model_type` apart.
+private struct CheckpointArchitectures: Decodable {
+    let architectures: [String]?
 }
 
 /// Target-side capability for rewinding an in-place speculative verify pass.
