@@ -23,8 +23,16 @@ private let computeGatedDeltaG: @Sendable (MLXArray, MLXArray, MLXArray) -> MLXA
 
 // MARK: - Metal Kernel
 
-private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
+/// `vectorized` takes a per-key-channel decay `g: [B, T, Hv, Dk]` instead of
+/// one decay per head `g: [B, T, Hv]`.
+private func makeGatedDeltaKernel(hasMask: Bool, vectorized: Bool = false)
+    -> MLXFast.MLXFastKernel?
+{
     let maskSource = hasMask ? "mask[b_idx * T + t]" : "true"
+    let gLayout = vectorized ? "[B, T, Hv, Dk]" : "[B, T, Hv]"
+    let gOffset = vectorized ? "(b_idx * T * Hv + hv_idx) * Dk" : "b_idx * T * Hv"
+    let gIndex = vectorized ? "s_idx" : "hv_idx"
+    let gStride = vectorized ? "Hv * Dk" : "Hv"
 
     let source = """
             auto n = thread_position_in_grid.z;
@@ -44,8 +52,8 @@ private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
             auto dk_idx = thread_position_in_threadgroup.x;
             auto dv_idx = thread_position_in_grid.y;
 
-            // g: [B, T, Hv]
-            auto g_ = g + b_idx * T * Hv;
+            // g: \(gLayout)
+            auto g_ = g + \(gOffset);
             auto beta_ = beta + b_idx * T * Hv;
 
             // state_in, state_out: [B, Hv, Dv, Dk]
@@ -68,7 +76,7 @@ private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
                   float kv_compensation = 0.0f;
                   for (int i = 0; i < n_per_t; ++i) {
                     auto s_idx = n_per_t * dk_idx + i;
-                    state[i] = state[i] * g_[hv_idx];
+                    state[i] = state[i] * g_[\(gIndex)];
                     auto product = state[i] * k_[s_idx];
                     auto corrected = product - kv_compensation;
                     auto next_sum = kv_mem + corrected;
@@ -98,7 +106,7 @@ private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
               k_ += Hk * Dk;
               v_ += Hv * Dv;
               y += Hv * Dv;
-              g_ += Hv;
+              g_ += \(gStride);
               beta_ += Hv;
             }
             for (int i = 0; i < n_per_t; ++i) {
@@ -112,7 +120,7 @@ private func makeGatedDeltaKernel(hasMask: Bool) -> MLXFast.MLXFastKernel? {
         inputNames.append("mask")
     }
 
-    let suffix = hasMask ? "_mask" : ""
+    let suffix = (vectorized ? "_vec" : "") + (hasMask ? "_mask" : "")
 
     return MLXFast.metalKernel(
         name: "gated_delta_step\(suffix)",
@@ -127,14 +135,29 @@ private final class GatedDeltaKernelManager: Sendable {
 
     let kernel: MLXFast.MLXFastKernel?
     let kernelMasked: MLXFast.MLXFastKernel?
+    let kernelVectorized: MLXFast.MLXFastKernel?
+    let kernelVectorizedMasked: MLXFast.MLXFastKernel?
 
     private init() {
         kernel = makeGatedDeltaKernel(hasMask: false)
         kernelMasked = makeGatedDeltaKernel(hasMask: true)
+        kernelVectorized = makeGatedDeltaKernel(hasMask: false, vectorized: true)
+        kernelVectorizedMasked = makeGatedDeltaKernel(hasMask: true, vectorized: true)
     }
 }
 
 // MARK: - Kernel Dispatch
+
+/// Whether `g` is a per-key-channel gate `[B, T, Hv, Dk]`. A gate `[B, T, Hv]` or
+/// `[B, T, Hv, 1]` is one decay per head and takes the per-head paths as before.
+private func isPerChannelGate(_ g: MLXArray, q: MLXArray, v: MLXArray) -> Bool {
+    guard g.ndim == 4, g.dim(3) != 1 else { return false }
+    let expected = [q.dim(0), q.dim(1), v.dim(2), q.dim(3)]
+    precondition(
+        g.shape == expected, "per-channel gate must be \(expected) ([B, T, Hv, Dk]), got \(g.shape)"
+    )
+    return true
+}
 
 func gatedDeltaKernel(
     q: MLXArray,
@@ -154,13 +177,15 @@ func gatedDeltaKernel(
     let inputType = q.dtype
     let stateType = state.dtype
 
+    let kernels = GatedDeltaKernelManager.shared
+    let vectorized = isPerChannelGate(g, q: q, v: v)
     let selectedKernel: MLXFast.MLXFastKernel?
     var inputs: [MLXArray] = [q, k, v, g, beta, state, MLXArray(T)]
     if let mask {
-        selectedKernel = GatedDeltaKernelManager.shared.kernelMasked
+        selectedKernel = vectorized ? kernels.kernelVectorizedMasked : kernels.kernelMasked
         inputs.append(mask)
     } else {
-        selectedKernel = GatedDeltaKernelManager.shared.kernel
+        selectedKernel = vectorized ? kernels.kernelVectorized : kernels.kernel
     }
 
     guard let kernel = selectedKernel else {
@@ -379,7 +404,23 @@ public func gatedDeltaUpdate(
 ) -> (MLXArray, MLXArray) {
     let beta = sigmoid(b).asType(.float32)
     let g = computeGatedDeltaG(aLog, a, dtBias)
+    return gatedDeltaUpdate(
+        q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask, useKernel: useKernel)
+}
 
+/// Gated delta recurrence with a precomputed multiplicative decay `g`: one
+/// decay per head `[B, T, Hv]`, or one per key channel `[B, T, Hv, Dk]` (Kimi
+/// Delta Attention).
+package func gatedDeltaUpdate(
+    q: MLXArray,
+    k: MLXArray,
+    v: MLXArray,
+    g: MLXArray,
+    beta: MLXArray,
+    state: MLXArray? = nil,
+    mask: MLXArray? = nil,
+    useKernel: Bool = true
+) -> (MLXArray, MLXArray) {
     let B = q.dim(0)
     let Dk = q.dim(3)
     let Hv = v.dim(2)
@@ -405,8 +446,9 @@ public func gatedDeltaUpdate(
     // `!training` here, as the Python model does with `use_kernel`.
     //
     // The MLXFast kernel has a gradient and is faster than both, so the
-    // layouts it supports take it in training and in inference.
-    if hasFastGatedDelta(q: q, v: v, mask: mask) {
+    // layouts it supports take it in training and in inference. It takes one
+    // decay per head only.
+    if !isPerChannelGate(g, q: q, v: v), hasFastGatedDelta(q: q, v: v, mask: mask) {
         return fastGatedDelta(q: q, k: k, v: v, g: g, beta: beta, state: state)
     }
     if useKernel, GatedDeltaKernelManager.shared.kernel != nil, Dk % 32 == 0 {
