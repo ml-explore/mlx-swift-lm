@@ -406,7 +406,9 @@ struct Raon1MiniTests {
         let x = MLXArray.ones([1, 1, 64], dtype: .bfloat16)
         let before = slot.project(x, parts, training: false)[0]
         eval(before)
-        let replacement = key == "weight" ? MLXArray.zeros(first.weight.shape, dtype: first.weight.dtype) : MLXArray(Float(2))
+        let replacement =
+            key == "weight"
+            ? MLXArray.zeros(first.weight.shape, dtype: first.weight.dtype) : MLXArray(Float(2))
         first.update(parameters: ModuleParameters.unflattened([(key, replacement)]))
         let after = slot.project(x, parts, training: false)[0]
         #expect(!arrayEqual(before, after).item(Bool.self))
