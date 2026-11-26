@@ -321,6 +321,22 @@ final class ChatSessionCheckpointTests: XCTestCase {
         XCTAssertEqual(third.info.cachedPromptTokenCount, secondPrompt.count - 1)
     }
 
+    func testPromptLookupResumesFromTheCheckpoint() async throws {
+        let (session, model) = try makeSession(reply: "<think>\nreason\n</think>\n\nanswer")
+        session.generateParameters.promptLookup = .init()
+        let first = try await respond(session, to: firstQuestion)
+        let firstPrompt = try render([("user", firstQuestion)])
+
+        model.clearForwards()
+        let second = try await respond(session, to: "word")
+        let secondPrompt = try render([
+            ("user", firstQuestion), ("assistant", first.text), ("user", "word"),
+        ])
+
+        XCTAssertEqual(second.info.cachedPromptTokenCount, firstPrompt.count - 1)
+        assertResumes(model, from: firstPrompt.count - 1, of: secondPrompt)
+    }
+
     func testDroppedPrefilledBlockResumesBeforeIt() async throws {
         let thinkingOff: [String: any Sendable] = ["enable_thinking": false]
         let (session, model) = try makeSession(
