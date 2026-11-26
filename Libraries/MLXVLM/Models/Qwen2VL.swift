@@ -156,15 +156,15 @@ private enum Language {
                 // MROPE path: compute 3D-aware cos/sin from position IDs
                 // #239: Qwen25VL.swift Attention.callAsFunction positionIds branch (:144)
                 let (cosValues, sinValues) = mropeCosSin(positionIds: positionIds, dtype: x.dtype)
-                let cos = cosValues[.newAxis, 0..., 0..., 0...]  // [1, batch, seq, dim]
-                let sin = sinValues[.newAxis, 0..., 0..., 0...]
+                let cos = cosValues[0..., .newAxis, 0..., 0...]
+                let sin = sinValues[0..., .newAxis, 0..., 0...]
                 queries = (queries * cos) + (QwenVL.rotateHalf(queries) * sin)
                 keys = (keys * cos) + (QwenVL.rotateHalf(keys) * sin)
             } else {
                 // Simple sequential RoPE (no-image / text-only path)
-                let offset = cache?.offset ?? 0
-                queries = rotaryEmbedding(queries, offset: offset)
-                keys = rotaryEmbedding(keys, offset: offset)
+                let offset = cache?.ropeOffset
+                queries = applyRotaryPosition(rotaryEmbedding, to: queries, offset: offset)
+                keys = applyRotaryPosition(rotaryEmbedding, to: keys, offset: offset)
             }
 
             let output = attentionWithCacheUpdate(
@@ -306,24 +306,9 @@ private enum Language {
             if effectivePositionIds == nil, let ropeDeltas = state[ropeDeltasKey],
                 let cache, let input = inputs ?? inputEmbedding
             {
-                let batch = input.dim(0)
-                let seqLength = input.dim(1)
-                let lastCacheOffset = cache.last?.offset ?? 0
-
-                var delta = MLXArray(lastCacheOffset).asType(.int32) + ropeDeltas.asType(.int32)
-
-                var base = MLXArray(0 ..< seqLength).asType(.int32)
-                base = base[.newAxis, 0...]
-                base = broadcast(base, to: [batch, seqLength])
-
-                if delta.dim(0) == 1 && batch > 1 {
-                    delta = repeated(delta, count: batch, axis: 0)
-                }
-
-                base = base + delta
-
-                effectivePositionIds = base[.newAxis, 0..., 0...]
-                effectivePositionIds = broadcast(effectivePositionIds!, to: [3, batch, seqLength])
+                effectivePositionIds = QwenVL.decodePositionIds(
+                    cache: cache.last, ropeDeltas: ropeDeltas, batch: input.dim(0),
+                    length: input.dim(1))
             }
 
             var out = model(
@@ -372,6 +357,8 @@ private enum Language {
 
         var mropePositionDeltas: [Int] = []
         let mask = attentionMask ?? ones(like: inputIds)
+        var imageIndex = 0
+        var videoIndex = 0
 
         for batchIdx in 0 ..< batchSize {
             var batchInputIds = inputIds[batchIdx, 0...]
@@ -389,8 +376,6 @@ private enum Language {
             var st = 0
             var remainImages = imageNums
             var remainVideos = videoNums
-            var imageIndex = 0
-            var videoIndex = 0
 
             for _ in 0 ..< (imageNums + videoNums) {
                 let edImage: Int
@@ -406,6 +391,8 @@ private enum Language {
                 } else {
                     edVideo = inputTokens.count + 1
                 }
+
+                guard edImage < inputTokens.count || edVideo < inputTokens.count else { break }
 
                 let (t, h, w, ed): (Int, Int, Int, Int)
                 if edImage < edVideo {
@@ -489,7 +476,7 @@ private enum Language {
                     expandedMask, expandedPositions,
                     positionIds[0..., batchIdx ..< batchIdx + 1, 0...])
 
-                positionIds = newPositions
+                positionIds[0..., batchIdx ..< batchIdx + 1, 0...] = newPositions
 
                 let maxPosId = llmPositions.max().item(Int.self)
                 mropePositionDeltas.append(maxPosId + 1 - inputTokens.count)
