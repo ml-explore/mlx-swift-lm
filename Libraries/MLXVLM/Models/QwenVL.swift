@@ -52,21 +52,42 @@ public struct QwenVL {
         return resumeState
     }
 
-    /// Decode positions `[3, batch, length]`, using each row's cache offset and rope delta.
-    static func decodePositionIds(
-        cache: KVCache?, ropeDeltas: MLXArray, batch: Int, length: Int
-    ) -> MLXArray {
+    /// The first decode position of each row: its cache offset plus its rope delta.
+    private static func decodeStart(cache: KVCache?, ropeDeltas: MLXArray) -> MLXArray {
         let offsets: MLXArray
         switch cache?.ropeOffset {
         case .batch(let rows): offsets = rows.asType(.int32).reshaped(-1)
         case .scalar(let offset): offsets = MLXArray(offset).asType(.int32)
         case nil: offsets = MLXArray(Int32(0))
         }
-        let start = (offsets + ropeDeltas.asType(.int32).reshaped(-1))[0..., .newAxis]
+        return offsets + ropeDeltas.asType(.int32).reshaped(-1)
+    }
+
+    /// Decode positions `[3, batch, length]`, using each row's cache offset and rope delta.
+    static func decodePositionIds(
+        cache: KVCache?, ropeDeltas: MLXArray, batch: Int, length: Int
+    ) -> MLXArray {
+        let start = decodeStart(cache: cache, ropeDeltas: ropeDeltas)[0..., .newAxis]
         let positions = broadcast(
             MLXArray(0 ..< length).asType(.int32)[.newAxis, 0...] + start,
             to: [batch, length])
         return broadcast(positions[.newAxis, 0..., 0...], to: [3, batch, length])
+    }
+
+    /// The same decode positions as a RoPE offset, for a fused `RoPE` layer.
+    ///
+    /// The three M-RoPE axes of a decode position are equal, so non-traditional M-RoPE
+    /// there is ordinary RoPE at this offset. The offset stays an array (a scalar, or one
+    /// entry per row), so no value is read back to the CPU. Returns `nil` when the offsets
+    /// do not cover `batch` rows; callers then fall back to
+    /// ``decodePositionIds(cache:ropeDeltas:batch:length:)``.
+    static func decodeRopeOffset(cache: KVCache?, ropeDeltas: MLXArray, batch: Int)
+        -> RoPEOffset?
+    {
+        let start = decodeStart(cache: cache, ropeDeltas: ropeDeltas)
+        if start.size == batch { return .batch(start) }
+        if start.size == 1 { return .batch(start.squeezed()) }
+        return nil
     }
 
     /// Rotates half the hidden dims of the input
