@@ -518,6 +518,7 @@ public struct TopPSampler: LogitSampler {
     let minP: MLXArray?
     let negInf: MLXArray
     let randomState: MLXRandom.RandomState
+    static let maxPartitionTopK = 2048
 
     public init(
         temperature: Float, topP: Float = 1.0, topK: Int = 0, minP: Float = 0.0,
@@ -548,21 +549,50 @@ public struct TopPSampler: LogitSampler {
 
     fileprivate func sample(logProbabilities: MLXArray) -> MLXArray {
         withRandomState(randomState) {
-            var logprobs = logProbabilities
-
-            // Apply filters in Python mlx-lm order: top_p → min_p → top_k.
-            if let topP {
-                logprobs = applyTopP(logprobs, topP: topP)
-            }
-            if let minP {
-                logprobs = applyMinP(logprobs, minP: minP)
-            }
-            if let topK {
-                logprobs = applyTopK(logprobs, topK: topK)
-            }
-
-            return categorical(logprobs * (1 / temp))
+            categorical(filtered(logProbabilities) * (1 / temp))
         }
+    }
+
+    /// The log probabilities with the filtered tokens at `-inf`.
+    func filtered(_ logProbabilities: MLXArray) -> MLXArray {
+        // Partition the top-K candidates first to skip a full-vocabulary sort in applyTopP.
+        if let topP, let topK, topK <= Self.maxPartitionTopK,
+            topK < logProbabilities.dim(-1)
+        {
+            let topIndices = argPartition(-logProbabilities, kth: topK - 1, axis: -1)[
+                .ellipsis, ..<topK
+            ]
+            let topLogprobs = takeAlong(logProbabilities, topIndices, axis: -1)
+            let order = argSort(topLogprobs, axis: -1)
+            var sortedLogprobs = takeAlong(topLogprobs, order, axis: -1)
+            let sortedIndices = takeAlong(topIndices, order, axis: -1)
+
+            let higherProbs = cumsum(
+                exp(sortedLogprobs), axis: -1, reverse: true, inclusive: false)
+            sortedLogprobs = MLX.where(
+                higherProbs .< topP, sortedLogprobs, negInf.asType(logProbabilities.dtype))
+            if let minP {
+                sortedLogprobs = applyMinP(sortedLogprobs, minP: minP)
+            }
+
+            let masked = MLXArray.full(
+                logProbabilities.shape, values: negInf, dtype: sortedLogprobs.dtype)
+            return putAlong(masked, sortedIndices, values: sortedLogprobs, axis: -1)
+        }
+
+        var logprobs = logProbabilities
+
+        // Apply filters in Python mlx-lm order: top_p → min_p → top_k.
+        if let topP {
+            logprobs = applyTopP(logprobs, topP: topP)
+        }
+        if let minP {
+            logprobs = applyMinP(logprobs, minP: minP)
+        }
+        if let topK {
+            logprobs = applyTopK(logprobs, topK: topK)
+        }
+        return logprobs
     }
 
     /// Keep tokens whose cumulative probability exceeds `1 - topP` (nucleus sampling).
