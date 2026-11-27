@@ -14,6 +14,17 @@ public protocol LogitSampler {
     func sample(logits: MLXArray) -> MLXArray
 }
 
+/// A ``LogitSampler`` that reports the distribution it draws from.
+///
+/// Speculative decoding needs the distribution, not only the draw, to keep draft tokens with the
+/// probability-ratio rule and to keep the target's output distribution unchanged.
+public protocol DistributionLogitSampler: LogitSampler {
+    /// The float32 log probabilities `[..., V]` of the tokens
+    /// ``LogitSampler/sample(logits:)`` draws for `logits`, and `-inf` for the tokens it never
+    /// draws.
+    func logProbabilities(logits: MLXArray) -> MLXArray
+}
+
 /// A `LogitProcessor` is an optional visitor of `logits`.
 ///
 /// The ``LogitProcessor`` is called with the input (prompt) before generating tokens:
@@ -511,7 +522,7 @@ public struct ArgMaxSampler: LogitSampler {
 /// Each filter operates on the full vocabulary in original token order, masking
 /// rejected tokens with `-inf`. This matches the composable filter chain in
 /// `mlx_lm.sample_utils.make_sampler`.
-public struct TopPSampler: LogitSampler {
+public struct TopPSampler: DistributionLogitSampler {
     let temp: MLXArray
     let topP: MLXArray?
     let topK: Int?
@@ -548,21 +559,29 @@ public struct TopPSampler: LogitSampler {
 
     fileprivate func sample(logProbabilities: MLXArray) -> MLXArray {
         withRandomState(randomState) {
-            var logprobs = logProbabilities
-
-            // Apply filters in Python mlx-lm order: top_p → min_p → top_k.
-            if let topP {
-                logprobs = applyTopP(logprobs, topP: topP)
-            }
-            if let minP {
-                logprobs = applyMinP(logprobs, minP: minP)
-            }
-            if let topK {
-                logprobs = applyTopK(logprobs, topK: topK)
-            }
-
-            return categorical(logprobs * (1 / temp))
+            categorical(filtered(logProbabilities) * (1 / temp))
         }
+    }
+
+    public func logProbabilities(logits: MLXArray) -> MLXArray {
+        logSoftmax(filtered(logSoftmax(logits.asType(.float32))) * (1 / temp))
+    }
+
+    /// The log probabilities with the filtered tokens at `-inf`.
+    private func filtered(_ logProbabilities: MLXArray) -> MLXArray {
+        var logprobs = logProbabilities
+
+        // Apply filters in Python mlx-lm order: top_p → min_p → top_k.
+        if let topP {
+            logprobs = applyTopP(logprobs, topP: topP)
+        }
+        if let minP {
+            logprobs = applyMinP(logprobs, minP: minP)
+        }
+        if let topK {
+            logprobs = applyTopK(logprobs, topK: topK)
+        }
+        return logprobs
     }
 
     /// Keep tokens whose cumulative probability exceeds `1 - topP` (nucleus sampling).
@@ -600,7 +619,7 @@ public struct TopPSampler: LogitSampler {
 }
 
 /// Sampler that uses `temperature` to sample the logits.
-public struct CategoricalSampler: LogitSampler {
+public struct CategoricalSampler: DistributionLogitSampler {
     let temp: MLXArray
     let randomState: MLXRandom.RandomState
 
@@ -615,6 +634,10 @@ public struct CategoricalSampler: LogitSampler {
         return withRandomState(randomState) {
             categorical(logits * (1 / temp))
         }
+    }
+
+    public func logProbabilities(logits: MLXArray) -> MLXArray {
+        logSoftmax(logits.asType(.float32) * (1 / temp))
     }
 }
 

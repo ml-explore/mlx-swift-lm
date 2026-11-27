@@ -56,9 +56,11 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     /// its first proposal. Qwen's private decoder cache requires this.
     var requiresPromptPrefill: Bool { get }
 
-    /// Whether this drafter is currently supported only for greedy decoding.
-    /// This keeps stochastic generation on the ordinary target path until a
-    /// probability-ratio acceptance sampler is available.
+    /// Whether this drafter is supported only for greedy decoding.
+    ///
+    /// A drafter that draws every proposal through the `sampler` it receives,
+    /// or that drafts without drawing, supports sampled decoding: the verifier
+    /// keeps its drafts with the probability-ratio rule.
     var requiresGreedySampling: Bool { get }
 
     /// Validate that `target` provides the architecture-specific state and

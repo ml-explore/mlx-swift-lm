@@ -112,8 +112,8 @@ let stream = try generate(
 The released 1.2B-Instruct, 2.6B, and 8B-A1B drafters are available from
 `MTPDrafterRegistry`. Each has a nine-token proposal block; the Swift
 iterator's `blockSize` includes the verifier bonus token, hence `10` above.
-DSpark currently requires greedy decoding (`temperature: 0`) so verification
-remains exact. Pair each draft with the target named in its model card; loading
+Verification is exact at any temperature: sampled drafts are kept with the
+probability-ratio rule, so the output follows the target's distribution. Pair each draft with the target named in its model card; loading
 or running incompatible architecture dimensions fails closed.
 
 ## Evaluation Flow
