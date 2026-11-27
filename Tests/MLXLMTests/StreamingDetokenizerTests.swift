@@ -100,6 +100,27 @@ private struct SplitMultibyteTokenizer: MLXLMCommon.Tokenizer {
     ) throws -> [Int] { [] }
 }
 
+/// Decodes concatenated per-token byte slices as UTF-8, emitting U+FFFD for an
+/// incomplete trailing multi-byte sequence just as byte-level BPE decoders do.
+private struct ByteTokenizer: MLXLMCommon.Tokenizer {
+    let pieces: [Int: [UInt8]]
+
+    func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
+    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+        String(decoding: tokenIds.flatMap { pieces[$0] ?? [] }, as: UTF8.self)
+    }
+    func convertTokenToId(_ token: String) -> Int? { nil }
+    func convertIdToToken(_ id: Int) -> String? { nil }
+    var bosToken: String? { nil }
+    var eosToken: String? { nil }
+    var unknownToken: String? { nil }
+    func applyChatTemplate(
+        messages: [[String: any Sendable]],
+        tools: [[String: any Sendable]]?,
+        additionalContext: [String: any Sendable]?
+    ) throws -> [Int] { [] }
+}
+
 final class StreamingDetokenizerTests: XCTestCase {
 
     private func stream(_ tokens: [Int], _ tokenizer: any Tokenizer) -> String {
@@ -276,5 +297,71 @@ final class StreamingDetokenizerTests: XCTestCase {
         XCTAssertEqual(scalars(streamed), [0x61, 0x4E2D, 0xFE0F, 0x62], streamed.debugDescription)
         XCTAssertEqual(
             streamed, tokenizer.decode(tokenIds: tokens, skipSpecialTokens: false))
+    }
+
+    /// U+0600 (Prepend) merges with a following U+FFFD into one Character, so
+    /// `new.last == "\u{fffd}"` is false while `new.unicodeScalars.last` holds it.
+    func testPrependScalarWithIncompleteUTF8HoldsUntilComplete() {
+        let tokenizer = ByteTokenizer(pieces: [
+            1: Array("\u{0600}".utf8) + [0xF0, 0x9F, 0x91],
+            2: [0x8B],
+        ])
+        let partial = tokenizer.decode(tokenIds: [1], skipSpecialTokens: false)
+        XCTAssertNotEqual(partial.last, "\u{fffd}")
+        XCTAssertEqual(scalars(partial), [0x0600, 0xFFFD])
+
+        var det = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+        det.append(token: 1)
+        XCTAssertNil(det.next())
+        det.append(token: 2)
+        let completed = det.next()
+        XCTAssertEqual(completed, "\u{0600}\u{1F44B}")
+        XCTAssertEqual(scalars(completed ?? ""), [0x0600, 0x1F44B])
+        XCTAssertNil(det.finish())
+
+        var truncated = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+        truncated.append(token: 1)
+        XCTAssertNil(truncated.next())
+        XCTAssertEqual(truncated.finish(), "\u{0600}\u{fffd}")
+        XCTAssertNil(truncated.finish())
+    }
+
+    /// A 4-byte UTF-8 scalar split across 3 or 4 byte tokens stays held until
+    /// its final byte arrives, then emits once with no U+FFFD leaked.
+    func testFourByteUTF8EmojiSplitAcrossByteTokensHoldsUntilFinalByte() {
+        let tokenizer = ByteTokenizer(pieces: [
+            1: Array("Hi ".utf8),
+            2: [0xF0],
+            3: [0x9F],
+            4: [0x91],
+            5: [0x8B],
+            6: [0xF0, 0x9F],
+            7: [0x9F, 0x91],
+            8: [0x91, 0x8B],
+            9: Array("!".utf8),
+        ])
+
+        for emojiTokens in [[2, 3, 4, 5], [6, 4, 5], [2, 7, 5], [2, 3, 8]] {
+            var det = NaiveStreamingDetokenizer(tokenizer: tokenizer)
+            det.append(token: 1)
+            XCTAssertEqual(det.next(), "Hi ")
+
+            for id in emojiTokens.dropLast() {
+                det.append(token: id)
+                XCTAssertNil(det.next())
+            }
+
+            det.append(token: emojiTokens[emojiTokens.count - 1])
+            XCTAssertEqual(det.next(), "\u{1F44B}")
+
+            det.append(token: 9)
+            XCTAssertEqual(det.next(), "!")
+            XCTAssertNil(det.finish())
+
+            let allTokens = [1] + emojiTokens + [9]
+            let streamed = stream(allTokens, tokenizer)
+            XCTAssertFalse(streamed.unicodeScalars.contains("\u{fffd}"))
+            XCTAssertEqual(streamed, tokenizer.decode(tokenIds: allTokens))
+        }
     }
 }
