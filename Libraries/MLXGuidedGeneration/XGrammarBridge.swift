@@ -559,7 +559,11 @@ public final class GrammarConstraint: @unchecked Sendable {
         let stopAllowed = stopTokenIDs.contains {
             (UInt32(bitPattern: mask.mask[$0 / 32]) >> UInt32($0 % 32)) & 1 == 1
         }
-        guard stopAllowed, try !canStopLocked() else { return mask }
+        guard stopAllowed else { return mask }
+        // The probe drops the max_tokens decision of this mask, so fill it again.
+        if try canStopLocked() {
+            return try computeRawMaskLocked()
+        }
         var words = mask.mask
         for id in stopTokenIDs {
             words[id / 32] &= ~Int32(bitPattern: UInt32(1) << UInt32(id % 32))
