@@ -139,7 +139,7 @@ private enum Language {
 
         public func callAsFunction(
             _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?,
-            positionIds: MLXArray? = nil
+            positionIds: MLXArray? = nil, ropeOffset: RoPEOffset? = nil
         ) -> MLXArray {
             let (B, L) = (x.dim(0), x.dim(1))
 
@@ -161,8 +161,8 @@ private enum Language {
                 queries = (queries * cos) + (QwenVL.rotateHalf(queries) * sin)
                 keys = (keys * cos) + (QwenVL.rotateHalf(keys) * sin)
             } else {
-                // Simple sequential RoPE (no-image / text-only path)
-                let offset = cache?.ropeOffset
+                // Sequential RoPE: text, and decode steps (see `decodeRopeOffset`)
+                let offset = ropeOffset ?? cache?.ropeOffset
                 queries = applyRotaryPosition(rotaryEmbedding, to: queries, offset: offset)
                 keys = applyRotaryPosition(rotaryEmbedding, to: keys, offset: offset)
             }
@@ -218,10 +218,12 @@ private enum Language {
 
         public func callAsFunction(
             _ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode, cache: KVCache?,
-            positionIds: MLXArray? = nil
+            positionIds: MLXArray? = nil, ropeOffset: RoPEOffset? = nil
         ) -> MLXArray {
             // #239: Qwen25VL.swift Qwen25VLDecoderLayer.callAsFunction (:208) — thread positionIds
-            var r = attention(inputLayerNorm(x), mask: mask, cache: cache, positionIds: positionIds)
+            var r = attention(
+                inputLayerNorm(x), mask: mask, cache: cache, positionIds: positionIds,
+                ropeOffset: ropeOffset)
             let h = x + r
             r = mlp(postAttentionLayerNorm(h))
             let out = h + r
@@ -251,7 +253,7 @@ private enum Language {
 
         public func callAsFunction(
             _ inputs: MLXArray?, cache: [KVCache]? = nil, inputEmbedding: MLXArray? = nil,
-            positionIds: MLXArray? = nil
+            positionIds: MLXArray? = nil, ropeOffset: RoPEOffset? = nil
         ) -> MLXArray {
             var h: MLXArray
             if let inputEmbedding {
@@ -266,7 +268,9 @@ private enum Language {
 
             // #239: Qwen25VL.swift Qwen25Model.callAsFunction (:240) — thread positionIds
             for (i, layer) in layers.enumerated() {
-                h = layer(h, mask: mask, cache: cache?[i], positionIds: positionIds)
+                h = layer(
+                    h, mask: mask, cache: cache?[i], positionIds: positionIds,
+                    ropeOffset: ropeOffset)
             }
 
             return norm(h)
@@ -278,6 +282,9 @@ private enum Language {
         @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
         var kvHeads: [Int]
+        /// Decode uses the fused `RoPE` layer, which matches `mropeCosSin` only when it
+        /// rotates halves. Traditional RoPE stays on the position-id path.
+        private let fusedRopeDecode: Bool
 
         public init(_ args: Qwen2VLConfiguration.TextConfiguration) {
             self.model = Qwen2Model(args)
@@ -287,6 +294,7 @@ private enum Language {
             }
 
             self.kvHeads = (0 ..< args.hiddenLayers).map { _ in args.kvHeads }
+            self.fusedRopeDecode = !args.ropeTraditional
         }
 
         public func callAsFunction(
@@ -303,17 +311,24 @@ private enum Language {
             }
 
             // Decode steps: reconstruct positions from ropeDeltas + cache offset.
+            var ropeOffset: RoPEOffset?
             if effectivePositionIds == nil, let ropeDeltas = state[ropeDeltasKey],
                 let cache, let input = inputs ?? inputEmbedding
             {
-                effectivePositionIds = QwenVL.decodePositionIds(
-                    cache: cache.last, ropeDeltas: ropeDeltas, batch: input.dim(0),
-                    length: input.dim(1))
+                if fusedRopeDecode {
+                    ropeOffset = QwenVL.decodeRopeOffset(
+                        cache: cache.last, ropeDeltas: ropeDeltas, batch: input.dim(0))
+                }
+                if ropeOffset == nil {
+                    effectivePositionIds = QwenVL.decodePositionIds(
+                        cache: cache.last, ropeDeltas: ropeDeltas, batch: input.dim(0),
+                        length: input.dim(1))
+                }
             }
 
             var out = model(
                 inputs, cache: cache, inputEmbedding: inputEmbedding,
-                positionIds: effectivePositionIds)
+                positionIds: effectivePositionIds, ropeOffset: ropeOffset)
             if let lmHead {
                 out = lmHead(out)
             } else {

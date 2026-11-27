@@ -140,6 +140,45 @@ final class Qwen25VLContinuationTests: XCTestCase {
         }
     }
 
+    /// A decode step after an image prefill runs the fused `RoPE` at cache offset plus rope
+    /// delta. It must match the same token prefilled with the image in one forward, which
+    /// builds its M-RoPE cos/sin from position ids. The prompt is shorter than one prefill
+    /// window, so that forward takes the position-id path. The paths split the attention and
+    /// round cos/sin differently, so they agree to `splitTolerance`, not bitwise; the image
+    /// makes the rope delta nonzero, so a decode that ignored it would miss by far more.
+    private func assertImageDecodeMatchesFullPrefill<M: LanguageModel>(
+        _ model: M, file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        try withRandomState(MLXRandom.RandomState(seed: 5)) {
+            let image = continuation.image()
+            let prefix = concatenated(
+                [continuation.textTokens(10), continuation.imageRun(), continuation.textTokens(8)],
+                axis: 1)
+            let next = continuation.textTokens(1, seed: 9)
+
+            let decodeCache = try model.newCache(parameters: nil)
+            let (_, state) = try continuation.lastLogits(
+                model.prepare(
+                    LMInput(text: .init(tokens: prefix), image: image),
+                    cache: decodeCache, state: nil, prefill: PrefillParameters()))
+            let decoded = model(
+                LMInput.Text(tokens: next), cache: decodeCache, state: state
+            ).logits[0..., -1, 0...]
+
+            let fullCache = try model.newCache(parameters: nil)
+            let (full, _) = try continuation.lastLogits(
+                model.prepare(
+                    LMInput(
+                        text: .init(tokens: concatenated([prefix, next], axis: 1)), image: image),
+                    cache: fullCache, state: nil, prefill: PrefillParameters()))
+
+            eval(decoded, full)
+            XCTAssertLessThanOrEqual(
+                continuation.maxAbsDiff(decoded, full), MatmulPrecision.splitTolerance,
+                "image decode step diverged from the full prefill", file: file, line: line)
+        }
+    }
+
     // MARK: - Qwen2.5-VL
 
     func testQwen25VLWarmTextContinuationMatchesFullPrefill() throws {
@@ -180,6 +219,10 @@ final class Qwen25VLContinuationTests: XCTestCase {
         try assertImagePromptKeepsCacheDtype(makeTinyQwen25VL())
     }
 
+    func testQwen25VLImageDecodeMatchesFullPrefill() throws {
+        try assertImageDecodeMatchesFullPrefill(makeTinyQwen25VL())
+    }
+
     // MARK: - Qwen2-VL
 
     func testQwen2VLWarmTextContinuationMatchesFullPrefill() throws {
@@ -204,6 +247,10 @@ final class Qwen25VLContinuationTests: XCTestCase {
 
     func testQwen2VLImagePromptKeepsCacheDtype() throws {
         try assertImagePromptKeepsCacheDtype(makeTinyQwen2VL())
+    }
+
+    func testQwen2VLImageDecodeMatchesFullPrefill() throws {
+        try assertImageDecodeMatchesFullPrefill(makeTinyQwen2VL())
     }
 
     /// `Qwen2VL` vision attention stays inside each image, so the split is exact.
