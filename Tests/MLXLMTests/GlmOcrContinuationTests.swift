@@ -92,6 +92,10 @@ final class GlmOcrContinuationTests: XCTestCase {
         try continuation.assertWarmImageContinuation(try makeTinyModel())
     }
 
+    func testBatchedMediaThrows() throws {
+        try continuation.assertBatchedMediaThrows(try makeTinyModel())
+    }
+
     func testImageMidContinuationResumeState() throws {
         try continuation.assertImageMidContinuationResumeState(try makeTinyModel())
     }

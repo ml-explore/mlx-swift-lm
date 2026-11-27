@@ -172,6 +172,18 @@ public struct LMInput {
             return Array(repeating: tokens.dim(1), count: tokens.dim(0))
         }
 
+        /// `true` when the mask hides at least one position.
+        ///
+        /// A missing mask and an integer or boolean all-ones mask both attend to every
+        /// token, so a token-only suffix is equivalent to them. Floating-point masks
+        /// may be additive, so they always count as padding.
+        package var carriesPaddingMask: Bool {
+            guard let mask else { return false }
+            guard !mask.dtype.isFloatingPoint else { return true }
+            // Reduce on the device so only one scalar reaches the host.
+            return !(mask .== 1).all().item(Bool.self)
+        }
+
         /// Number of logical sequence positions consumed by one model call.
         /// Batch dimensions do not duplicate the shared cache timeline.
         @inline(__always)
@@ -206,13 +218,18 @@ public struct LMInput {
         public let pixels: MLXArray
         public let positionIds: MLXArray?
         public let frames: [THW]?
+        /// Seconds of video in one temporal grid step, one value per video (transformers'
+        /// `second_per_grid_ts`). Nil when the processor does not record it.
+        public let secondsPerGrid: [Double]?
 
         public init(
-            pixels: MLXArray, positionIds: MLXArray? = nil, frames: [THW]? = nil
+            pixels: MLXArray, positionIds: MLXArray? = nil, frames: [THW]? = nil,
+            secondsPerGrid: [Double]? = nil
         ) {
             self.pixels = pixels
             self.positionIds = positionIds
             self.frames = frames
+            self.secondsPerGrid = secondsPerGrid
         }
     }
 

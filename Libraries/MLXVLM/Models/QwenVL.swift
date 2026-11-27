@@ -39,6 +39,17 @@ public struct QwenVL {
         return cacheOffset + anchor.asType(.int32).item(Int.self)
     }
 
+    /// M-RoPE positions for images and videos are built for one sequence, so a batch with media
+    /// cannot be positioned. Throws a clear error instead of failing later inside attention.
+    static func requireSingleSequenceForMedia(_ input: LMInput, model: String) throws {
+        let tokens = input.text.tokens
+        let batchSize = tokens.ndim > 1 ? tokens.dim(0) : 1
+        guard batchSize > 1, input.image != nil || input.video != nil else { return }
+        throw VLMError.processing(
+            "\(model) supports image and video input for one sequence at a time, "
+                + "but received a batch of \(batchSize)")
+    }
+
     /// The state a continuation hands back so the next turn re-anchors correctly.
     ///
     /// `getRopeIndex` returns a delta in the offset frame; the next turn adds its own cache
@@ -81,12 +92,10 @@ public struct QwenVL {
         inputIds: MLXArray, inputEmbeds: MLXArray, imageFeatures: MLXArray,
         imageTokenId: Int, videoTokenId: Int
     ) -> MLXArray {
-        var imageIndices = [Int]()
-        for (i, v) in inputIds.asArray(Int.self).enumerated() {
-            if v == imageTokenId || v == videoTokenId {
-                imageIndices.append(i)
-            }
-        }
+        let layout = VisualTokenLayout(
+            inputIds: inputIds, imageTokenId: imageTokenId, videoTokenId: videoTokenId)
+        let imageIndices = layout.indices
+        let features = layout.tokenOrdered(imageFeatures, axis: imageFeatures.ndim - 2)
 
         // Make sure shapes match before assignment
         var result = inputEmbeds
@@ -94,14 +103,64 @@ public struct QwenVL {
             result = result[.newAxis, 0..., 0...]
         }
 
-        if imageFeatures.ndim == 2 {
-            let reshapedFeatures = imageFeatures[.newAxis, 0..., 0...]
+        if features.ndim == 2 {
+            let reshapedFeatures = features[.newAxis, 0..., 0...]
             result[0..., MLXArray(imageIndices), 0...] = reshapedFeatures
         } else {
-            result[0..., MLXArray(imageIndices), 0...] = imageFeatures
+            result[0..., MLXArray(imageIndices), 0...] = features
         }
 
         return result
+    }
+
+    /// Where the image and video placeholder tokens sit, and which vision feature row each takes.
+    ///
+    /// The vision tower emits every image row before every video row, but a prompt can put a
+    /// video first, for example a video in one turn and an image in a later one.
+    struct VisualTokenLayout {
+        /// Flat positions of the image and video tokens, ascending.
+        let indices: [Int]
+
+        /// The feature row for each position, or nil when the rows already follow token order.
+        let featureRows: MLXArray?
+
+        init(inputIds: MLXArray, imageTokenId: Int, videoTokenId: Int) {
+            let tokens = inputIds.asType(.int32).asArray(Int32.self)
+            var indices = [Int]()
+            var isImage = [Bool]()
+            for (position, token) in tokens.enumerated() {
+                if token == imageTokenId {
+                    indices.append(position)
+                    isImage.append(true)
+                } else if token == videoTokenId {
+                    indices.append(position)
+                    isImage.append(false)
+                }
+            }
+            self.indices = indices
+
+            var nextImage = 0
+            var nextVideo = isImage.filter { $0 }.count
+            var rows = [Int32]()
+            rows.reserveCapacity(indices.count)
+            for image in isImage {
+                if image {
+                    rows.append(Int32(nextImage))
+                    nextImage += 1
+                } else {
+                    rows.append(Int32(nextVideo))
+                    nextVideo += 1
+                }
+            }
+            let inOrder = rows.enumerated().allSatisfy { Int32($0.offset) == $0.element }
+            self.featureRows = inOrder ? nil : MLXArray(rows)
+        }
+
+        /// `features`, with its rows along `axis` moved into token order.
+        func tokenOrdered(_ features: MLXArray, axis: Int = 0) -> MLXArray {
+            guard let featureRows else { return features }
+            return take(features, featureRows, axis: axis)
+        }
     }
 
     public class VisionRotaryEmbedding {
@@ -331,9 +390,10 @@ public struct QwenVL {
     /// Split a Qwen VL prepared input at `prefixTokenCount`, keeping only the media
     /// whose placeholder tokens fall in the suffix.
     ///
-    /// Shared by ``Qwen25VL`` and ``Qwen2VL``, whose prepared-input layout is the
-    /// same: `pixels` is the images' patch rows concatenated along axis 0 in prompt
-    /// order, and `frames` carries one `THW` per image, so image *i* owns
+    /// Used by ``Qwen25VL``, ``Qwen3VL`` and ``Qwen35``, and valid for ``Qwen2VL``.
+    /// Their prepared-input layout is the same: `pixels` is the images' patch rows
+    /// concatenated along axis 0 in prompt order, and `frames` carries one `THW` per
+    /// image, so image *i* owns
     /// `frames[i].product` rows and `frames[i].product / (mergeSize * mergeSize)`
     /// placeholder tokens (see ``patchify(images:mergeSize:patchSize:temporalPatchSize:)``
     /// and ``replacePaddingTokens(in:frames:paddingToken:mergeSize:tokenizer:)``).
@@ -350,8 +410,7 @@ public struct QwenVL {
         // Audio is not part of the Qwen VL prepared-input contract.
         guard input.audio == nil else { return nil }
 
-        // Images only. Both models pass `videoGridTHW: nil` to `getRopeIndex`,
-        // so video positions are degenerate and a split cannot be verified.
+        // Images only: the split attributes image patch rows, not video ones.
         guard input.video == nil else { return nil }
 
         // Only the processor's own `[1, seq]` layout. A rank-1 suffix would route
@@ -366,10 +425,7 @@ public struct QwenVL {
         // The processor pairs media with an all-ones mask. Anything else is a real
         // padding mask this routine will not reinterpret.
         if let mask = input.text.mask {
-            guard mask.size == ids.count else { return nil }
-            guard mask.asType(.int32).asArray(Int32.self).allSatisfy({ $0 == 1 }) else {
-                return nil
-            }
+            guard mask.size == ids.count, !input.text.carriesPaddingMask else { return nil }
         }
 
         var splitImage: LMInput.ProcessedImage?
@@ -432,8 +488,8 @@ public struct QwenVL {
         var rowCounts: [Int] = []
         padCounts.reserveCapacity(frames.count)
         rowCounts.reserveCapacity(frames.count)
-        // Still images only. A `t > 1` grid is a temporal stack, and `getRopeIndex`
-        // is handed `videoGridTHW: nil` for it too, so its positions are degenerate.
+        // Still images only. A `t > 1` grid is a temporal stack, which this split does not
+        // attribute.
         for frame in frames {
             guard frame.t == 1 else { return nil }
             guard frame.product > 0, frame.product % mergeLength == 0 else { return nil }

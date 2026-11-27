@@ -251,6 +251,10 @@ final class Qwen3VLContinuationTests: XCTestCase {
         try continuation.assertWarmImageContinuation(try makeTinyModel())
     }
 
+    func testBatchedMediaThrows() throws {
+        try continuation.assertBatchedMediaThrows(try makeTinyModel())
+    }
+
     /// The only test that exercises deepstack across a split boundary: the suffix's vision
     /// run must regenerate per-layer deepstack rows for exactly the retained image.
     func testSplitMediaSuffixContinuationMatchesFullPrefill() throws {
@@ -316,6 +320,13 @@ final class Qwen3VLContinuationTests: XCTestCase {
     /// count rather than by token index.
     func testWindowedImagePrefillMatchesSingleShot() throws {
         try continuation.assertWindowedImagePrefill(try makeTinyModel())
+    }
+
+    /// The windowed path slices deepstack rows by visual-token count, so the rows must
+    /// already be in token order when a video comes before an image.
+    func testVideoBeforeImageTakesItsOwnFeatures() throws {
+        try MediaOrderAssertions().assertVideoBeforeImageMatchesImageBeforeVideo(
+            try makeTinyModel())
     }
 
     /// Windowing must not change M-RoPE semantics just because an input carries

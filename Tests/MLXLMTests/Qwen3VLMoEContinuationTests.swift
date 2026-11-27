@@ -7,6 +7,7 @@
 // sliced it to an offset-derived length, so a warm multi-token continuation
 // described more keys than the cache retained and SDPA rejected the shapes.
 // M-RoPE positions stay absolute; only the mask width is under test.
+// The image prefill tests below cover the image merge and the deepstack rows.
 
 import Foundation
 import MLX
@@ -59,7 +60,8 @@ final class Qwen3VLMoEContinuationTests: XCTestCase {
                     "patch_size": 16,
                     "spatial_merge_size": 2,
                     "temporal_patch_size": 2,
-                    "num_position_embeddings": 64
+                    "num_position_embeddings": 64,
+                    "deepstack_visual_indexes": [0, 1]
                 }
             }
             """
@@ -173,5 +175,77 @@ final class Qwen3VLMoEContinuationTests: XCTestCase {
             XCTAssertTrue(logits.asArray(Float.self).allSatisfy(\.isFinite))
             XCTAssertEqual(cache.first?.offset, 32)
         }
+    }
+
+    // MARK: - Image prefill
+
+    /// Two images of different sizes, with deepstack on. The image rows and deepstack
+    /// rows must land only on the image tokens: the text before the first image must
+    /// match a text-only prefill of that prefix.
+    func testTwoImagePrefillLeavesPrecedingTextUnchanged() throws {
+        try withRandomState(MLXRandom.RandomState(seed: 53)) {
+            let model = try makeTinyModel()
+            let images = LMInput.ProcessedImage(
+                pixels: MLXRandom.normal([16 + 32, 3 * 2 * 16 * 16]),
+                frames: [THW(1, 4, 4), THW(1, 4, 8)])
+            let prefix = textTokens(7)
+            let secondRun = MLXArray([Int32](repeating: 500, count: 8)).expandedDimensions(
+                axis: 0)
+            let prompt = concatenated(
+                [
+                    prefix, visionStart(), imageRun(), textTokens(5, seed: 3), visionStart(),
+                    secondRun, textTokens(6, seed: 9),
+                ], axis: 1)
+
+            let result = try model.prepare(
+                LMInput(text: .init(tokens: prompt), image: images),
+                cache: try model.newCache(parameters: nil), state: nil,
+                prefill: .init(chunking: .unchunked))
+            guard case .logits(let output) = result else {
+                return XCTFail("expected logits from image prefill")
+            }
+            XCTAssertEqual(output.logits.shape, [1, prompt.dim(1), 512])
+            XCTAssertTrue(output.logits.asArray(Float.self).allSatisfy(\.isFinite))
+
+            let textResult = try model.prepare(
+                LMInput(text: .init(tokens: prefix)),
+                cache: try model.newCache(parameters: nil), state: nil,
+                prefill: .init(chunking: .unchunked))
+            guard case .logits(let textOutput) = textResult else {
+                return XCTFail("expected logits from text prefill")
+            }
+            XCTAssertLessThanOrEqual(
+                maxAbsDiff(output.logits[0..., 0 ..< prefix.dim(1), 0...], textOutput.logits),
+                MatmulPrecision.splitTolerance)
+        }
+    }
+
+    /// With deepstack on, an image in turn 1 continued by text in turn 2 must match
+    /// one full prefill.
+    func testWarmImageContinuationMatchesFullPrefill() throws {
+        try continuation.assertWarmImageContinuation(try makeTinyModel())
+    }
+
+    func testBatchedMediaThrows() throws {
+        try continuation.assertBatchedMediaThrows(try makeTinyModel())
+    }
+
+    func testVideoBeforeImageTakesItsOwnFeatures() throws {
+        try MediaOrderAssertions().assertVideoBeforeImageMatchesImageBeforeVideo(
+            try makeTinyModel())
+    }
+
+    /// More image features than placeholder tokens must throw, not trap in the scatter.
+    func testImageFeatureTokenMismatchThrows() throws {
+        let model = try makeTinyModel()
+        let tooFewPlaceholders = MLXArray([Int32](repeating: 500, count: 3))
+            .expandedDimensions(axis: 0)
+        let prompt = concatenated([textTokens(4), visionStart(), tooFewPlaceholders], axis: 1)
+
+        XCTAssertThrowsError(
+            try model.prepare(
+                LMInput(text: .init(tokens: prompt), image: makeImage()),
+                cache: try model.newCache(parameters: nil), state: nil,
+                prefill: .init(chunking: .unchunked)))
     }
 }

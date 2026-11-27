@@ -1065,6 +1065,7 @@ public class GlmOcr: Module, VLMModel, KVCacheDimensionProvider {
         let positionOffset = try QwenVL.continuationAnchor(
             model: "GlmOcr", key: ropeDeltasKey, cacheOffset: cacheOffset,
             batchSize: inputIds2D.dim(0), state: state)
+        try QwenVL.requireSingleSequenceForMedia(input, model: "GlmOcr")
 
         let window = prefill.resolvedStepSize()
         if inputIds2D.dim(0) == 1, inputIds2D.dim(-1) > 0,

@@ -1665,50 +1665,24 @@ public class Qwen35: Module, VLMModel {
         inputIds: MLXArray,
         imageTokenIndex: Int,
         videoTokenIndex: Int
-    ) throws -> (MLXArray, MLXArray) {
-        let imageMask = (inputIds .== MLXArray(imageTokenIndex))
-        let videoMask = (inputIds .== MLXArray(videoTokenIndex))
-        var specialMask = imageMask .|| videoMask
+    ) throws -> MLXArray {
+        // Read back one token id per position, not per hidden element, and scatter whole rows.
+        let layout = QwenVL.VisualTokenLayout(
+            inputIds: inputIds, imageTokenId: imageTokenIndex, videoTokenId: videoTokenIndex)
+        let visualIndices = layout.indices
 
-        let nImageTokens = specialMask.sum().item(Int.self)
-
-        specialMask = expandedDimensions(specialMask, axis: -1)
-        let maskExpanded = broadcast(specialMask, to: inputEmbeds.shape)
-
-        let nImageFeatures = imageFeatures.dim(0)
-        let nImageMaskElements = maskExpanded.sum().item(Int.self)
-        let imageFeatureSize = imageFeatures.size
-
-        guard nImageMaskElements == imageFeatureSize else {
-            throw Qwen35VLError.featureTokenMismatch(expected: nImageTokens, actual: nImageFeatures)
+        let hiddenSize = inputEmbeds.dim(-1)
+        guard visualIndices.count * hiddenSize == imageFeatures.size else {
+            throw Qwen35VLError.featureTokenMismatch(
+                expected: visualIndices.count, actual: imageFeatures.dim(0))
         }
+        guard !visualIndices.isEmpty else { return inputEmbeds }
 
-        let originalShape = inputEmbeds.shape
-        let flattenedEmbeds = inputEmbeds.flattened()
-        let flattenedFeatures = imageFeatures.flattened()
-        let flattenedMask = maskExpanded.flattened()
+        let result = inputEmbeds.reshaped([-1, hiddenSize])
+        result[MLXArray(visualIndices.map { Int32($0) }), 0...] =
+            layout.tokenOrdered(imageFeatures.reshaped([visualIndices.count, hiddenSize]))
 
-        let indices = nonZero(flattenedMask.asType(.bool))
-
-        var result = flattenedEmbeds
-        if !indices.isEmpty && indices.count == flattenedFeatures.size {
-            let indexArray = MLXArray(indices.map { UInt32($0) })
-            result[indexArray] = flattenedFeatures
-        }
-
-        result = result.reshaped(originalShape)
-        let visualMask = specialMask.squeezed(axis: -1).asType(.bool)
-        return (result, visualMask)
-    }
-
-    private func nonZero(_ mask: MLXArray) -> [Int] {
-        let values = mask.asArray(Bool.self)
-        var indices: [Int] = []
-        indices.reserveCapacity(values.count)
-        for (idx, value) in values.enumerated() where value {
-            indices.append(idx)
-        }
-        return indices
+        return result.reshaped(inputEmbeds.shape)
     }
 
     private func combinedFrames(imageFrames: [THW]?, videoFrames: [THW]?) -> [THW] {
@@ -1755,7 +1729,7 @@ public class Qwen35: Module, VLMModel {
             let (visionHidden, _) = vision(typedPixels, gridTHW: frames)
             let visionFeatures = visionHidden.asType(textEmbeds.dtype)
 
-            let (mergedEmbeds, _) = try mergeInputIdsWithImageFeatures(
+            let mergedEmbeds = try mergeInputIdsWithImageFeatures(
                 imageFeatures: visionFeatures,
                 inputEmbeds: textEmbeds,
                 inputIds: inputIds,
@@ -1781,6 +1755,7 @@ public class Qwen35: Module, VLMModel {
         let positionOffset = try QwenVL.continuationAnchor(
             model: "Qwen35", key: ropeDeltasKey, cacheOffset: cacheOffset,
             batchSize: inputIds2D.dim(0), state: state)
+        try QwenVL.requireSingleSequenceForMedia(input, model: "Qwen35")
 
         // Windowed (chunked) prefill — the remaining #344 deferred item for
         // Qwen3.5 — with the same default as the sibling chunked prefills
@@ -2060,6 +2035,35 @@ extension Qwen35: ModelComponentsProviding {
 
 extension Qwen35: SpeculativeCacheRewindModel {
     public var maximumNativeTargetCacheRewind: Int { 1 }
+}
+
+// `Qwen35MoE` subclasses `Qwen35` and inherits this conformance.
+extension Qwen35: PreparedInputSplitting {
+
+    /// Return the suffix of `input` from `prefixTokenCount`, with only the images whose
+    /// placeholders lie in it.
+    ///
+    /// The vision tower encodes each image on its own: attention stays inside each image's
+    /// `cuSeqlens` block, and position embeddings depend only on that image's grid. So
+    /// dropping the cached images leaves the features of the others unchanged.
+    ///
+    /// Prefill the suffix on the KV cache *and* the `LMOutput.State` the previous turn
+    /// returned. That state holds `qwen35.ropeDeltas`, which places the suffix after the
+    /// cached images. Without it, a warm cache makes `prepare` throw
+    /// `ContinuationStateError.missingState` and a decode step trap.
+    ///
+    /// Returns `nil` for video, audio, precomputed position ids, a boundary inside an image,
+    /// a payload that does not match the placeholders, or a suffix with no image.
+    public func splitPreparedInput(_ input: LMInput, droppingFirst prefixTokenCount: Int)
+        -> LMInput?
+    {
+        QwenVL.splitPreparedInput(
+            input,
+            droppingFirst: prefixTokenCount,
+            imageTokenId: config.imageTokenId,
+            videoTokenId: config.videoTokenId,
+            mergeSize: config.visionConfiguration.spatialMergeSize)
+    }
 }
 
 extension Array where Element == THW {

@@ -18,6 +18,32 @@ final class Qwen35ContinuationTests: XCTestCase {
     // MARK: - Tiny model
 
     private func makeTinyModel() throws -> Qwen35 {
+        try Self.makeTinyModel()
+    }
+
+    /// A tiny random-weight Qwen3.5-VL.
+    static func makeTinyModel() throws -> Qwen35 {
+        let config = try tinyConfiguration(moe: false)
+        // Pin the initializer weights. Task-local rather than MLXRandom.seed:
+        // parallel tests must not share (or perturb) the global random stream.
+        return withRandomState(MLXRandom.RandomState(seed: 1)) { Qwen35(config) }
+    }
+
+    /// The same model with sparse-MoE MLPs, as `qwen3_5_moe` and `qwen3_8_moe` load it.
+    static func makeTinyMoEModel() throws -> Qwen35MoE {
+        let config = try tinyConfiguration(moe: true)
+        return withRandomState(MLXRandom.RandomState(seed: 1)) { Qwen35MoE(config) }
+    }
+
+    private static func tinyConfiguration(moe: Bool) throws -> Qwen35Configuration {
+        let experts =
+            moe
+            ? """
+            "num_experts": 4,
+            "num_experts_per_tok": 2,
+            "moe_intermediate_size": 64,
+            "shared_expert_intermediate_size": 64,
+            """ : ""
         let json = """
             {
                 "model_type": "qwen3_5_vl",
@@ -27,6 +53,7 @@ final class Qwen35ContinuationTests: XCTestCase {
                 "vision_end_token_id": 503,
                 "vocab_size": 512,
                 "text_config": {
+                    \(experts)
                     "model_type": "qwen3_5",
                     "hidden_size": 64,
                     "num_hidden_layers": 4,
@@ -63,11 +90,8 @@ final class Qwen35ContinuationTests: XCTestCase {
                 }
             }
             """
-        let config = try JSONDecoder().decode(
+        return try JSONDecoder().decode(
             Qwen35Configuration.self, from: Data(json.utf8))
-        // Pin the initializer weights. Task-local rather than MLXRandom.seed:
-        // parallel tests must not share (or perturb) the global random stream.
-        return withRandomState(MLXRandom.RandomState(seed: 1)) { Qwen35(config) }
     }
 
     /// The shared continuation equivalences, configured for Qwen3.5-VL's token ids.
@@ -173,6 +197,10 @@ final class Qwen35ContinuationTests: XCTestCase {
     /// threading): two-turn with threaded state ≡ one-shot full prefill.
     func testWarmImageContinuationMatchesFullPrefill() throws {
         try continuation.assertWarmImageContinuation(try makeTinyModel())
+    }
+
+    func testBatchedMediaThrows() throws {
+        try continuation.assertBatchedMediaThrows(try makeTinyModel())
     }
 
     func testImageStateSurvivesPromptCacheRoundTrip() throws {
@@ -284,6 +312,11 @@ final class Qwen35ContinuationTests: XCTestCase {
 
     func testWindowedImagePrefillMatchesSingleShot() throws {
         try continuation.assertWindowedImagePrefill(try makeTinyModel())
+    }
+
+    func testVideoBeforeImageTakesItsOwnFeatures() throws {
+        try MediaOrderAssertions().assertVideoBeforeImageMatchesImageBeforeVideo(
+            try makeTinyModel())
     }
 
     /// With a capacity-limited cache, the attention mask must span the keys

@@ -988,6 +988,7 @@ public class Qwen2VL: Module, VLMModel, KVCacheDimensionProvider {
         -> PrepareResult
     {
         let inputIds = input.text.tokens
+        try QwenVL.requireSingleSequenceForMedia(input, model: "Qwen2VL")
 
         let window = prefill.resolvedStepSize()
         if inputIds.ndim == 2, inputIds.dim(0) == 1, inputIds.dim(-1) > 0,
@@ -1005,8 +1006,8 @@ public class Qwen2VL: Module, VLMModel, KVCacheDimensionProvider {
             embeds = mergedVisionEmbeds(inputIds: inputIds2D, pixelValues: pixels, frames: frames)
             let (positionIds, ropeDeltas) = Language.getRopeIndex(
                 inputIds: inputIds2D,
-                imageGridTHW: frames,
-                videoGridTHW: nil,
+                imageGridTHW: input.image?.frames,
+                videoGridTHW: input.video?.frames,
                 spatialMergeSize: config.visionConfiguration.spatialMergeSize,
                 imageTokenId: config.baseConfiguration.imageTokenId,
                 videoTokenId: config.baseConfiguration.videoTokenId)
@@ -1044,8 +1045,8 @@ public class Qwen2VL: Module, VLMModel, KVCacheDimensionProvider {
 
         let (positionIds, ropeDeltas) = Language.getRopeIndex(
             inputIds: inputIds,
-            imageGridTHW: frames,
-            videoGridTHW: nil,
+            imageGridTHW: input.image?.frames,
+            videoGridTHW: input.video?.frames,
             spatialMergeSize: config.visionConfiguration.spatialMergeSize,
             imageTokenId: config.baseConfiguration.imageTokenId,
             videoTokenId: config.baseConfiguration.videoTokenId,

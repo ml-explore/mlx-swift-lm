@@ -1664,39 +1664,27 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         inputIds: MLXArray,
         imageTokenIndex: Int,
         videoTokenIndex: Int
-    ) throws -> (MLXArray, [Int]) {
-        let imageMask = (inputIds .== MLXArray(imageTokenIndex))
-        let videoMask = (inputIds .== MLXArray(videoTokenIndex))
-        let specialMask = (imageMask .|| videoMask)
-
+    ) throws -> (MLXArray, QwenVL.VisualTokenLayout) {
         // Flat positions of the visual tokens, the same indexing `applyDeepstack` scatters
         // by. Everything below derives from these: broadcasting the mask across the hidden
         // dimension only to read it back would download `batch * seq * hidden` bools.
-        let visualIndices = nonZero(specialMask)
+        let layout = QwenVL.VisualTokenLayout(
+            inputIds: inputIds, imageTokenId: imageTokenIndex, videoTokenId: videoTokenIndex)
+        let visualIndices = layout.indices
 
         let hiddenSize = inputEmbeds.dim(-1)
         guard visualIndices.count * hiddenSize == imageFeatures.size else {
             throw Qwen3VLError.featureTokenMismatch(
                 expected: visualIndices.count, actual: imageFeatures.dim(0))
         }
-        guard !visualIndices.isEmpty else { return (inputEmbeds, visualIndices) }
+        guard !visualIndices.isEmpty else { return (inputEmbeds, layout) }
 
         // Scatter over a [batch * seq, hidden] view so one row index places a whole embedding.
         let result = inputEmbeds.reshaped([-1, hiddenSize])
         result[MLXArray(visualIndices.map { Int32($0) }), 0...] =
-            imageFeatures.reshaped([visualIndices.count, hiddenSize])
+            layout.tokenOrdered(imageFeatures.reshaped([visualIndices.count, hiddenSize]))
 
-        return (result.reshaped(inputEmbeds.shape), visualIndices)
-    }
-
-    private func nonZero(_ mask: MLXArray) -> [Int] {
-        let values = mask.asArray(Bool.self)
-        var indices: [Int] = []
-        indices.reserveCapacity(values.count)
-        for (idx, value) in values.enumerated() where value {
-            indices.append(idx)
-        }
-        return indices
+        return (result.reshaped(inputEmbeds.shape), layout)
     }
 
     private func combinedFrames(
@@ -1766,7 +1754,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         let featureSlices = visionHidden.split(indices: splitIndices)
         let flattenedFeatures = concatenated(featureSlices).asType(textEmbeds.dtype)
 
-        let (mergedEmbeds, visualIndices) = try mergeInputIdsWithImageFeatures(
+        let (mergedEmbeds, layout) = try mergeInputIdsWithImageFeatures(
             imageFeatures: flattenedFeatures,
             inputEmbeds: textEmbeds,
             inputIds: inputIds,
@@ -1774,12 +1762,12 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
             videoTokenIndex: config.videoTokenIndex)
 
         result.inputEmbeddings = mergedEmbeds
-        result.visualIndices = visualIndices
+        result.visualIndices = layout.indices
 
         if !deepstackOutputs.isEmpty {
             result.deepstackEmbeds = deepstackOutputs.map { layerFeatures in
                 let slices = layerFeatures.split(indices: splitIndices)
-                return concatenated(slices).asType(textEmbeds.dtype)
+                return layout.tokenOrdered(concatenated(slices).asType(textEmbeds.dtype))
             }
         }
 
@@ -1802,6 +1790,7 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
         let positionOffset = try QwenVL.continuationAnchor(
             model: "Qwen3VL", key: ropeDeltasKey, cacheOffset: cacheOffset,
             batchSize: inputIds2D.dim(0), state: state)
+        try QwenVL.requireSingleSequenceForMedia(input, model: "Qwen3VL")
 
         let window = prefill.resolvedStepSize()
         if inputIds2D.dim(0) == 1, inputIds2D.dim(-1) > 0,
