@@ -411,7 +411,7 @@ extension ModelLoadingSuite.GuidedGenerationTests {
                 maxTokens: 128,
                 hardReserve: 0
             )
-        } catch is GuidedGenerationError {
+        } catch GuidedGenerationError.incompleteOutput {
             // incompleteOutput is one valid way to fail -- test passes
             return
         }

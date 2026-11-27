@@ -50,4 +50,19 @@ struct DeclaredStopLoopTests {
             #expect(run.text == "a")
         }
     }
+
+    /// After `a`, fast-forward emits `b`, and the grammar then needs `x` as text.
+    /// `x` is a stop id, so nothing is allowed: the run fails before sampling
+    /// instead of returning `ab` as complete.
+    @Test func stopNeededAsTextAfterFastForwardThrows() throws {
+        try Stream.withNewDefaultStream(device: .cpu) {
+            let run = try runLoop(
+                source: .grammar(#"root ::= "abx" [a-z]*"#), policy: .script("abxy"),
+                maxTokens: 64, eosTokenIds: [0x78])
+            #expect(
+                (run.error as? GuidedGenerationError)
+                    == .noAllowedToken(stopTokenIds: [0x78, HarnessTokenizer.eosTokenId]))
+            #expect(run.text == "ab")
+        }
+    }
 }

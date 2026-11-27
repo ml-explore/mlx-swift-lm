@@ -54,6 +54,13 @@ struct PublicAPISurfaceTests {
     }
 
     @Test
+    func noAllowedTokenIsPublicAndComparable() {
+        let error: GuidedGenerationError = .noAllowedToken(stopTokenIds: [120, 255])
+        #expect(error == .noAllowedToken(stopTokenIds: [120, 255]))
+        #expect(error != .incompleteOutput)
+    }
+
+    @Test
     func commitResultIsPublic() throws {
         let vocab: [String] = (0 ..< 256).map { String(format: "<0x%02X>", $0) }
         let tokenizer = try GrammarTokenizer(

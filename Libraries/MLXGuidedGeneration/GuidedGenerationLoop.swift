@@ -92,6 +92,8 @@ public enum GuidedGenerationLoop {
     ///   exhausted before the grammar reaches a stop state.
     ///   `GuidedGenerationError.prematureEOS` if the model emits EOS
     ///   before the grammar accepts.
+    ///   `GuidedGenerationError.noAllowedToken` if the grammar allows no
+    ///   token the model can produce; the sampler is not called.
     @discardableResult
     public static func run(
         input: LMInput,
@@ -246,6 +248,14 @@ public enum GuidedGenerationLoop {
                 }
                 grammarStopped = true
                 break
+            }
+
+            // Every mask we sample from passes here. Never sample from an empty
+            // one; ids past the logit row cannot be sampled, as in `bitmaskToMLXArray`.
+            if mask.needsApply
+                && !maskAllowsAnyToken(mask, vocabSize: min(vocabSize, logitDim))
+            {
+                throw GuidedGenerationError.noAllowedToken(stopTokenIds: constraint.stopTokenIDs)
             }
 
             // Zone policy for budget management:
@@ -628,6 +638,19 @@ public enum GuidedGenerationLoop {
             return false
         }
         return (UInt32(bitPattern: mask.mask[tokenId / 32]) >> UInt32(tokenId % 32)) & 1 == 1
+    }
+
+    /// Whether `mask` allows at least one id below `vocabSize`. Bits at or
+    /// beyond `vocabSize` in the last word do not count.
+    static func maskAllowsAnyToken(_ mask: MaskResult, vocabSize: Int) -> Bool {
+        let fullWords = min(max(vocabSize, 0) / 32, mask.mask.count)
+        if mask.mask[..<fullWords].contains(where: { $0 != 0 }) {
+            return true
+        }
+        let tailBits = vocabSize % 32
+        guard tailBits > 0, fullWords < mask.mask.count else { return false }
+        let tailMask = (UInt32(1) << UInt32(tailBits)) - 1
+        return UInt32(bitPattern: mask.mask[fullWords]) & tailMask != 0
     }
 
     /// Build the additive grammar-mask array for a freshly computed `MaskResult`,

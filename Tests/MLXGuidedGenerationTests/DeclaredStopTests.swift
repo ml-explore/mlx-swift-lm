@@ -26,6 +26,40 @@ struct DeclaredStopTests {
     private static let stringSchema =
         #"{"type":"object","properties":{"s":{"type":"string"}},"required":["s"],"additionalProperties":false}"#
 
+    /// The grammar needs `x` as text, but `x` is a stop id, so the first mask
+    /// allows nothing. The run throws before the sampler or the processor runs.
+    @Test func emptyFirstMaskThrowsWithoutSampling() throws {
+        try Stream.withNewDefaultStream(device: .cpu) {
+            let sampler = RecordingSampler()
+            let run = try runLoop(
+                source: .grammar(#"root ::= "x""#), policy: .prefer([0x78]),
+                maxTokens: 8, eosTokenIds: [0x78], sampler: sampler)
+            #expect(
+                (run.error as? GuidedGenerationError)
+                    == .noAllowedToken(stopTokenIds: [0x78, HarnessTokenizer.eosTokenId]))
+            #expect(sampler.calls.isEmpty)
+            #expect(run.processCalls == 0)
+            #expect(run.text.isEmpty)
+            #expect(run.fed.isEmpty)
+            #expect(run.modelCalls == 1)
+        }
+    }
+
+    /// The grammar allows only `z` (id 122), but the model's logit row ends at
+    /// 100, so the model cannot produce it. The run throws before sampling.
+    @Test func maskBeyondLogitRowThrowsWithoutSampling() throws {
+        try Stream.withNewDefaultStream(device: .cpu) {
+            let sampler = RecordingSampler()
+            let run = try runLoop(
+                source: .grammar(#"root ::= "z""#), policy: .prefer([0x41]),
+                maxTokens: 8, logitDim: 100, sampler: sampler)
+            #expect(
+                (run.error as? GuidedGenerationError)
+                    == .noAllowedToken(stopTokenIds: [HarnessTokenizer.eosTokenId]))
+            #expect(sampler.calls.isEmpty)
+        }
+    }
+
     /// Once the JSON is complete the grammar allows the secondary stop `x`,
     /// and the loop ends on it as on the EOS.
     @Test func secondaryStopEndsCompleteJSON() throws {
@@ -111,6 +145,24 @@ struct DeclaredStopTests {
         #expect(!result.isTerminated)
     }
 
+    /// Without fast-forward, `a` and `b` are sampled; then the grammar needs
+    /// `x` as text, and the run throws before the sampler or the processor
+    /// runs a third time.
+    @Test func stopNeededAsTextWithoutFastForwardThrowsBeforeSampling() throws {
+        try Stream.withNewDefaultStream(device: .cpu) {
+            let sampler = RecordingSampler()
+            let run = try runLoop(
+                source: .grammar(#"root ::= "abx" [a-z]*"#), policy: .script("abxy"),
+                maxTokens: 64, eosTokenIds: [0x78], fastForward: false, sampler: sampler)
+            #expect(
+                (run.error as? GuidedGenerationError)
+                    == .noAllowedToken(stopTokenIds: [0x78, HarnessTokenizer.eosTokenId]))
+            #expect(run.text == "ab")
+            #expect(sampler.sampled == [0x61, 0x62])
+            #expect(run.processCalls == 2)
+        }
+    }
+
     /// A grammar that knows only the EOS keeps today's behavior: the loop
     /// stops on `x` inside the string and returns the truncated JSON.
     @Test func eosOnlyGrammarStillEndsOnAnUndeclaredStop() throws {
@@ -122,6 +174,22 @@ struct DeclaredStopTests {
                 grammarTokenizer: { _ in try HarnessTokenizer().makeGrammarTokenizer() })
             #expect(run.error == nil)
             #expect(run.text == #"{"s":""#)
+        }
+    }
+
+    /// With the EOS outside the grammar's vocabulary no stop is declared, so
+    /// even the complete output `ab` cannot end.
+    @Test func eosOutsideVocabularyCannotEndACompleteOutput() throws {
+        try Stream.withNewDefaultStream(device: .cpu) {
+            let run = try runLoop(
+                source: .grammar(#"root ::= "ab""#), policy: .script("ab"), maxTokens: 8,
+                grammarTokenizer: { _ in
+                    try GrammarTokenizer(
+                        vocab: Array(HarnessTokenizer().grammarVocabulary.prefix(255)),
+                        vocabType: .byteFallback, eosTokenId: 255)
+                })
+            #expect((run.error as? GuidedGenerationError) == .noAllowedToken(stopTokenIds: []))
+            #expect(run.text == "ab")
         }
     }
 
@@ -139,5 +207,17 @@ struct DeclaredStopTests {
                 == GuidedGenerationLoop.stopTokenIDs(
                     tokenizer: tokenizer, configuration: configuration))
         #expect(Set(stopTokenIds) == [0x78, 0x79, 0x7A, 255, 300])
+    }
+
+    @Test func maskAllowsAnyTokenIgnoresBitsBeyondVocab() {
+        func mask(_ words: [UInt32]) -> MaskResult {
+            MaskResult(
+                mask: words.map { Int32(bitPattern: $0) }, isTerminated: false, needsApply: true)
+        }
+        #expect(!GuidedGenerationLoop.maskAllowsAnyToken(mask([0, 0]), vocabSize: 40))
+        #expect(!GuidedGenerationLoop.maskAllowsAnyToken(mask([0, 1 << 8]), vocabSize: 40))
+        #expect(GuidedGenerationLoop.maskAllowsAnyToken(mask([0, 1 << 7]), vocabSize: 40))
+        #expect(GuidedGenerationLoop.maskAllowsAnyToken(mask([1 << 31, 0]), vocabSize: 40))
+        #expect(GuidedGenerationLoop.maskAllowsAnyToken(mask([0, 1 << 31]), vocabSize: 64))
     }
 }

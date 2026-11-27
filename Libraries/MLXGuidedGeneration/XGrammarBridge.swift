@@ -548,9 +548,61 @@ public final class GrammarConstraint: @unchecked Sendable {
 
     /// Compute the bitmask of grammar-accepted next tokens at the
     /// matcher's current state.
+    ///
+    /// Stop tokens are allowed only where the grammar confirms it can end.
+    /// xgrammar can leave their bits set at other states, so they are
+    /// cleared there.
     public func computeMask() throws -> MaskResult {
         lock.lock()
         defer { lock.unlock() }
+        let mask = try computeRawMaskLocked()
+        let stopAllowed = stopTokenIDs.contains {
+            (UInt32(bitPattern: mask.mask[$0 / 32]) >> UInt32($0 % 32)) & 1 == 1
+        }
+        guard stopAllowed, try !canStopLocked() else { return mask }
+        var words = mask.mask
+        for id in stopTokenIDs {
+            words[id / 32] &= ~Int32(bitPattern: UInt32(1) << UInt32(id % 32))
+        }
+        return MaskResult(mask: words, isTerminated: mask.isTerminated, needsApply: true)
+    }
+
+    /// Test seam: changes the mask xgrammar fills before anything reads it.
+    var rawMaskHookForTesting: (@Sendable (MaskResult) -> MaskResult)?
+
+    /// The mask exactly as xgrammar fills it.
+    func computeRawMask() throws -> MaskResult {
+        lock.lock()
+        defer { lock.unlock() }
+        return try computeRawMaskLocked()
+    }
+
+    /// Whether the grammar can end at the current state. It accepts a
+    /// declared stop token and rolls it back; with no stop token it is false.
+    func canStop() throws -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return try canStopLocked()
+    }
+
+    private func canStopLocked() throws -> Bool {
+        if isMatcherTerminatedLocked() {
+            return true
+        }
+        guard let stopTokenId = stopTokenIDs.first,
+            xg_matcher_accept_token(matcher, Int32(stopTokenId)) == XG_OK
+        else {
+            return false
+        }
+        let status = xg_matcher_rollback(matcher, 1)
+        guard status == XG_OK else {
+            throw GrammarError.rollbackFailed(
+                Self.captureShimError(status: status, fallback: "xg_matcher_rollback n=1"))
+        }
+        return true
+    }
+
+    private func computeRawMaskLocked() throws -> MaskResult {
         var mask = [Int32](repeating: 0, count: bitmaskWords)
         var needsApplyFlag: Int32 = 0
         let status = mask.withUnsafeMutableBufferPointer { buf in
@@ -568,11 +620,12 @@ public final class GrammarConstraint: @unchecked Sendable {
                     status: status, fallback: "xg_matcher_fill_next_token_bitmask")
             )
         }
-        return MaskResult(
+        let result = MaskResult(
             mask: mask,
             isTerminated: isMatcherTerminatedLocked(),
             needsApply: needsApplyFlag != 0
         )
+        return rawMaskHookForTesting?(result) ?? result
     }
 
     /// Commit a sampled token to advance grammar state.

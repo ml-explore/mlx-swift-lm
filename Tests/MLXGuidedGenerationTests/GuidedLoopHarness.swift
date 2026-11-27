@@ -212,6 +212,7 @@ private struct HarnessInputProcessor: UserInputProcessor {
 /// Runs `GuidedGenerationLoop.run` with a `PolicyModel` and the prompt `[1, 2, 3]`.
 ///
 /// `logitDim` sets the model's logit width; it defaults to the vocabulary size.
+/// `rawMaskHook` changes every mask xgrammar fills, before anything reads it.
 /// `grammarTokenizer` builds the grammar's tokenizer from the loop's stops, to
 /// give the grammar other stops than the loop.
 ///
@@ -230,6 +231,7 @@ func runLoop(
     hardReserve: Int = 0,
     closingBias: MLXArray? = nil,
     sampler: (any LogitSampler)? = nil,
+    rawMaskHook: (@Sendable (MaskResult) -> MaskResult)? = nil,
     grammarTokenizer makeGrammar: ((_ loopStops: [Int]) throws -> GrammarTokenizer)? = nil
 ) throws -> GuidedRun {
     let configuration = ModelConfiguration(id: "harness", eosTokenIds: eosTokenIds)
@@ -249,6 +251,8 @@ func runLoop(
             tokenizer: grammarTokenizer, grammar: grammar,
             fastForward: fastForward, hostTokenizer: tokenizer)
     }
+
+    constraint.rawMaskHookForTesting = rawMaskHook
 
     let prompt: [Int32] = [1, 2, 3]
     let history = PolicyHistory(promptLength: prompt.count)
