@@ -20,7 +20,8 @@ extension UserInput.AudioFormat {
 
 extension UserInput.Audio {
 
-    public func asMLXArray(processing: UserInput.AudioProcessing = .init()) async throws -> MLXArray
+    public func asMLXArray(processing: UserInput.AudioProcessing = .init()) async throws
+        -> MaterializedArray
     {
         switch source {
         case .url(let url):
@@ -61,7 +62,7 @@ extension UserInput.Audio {
                 throw reader.error ?? UserInputError.unableToLoad(url)
             }
 
-            return MLXArray(samples)
+            return MLXArray(samples).materialized()
             #else
             fatalError("Audio processing is not supported on this platform.")
             #endif

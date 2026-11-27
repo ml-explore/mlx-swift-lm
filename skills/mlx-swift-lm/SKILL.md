@@ -318,7 +318,7 @@ let reply = try await next.respond(to: "What is the weather like?")
 ```swift
 let imageFromURL = UserInput.Image.url(fileURL)
 let imageFromCI = UserInput.Image.ciImage(ciImage)
-let imageFromArray = UserInput.Image.array(mlxArray)
+let imageFromArray = UserInput.Image.array(mlxArray.materialized())
 ```
 
 ### Video Input

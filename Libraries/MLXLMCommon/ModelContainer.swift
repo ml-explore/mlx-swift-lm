@@ -173,7 +173,7 @@ public final class ModelContainer: ModelMemoryReporting {
     /// - Returns: Prepared language model input (transferred via `sending`)
     /// - Note: The `sending` keyword indicates the return value is transferred (not shared),
     ///   allowing non-Sendable types like `LMInput` to safely cross isolation boundaries.
-    public func prepare(input: consuming sending UserInput) async throws -> sending LMInput {
+    public func prepare(input: UserInput) async throws -> sending LMInput {
         let processor = await self.processor
         return try await processor.prepare(input: input)
     }
