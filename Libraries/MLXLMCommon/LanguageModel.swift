@@ -172,6 +172,18 @@ public struct LMInput {
             return Array(repeating: tokens.dim(1), count: tokens.dim(0))
         }
 
+        /// `true` when the mask hides at least one position.
+        ///
+        /// A missing mask and an integer or boolean all-ones mask both attend to every
+        /// token, so a token-only suffix is equivalent to them. Floating-point masks
+        /// may be additive, so they always count as padding.
+        package var carriesPaddingMask: Bool {
+            guard let mask else { return false }
+            guard !mask.dtype.isFloatingPoint else { return true }
+            // Reduce on the device so only one scalar reaches the host.
+            return !(mask .== 1).all().item(Bool.self)
+        }
+
         /// Number of logical sequence positions consumed by one model call.
         /// Batch dimensions do not duplicate the shared cache timeline.
         @inline(__always)

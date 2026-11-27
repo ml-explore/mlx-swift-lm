@@ -331,9 +331,10 @@ public struct QwenVL {
     /// Split a Qwen VL prepared input at `prefixTokenCount`, keeping only the media
     /// whose placeholder tokens fall in the suffix.
     ///
-    /// Shared by ``Qwen25VL`` and ``Qwen2VL``, whose prepared-input layout is the
-    /// same: `pixels` is the images' patch rows concatenated along axis 0 in prompt
-    /// order, and `frames` carries one `THW` per image, so image *i* owns
+    /// Used by ``Qwen25VL``, ``Qwen3VL`` and ``Qwen35``, and valid for ``Qwen2VL``.
+    /// Their prepared-input layout is the same: `pixels` is the images' patch rows
+    /// concatenated along axis 0 in prompt order, and `frames` carries one `THW` per
+    /// image, so image *i* owns
     /// `frames[i].product` rows and `frames[i].product / (mergeSize * mergeSize)`
     /// placeholder tokens (see ``patchify(images:mergeSize:patchSize:temporalPatchSize:)``
     /// and ``replacePaddingTokens(in:frames:paddingToken:mergeSize:tokenizer:)``).
@@ -366,10 +367,7 @@ public struct QwenVL {
         // The processor pairs media with an all-ones mask. Anything else is a real
         // padding mask this routine will not reinterpret.
         if let mask = input.text.mask {
-            guard mask.size == ids.count else { return nil }
-            guard mask.asType(.int32).asArray(Int32.self).allSatisfy({ $0 == 1 }) else {
-                return nil
-            }
+            guard mask.size == ids.count, !input.text.carriesPaddingMask else { return nil }
         }
 
         var splitImage: LMInput.ProcessedImage?
