@@ -220,8 +220,8 @@ actor ModelCache {
     ///
     /// Grammar compilation is expensive (~5-20ms). By caching the compiled template
     /// and cloning it (~0.1ms), repeated requests with the same schema skip recompilation.
-    /// When Fork() is unavailable (xgrammar < v0.1.33), the clone attempt fails gracefully
-    /// and each request compiles a fresh constraint instead. Any other clone failure
+    /// Until the shim calls xgrammar's Fork() (upstream since v0.1.33), the clone attempt fails
+    /// gracefully and each request compiles a fresh constraint instead. Any other clone failure
     /// reaches the caller.
     func makeConstraint(
         modelID: String,

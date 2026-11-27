@@ -10,6 +10,8 @@
 #include <xgrammar/xgrammar.h>
 
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -24,96 +26,80 @@ namespace xgrammar {
 class GrammarBuilder {
  public:
   using Rule = Grammar::Impl::Rule;
+  using SuffixStopInfo = Grammar::Impl::SuffixStopInfo;
   using GrammarExprType = Grammar::Impl::GrammarExprType;
   using GrammarExpr = Grammar::Impl::GrammarExpr;
 
-  /*! \brief Default constructor. Creates a new grammar object. */
-  GrammarBuilder() : grammar_(std::make_shared<Grammar::Impl>()) {}
-
-  /*! \brief Constructor. Creates a new grammar object from an existing grammar. */
-  GrammarBuilder(const Grammar& grammar)
-      : grammar_(std::make_shared<Grammar::Impl>(*grammar.operator->())) {
-    for (int i = 0; i < static_cast<int>(grammar->NumRules()); ++i) {
-      auto rule = grammar->GetRule(i);
-      rule_name_to_id_[rule.name] = i;
-    }
-  }
-
-  /*!
-   * \brief Get the result grammar. This function will also set the root rule to the rule with the
-   * specified name. The rule should be already added to the grammar.
-   * \param root_rule_name The name of the root rule. Default is "root".
-   */
-  Grammar Get(const std::string& root_rule_name = "root") {
-    int32_t root_rule_id = GetRuleId(root_rule_name);
-    XGRAMMAR_CHECK(root_rule_id != -1)
-        << "The root rule with name \"" << root_rule_name << "\" is not found.";
-    return Get(root_rule_id);
-  }
-
-  /*!
-   * \brief Get the result grammar. This function will also set the root rule to the rule with
-   * the specified id. The rule should be already added to the grammar.
-   * \param root_rule_id The id of the root rule.
-   */
-  Grammar Get(int32_t root_rule_id) {
-    XGRAMMAR_CHECK(
-        root_rule_id >= 0 && root_rule_id < static_cast<int32_t>(grammar_->rules_.size())
-    ) << "The root rule id "
-      << root_rule_id << " is out of bound.";
-    grammar_->root_rule_id_ = root_rule_id;
-
-    return Grammar(grammar_);
-  }
-
-  /****************** GrammarExpr handling ******************/
-
-  /*! \brief Add a grammar_expr and return the grammar_expr id. */
-  int32_t AddGrammarExpr(const GrammarExpr& grammar_expr) {
-    grammar_->grammar_expr_indptr_.push_back(grammar_->grammar_expr_data_.size());
-    grammar_->grammar_expr_data_.push_back(static_cast<int32_t>(grammar_expr.type));
-    grammar_->grammar_expr_data_.push_back(grammar_expr.data_len);
-    grammar_->grammar_expr_data_.insert(
-        grammar_->grammar_expr_data_.end(),
-        grammar_expr.data,
-        grammar_expr.data + grammar_expr.data_len
-    );
-    return static_cast<int32_t>(grammar_->grammar_expr_indptr_.size()) - 1;
-  }
-
-  /*!
-   * \brief Add a GrammarExpr for string stored in bytes.
-   * \param bytes A vector of int32_t, each representing a byte (0~255) in the string.
-   * The string is stored in int32 vector to match the storage format of the grammar.
-   */
-  int32_t AddByteString(const std::vector<int32_t>& bytes) {
-    return AddGrammarExpr(
-        {GrammarExprType::kByteString, bytes.data(), static_cast<int32_t>(bytes.size())}
-    );
-  }
-
-  /*!
-   * \brief Add a GrammarExpr for string stored in bytes.
-   * \param str The string to be added.
-   */
-  int32_t AddByteString(const std::string& str) {
-    std::vector<int32_t> bytes;
-    for (char c : str) {
-      bytes.push_back(static_cast<int32_t>(static_cast<uint8_t>(c)));
-    }
-    return AddGrammarExpr(
-        {GrammarExprType::kByteString, bytes.data(), static_cast<int32_t>(bytes.size())}
-    );
-  }
-
-  /*!
-   * \brief One element of a character class, containing a lower and a upper bound. Both bounds are
+  /*! \brief One element of a character class, containing a lower and a upper bound. Both bounds are
    * inclusive.
    */
   struct CharacterClassElement {
     int32_t lower;
     int32_t upper;
   };
+
+  /*! \brief Default constructor. Creates a new grammar object. */
+  GrammarBuilder();
+
+  /*! \brief Constructor. Creates a new grammar object from an existing grammar. */
+  GrammarBuilder(const Grammar& grammar);
+
+  /*!
+   * \brief Create a builder bound to an existing grammar without copying it. Unlike the copy
+   * constructor above, appended exprs and rule updates are written directly into *grammar. The
+   * grammar must outlive the builder.
+   */
+  static GrammarBuilder FromMutableGrammar(Grammar* grammar);
+
+  /*!
+   * \brief Get the result grammar. This function will also set the root rule to the rule with the
+   * specified name. The rule should be already added to the grammar.
+   * \param root_rule_name The name of the root rule. Default is "root".
+   */
+  Grammar Get(const std::string& root_rule_name = "root");
+
+  /*!
+   * \brief Get the result grammar. This function will also set the root rule to the rule with
+   * the specified id. The rule should be already added to the grammar.
+   * \param root_rule_id The id of the root rule.
+   */
+  Grammar Get(int32_t root_rule_id);
+
+  /****************** GrammarExpr handling ******************/
+
+  /*! \brief Add a grammar_expr and return the grammar_expr id. */
+  int32_t AddGrammarExpr(const GrammarExpr& grammar_expr);
+
+  /*!
+   * \brief Add a GrammarExpr for string stored in bytes.
+   * \param bytes A vector of int32_t, each representing a byte (0~255) in the string.
+   * The string is stored in int32 vector to match the storage format of the grammar.
+   */
+  int32_t AddByteString(const std::vector<int32_t>& bytes);
+
+  /*!
+   * \brief Add a GrammarExpr for string stored in bytes.
+   * \param str The string to be added.
+   */
+  int32_t AddByteString(const std::string& str);
+
+  /*!
+   * \brief Add a GrammarExpr for a regex. The pattern is stored as-is and compiled into an
+   * automaton by GrammarFSMBuilder.
+   * \param regex_str The regex pattern string.
+   * \param json_string Whether the regex matches the body of a JSON string literal. If true,
+   * the characters that must be escaped in a JSON string (the control characters, '"' and
+   * '\\') are excluded from every character match of the compiled automaton.
+   */
+  int32_t AddRegex(const std::string& regex_str, bool json_string = false);
+
+  /*!
+   * \brief Add a GrammarExpr for a substring expression, which matches every contiguous
+   * subsequence of the chunk list (including the empty one). The chunks are stored as-is and
+   * compiled into an automaton by GrammarFSMBuilder.
+   * \param chunks The list of byte string chunks. Chunks may be empty or repeated.
+   */
+  int32_t AddSubstring(const std::vector<std::string>& chunks);
 
   /*!
    * \brief Add a GrammarExpr for a character class.
@@ -122,18 +108,7 @@ class GrammarBuilder {
    */
   int32_t AddCharacterClass(
       const std::vector<CharacterClassElement>& elements, bool is_negative = false
-  ) {
-    std::vector<int32_t> data;
-    data.reserve(1 + elements.size() * 2);
-    data.push_back(static_cast<int32_t>(is_negative));
-    for (const auto& range : elements) {
-      data.push_back(range.lower);
-      data.push_back(range.upper);
-    }
-    return AddGrammarExpr(
-        {GrammarExprType::kCharacterClass, data.data(), static_cast<int32_t>(data.size())}
-    );
-  }
+  );
 
   /*!
    * \brief Add a GrammarExpr for a star quantifier of a character class.
@@ -142,113 +117,71 @@ class GrammarBuilder {
    */
   int32_t AddCharacterClassStar(
       const std::vector<CharacterClassElement>& elements, bool is_negative = false
-  ) {
-    std::vector<int32_t> data;
-    data.reserve(1 + elements.size() * 2);
-    data.push_back(static_cast<int32_t>(is_negative));
-    for (const auto& range : elements) {
-      data.push_back(range.lower);
-      data.push_back(range.upper);
-    }
-    return AddGrammarExpr(
-        {GrammarExprType::kCharacterClassStar, data.data(), static_cast<int32_t>(data.size())}
-    );
-  }
+  );
 
   /*! \brief Add a GrammarExpr for empty string.*/
-  int32_t AddEmptyStr() { return AddGrammarExpr({GrammarExprType::kEmptyStr, nullptr, 0}); }
+  int32_t AddEmptyStr();
+
+  /*! \brief Add a GrammarExpr for kToken (token-level matching). */
+  int32_t AddTokenSet(const std::vector<int32_t>& token_ids);
+
+  /*! \brief Add a GrammarExpr for kExcludeToken (excluded token-level matching). */
+  int32_t AddExcludeTokenSet(const std::vector<int32_t>& token_ids);
 
   /*! \brief Add a GrammarExpr for rule reference.*/
-  int32_t AddRuleRef(int32_t rule_id) {
-    std::vector<int32_t> data;
-    data.push_back(rule_id);
-    return AddGrammarExpr(
-        {GrammarExprType::kRuleRef, data.data(), static_cast<int32_t>(data.size())}
-    );
-  }
+  int32_t AddRuleRef(int32_t rule_id);
 
   /*! \brief Add a GrammarExpr for GrammarExpr sequence.*/
-  int32_t AddSequence(const std::vector<int32_t>& elements) {
-    return AddGrammarExpr(
-        {GrammarExprType::kSequence, elements.data(), static_cast<int32_t>(elements.size())}
-    );
-  }
+  int32_t AddSequence(const std::vector<int32_t>& elements);
 
   /*! \brief Add a GrammarExpr for GrammarExpr choices.*/
-  int32_t AddChoices(const std::vector<int32_t>& choices) {
-    return AddGrammarExpr(
-        {GrammarExprType::kChoices, choices.data(), static_cast<int32_t>(choices.size())}
-    );
-  }
+  int32_t AddChoices(const std::vector<int32_t>& choices);
 
   /*!
    * \brief Add a GrammarExpr for tag dispatch.
    * \param tag_dispatch_list A list of pairs of tag_expr_id and rule_id.
    */
-  int32_t AddTagDispatch(const Grammar::Impl::TagDispatch& tag_dispatch) {
-    std::vector<int32_t> data;
-    data.reserve(
-        tag_dispatch.tag_rule_pairs.size() * 2 +
-        Grammar::Impl::TagDispatch::kTagDispatchExtraParameter
-    );
-    for (const auto& [tag, rule_id] : tag_dispatch.tag_rule_pairs) {
-      data.push_back(AddByteString(tag));
-      data.push_back(rule_id);
-    }
-    data.push_back(static_cast<int32_t>(tag_dispatch.stop_eos));
-    std::vector<int32_t> stop_str_expr_ids;
-    for (const auto& stop_str : tag_dispatch.stop_str) {
-      stop_str_expr_ids.push_back(AddByteString(stop_str));
-    }
-    data.push_back(AddChoices(stop_str_expr_ids));
-    data.push_back(static_cast<int32_t>(tag_dispatch.loop_after_dispatch));
-    std::vector<int32_t> exclude_str_expr_ids;
-    for (const auto& exclude_str : tag_dispatch.excluded_str) {
-      exclude_str_expr_ids.push_back(AddByteString(exclude_str));
-    }
-    data.push_back(AddChoices(exclude_str_expr_ids));
-    return AddGrammarExpr(
-        {GrammarExprType::kTagDispatch, data.data(), static_cast<int32_t>(data.size())}
-    );
-  }
+  int32_t AddTagDispatch(const Grammar::Impl::TagDispatch& tag_dispatch);
 
-  int32_t AddRepeat(int32_t ref_rule_id, int32_t min_repeat_count, int32_t max_repeat_count) {
-    std::vector<int32_t> data({ref_rule_id, min_repeat_count, max_repeat_count});
-    return AddGrammarExpr({GrammarExprType::kRepeat, data.data(), static_cast<int32_t>(data.size())}
-    );
-  }
+  /*! \brief Encode a TokenTagDispatch struct into a kTokenTagDispatch expr. */
+  int32_t AddTokenTagDispatch(const Grammar::Impl::TokenTagDispatch& token_tag_dispatch);
+
+  int32_t AddRepeat(int32_t ref_rule_id, int32_t min_repeat_count, int32_t max_repeat_count);
+
+  /*!
+   * \brief Add a repeat GrammarExpr from an arbitrary grammar expression. If the expression is
+   * not a rule reference, a new rule is created to wrap it.
+   * \param cur_rule_name Name hint for generated rules.
+   * \param grammar_expr_id The expression to repeat.
+   * \param min_repeat_count Minimum repeat count (inclusive).
+   * \param max_repeat_count Maximum repeat count (inclusive), or -1 for unbounded.
+   */
+  int32_t AddRepeatFromExpr(
+      const std::string& cur_rule_name,
+      int32_t grammar_expr_id,
+      int32_t min_repeat_count,
+      int32_t max_repeat_count
+  );
 
   /*! \brief Get the number of grammar_exprs. */
-  int32_t NumGrammarExprs() const { return grammar_->NumGrammarExprs(); }
+  int32_t NumGrammarExprs() const;
 
   /*! \brief Get the grammar_expr with the given id. */
-  GrammarExpr GetGrammarExpr(int32_t grammar_expr_id) {
-    return grammar_->GetGrammarExpr(grammar_expr_id);
-  }
+  GrammarExpr GetGrammarExpr(int32_t grammar_expr_id);
 
   /****************** Rule handling ******************/
 
   /*! \brief Add a rule and return the rule id. */
-  int32_t AddRule(const Rule& rule) {
-    int32_t id = grammar_->rules_.size();
-    grammar_->rules_.push_back(rule);
-    XGRAMMAR_CHECK(rule_name_to_id_.count(rule.name) == 0);
-    rule_name_to_id_[rule.name] = id;
-    return id;
-  }
+  int32_t AddRule(const Rule& rule);
 
-  int32_t AddRule(const std::string& name, int32_t body_expr_id) {
-    return AddRule({name, body_expr_id});
-  }
+  int32_t AddRule(const std::string& name, int32_t body_expr_id);
 
-  int32_t AddRuleWithHint(const std::string& name_hint, int32_t body_expr_id) {
-    return AddRule({GetNewRuleName(name_hint), body_expr_id});
-  }
+  int32_t AddRuleWithHint(const std::string& name_hint, int32_t body_expr_id);
 
-  int32_t NumRules() const { return grammar_->NumRules(); }
+  int32_t NumRules() const;
 
   /*! \brief Get the rule with the given id. */
-  const Rule& GetRule(int32_t rule_id) const { return grammar_->rules_[rule_id]; }
+  const Rule& GetRule(int32_t rule_id) const;
 
   /*!
    * \brief Add an rule without body, and return the rule id. The rule body should be set later
@@ -256,91 +189,102 @@ class GrammarBuilder {
    * required to build the rule body.
    * \sa GrammarBuilder::UpdateRuleBody
    */
-  int32_t AddEmptyRule(const std::string& name) { return AddRule({name, -1}); }
+  int32_t AddEmptyRule(const std::string& name);
 
-  int32_t AddEmptyRuleWithHint(const std::string& name_hint) {
-    return AddRule({GetNewRuleName(name_hint), -1});
-  }
+  int32_t AddEmptyRuleWithHint(const std::string& name_hint);
 
   /*!
    * \brief Update the rule body of the given rule, specified by rule id. Can be used to set the
    * rule body of a rule inserted by GrammarBuilder::AddEmptyRule.
    */
-  void UpdateRuleBody(int32_t rule_id, int32_t body_expr_id) {
-    XGRAMMAR_CHECK(rule_id >= 0 && rule_id < static_cast<int32_t>(grammar_->rules_.size()))
-        << "Rule id " << rule_id << " is out of range.";
-    grammar_->rules_[rule_id].body_expr_id = body_expr_id;
-  }
+  void UpdateRuleBody(int32_t rule_id, int32_t body_expr_id);
 
   /*!
    * \brief Update the rule body of the given rule, specified by rule name. Can be used to set the
    * rule body of a rule inserted by GrammarBuilder::AddEmptyRule.
    */
-  void UpdateRuleBody(std::string rule_name, int32_t body_expr_id) {
-    int32_t rule_id = GetRuleId(rule_name);
-    XGRAMMAR_CHECK(rule_id != -1) << "Rule " << rule_name << " is not found.";
-    UpdateRuleBody(rule_id, body_expr_id);
-  }
+  void UpdateRuleBody(std::string rule_name, int32_t body_expr_id);
 
   /*!
    * \brief Add a lookahead assertion to a rule referred by the given rule_id. The lookahead
    * assertion should be a sequence GrammarExpr id. An id of -1 means no lookahead assertion.
    */
-  void UpdateLookaheadAssertion(int32_t rule_id, int32_t lookahead_assertion_id) {
-    XGRAMMAR_CHECK(rule_id < static_cast<int32_t>(grammar_->rules_.size()))
-        << "Rule id " << rule_id << " is out of range.";
-    grammar_->rules_[rule_id].lookahead_assertion_id = lookahead_assertion_id;
-  }
+  void UpdateLookaheadAssertion(int32_t rule_id, int32_t lookahead_assertion_id);
 
-  void UpdateLookaheadExact(int32_t rule_id, bool is_exact = true) {
-    XGRAMMAR_CHECK(rule_id < static_cast<int32_t>(grammar_->rules_.size()))
-        << "Rule id " << rule_id << " is out of range.";
-    grammar_->rules_[rule_id].is_exact_lookahead = is_exact;
-  }
+  void UpdateLookaheadExact(int32_t rule_id, bool is_exact = true);
+
+  /*! \brief Set the sampling temperature associated with a rule. */
+  void UpdateRuleTemperature(int32_t rule_id, std::optional<float> temperature);
 
   /*!
    * \brief Add a lookahead assertion to a rule referred by the given name. The lookahead
    * assertion should be a sequence GrammarExpr id. An id of -1 means no lookahead assertion.
    */
-  void UpdateLookaheadAssertion(std::string rule_name, int32_t lookahead_assertion_id) {
-    int32_t rule_id = GetRuleId(rule_name);
-    XGRAMMAR_CHECK(rule_id != -1) << "Rule " << rule_name << " is not found.";
-    UpdateLookaheadAssertion(rule_id, lookahead_assertion_id);
-  }
+  void UpdateLookaheadAssertion(std::string rule_name, int32_t lookahead_assertion_id);
+
+  /*! \brief Update the token budget of the rule referred by the given rule_id. -1 means none. */
+  void UpdateMaxTokens(int32_t rule_id, int32_t max_tokens);
+
+  /*! \brief Update the token budget of the rule referred by the given name. -1 means none. */
+  void UpdateMaxTokens(std::string rule_name, int32_t max_tokens);
+
+  /*! \brief Update the character budget of the rule referred by the given rule_id. -1 means none.
+   */
+  void UpdateMaxChars(int32_t rule_id, int32_t max_chars);
+
+  /*! \brief Update the character budget of the rule referred by the given name. -1 means none. */
+  void UpdateMaxChars(std::string rule_name, int32_t max_chars);
+
+  /*!
+   * \brief Update the capture group name of the rule referred by the given rule_id. An empty
+   * string means no capture.
+   */
+  void UpdateCaptureName(int32_t rule_id, const std::string& capture_name);
+
+  /*!
+   * \brief Update the capture group name of the rule referred by the given name. An empty string
+   * means no capture.
+   */
+  void UpdateCaptureName(std::string rule_name, const std::string& capture_name);
+
+  /*! \brief Set or clear the sparse suffix/stop metadata for a rule. */
+  void UpdateSuffixStopInfo(int32_t rule_id, const SuffixStopInfo& info);
+
+  /*! \brief Set or clear sparse suffix/stop metadata on the rule referred by name. */
+  void UpdateSuffixStopInfo(std::string rule_name, const SuffixStopInfo& info);
+
+  /*! \brief Set whether the rule referred by the given rule_id is lazy (committed-shortest). */
+  void UpdateLazy(int32_t rule_id, bool is_lazy);
+
+  /*! \brief Set whether the rule referred by the given name is lazy (committed-shortest). */
+  void UpdateLazy(std::string rule_name, bool is_lazy);
 
   /*!
    * \brief Find a name for a new rule starting with the given name hint. Some integer suffix (_1,
    * _2, ...) may be added to avoid name conflict.
    */
-  std::string GetNewRuleName(const std::string& name_hint) {
-    if (rule_name_to_id_.count(name_hint) == 0) {
-      return name_hint;
-    } else {
-      int cnt = 1;
-      while (rule_name_to_id_.count(name_hint + "_" + std::to_string(cnt)) != 0) {
-        ++cnt;
-      }
-      return name_hint + "_" + std::to_string(cnt);
-    }
-  }
+  std::string GetNewRuleName(const std::string& name_hint);
 
   /*!
    * \brief Get the rule id of the rule with the given name. Return -1 if not found.
    */
-  int32_t GetRuleId(const std::string& name) const {
-    auto it = rule_name_to_id_.find(name);
-    if (it == rule_name_to_id_.end()) {
-      return -1;
-    } else {
-      return it->second;
-    }
-  }
+  int32_t GetRuleId(const std::string& name) const;
 
  private:
+  /*!
+   * \brief Build rule_name_to_id_ from the existing rules if it has not been built yet.
+   * Builders bound to an existing grammar (copy constructor, FromMutableGrammar) defer building
+   * the map to the first name-based operation, so id-only rewriting pays no name hashing cost.
+   */
+  void EnsureRuleNameMap() const;
+
   // Mutable pointer to the grammar object.
   std::shared_ptr<Grammar::Impl> grammar_;
-  // Map from rule name to rule id.
-  std::unordered_map<std::string, int32_t> rule_name_to_id_;
+  // Map from rule name to rule id. Built lazily; see EnsureRuleNameMap.
+  mutable std::unordered_map<std::string, int32_t> rule_name_to_id_;
+  mutable bool rule_name_map_built_ = true;
+  // Cache of next suffix index per name_hint for GetNewRuleName.
+  std::unordered_map<std::string, int> next_cnt_per_hint_;
 };
 
 }  // namespace xgrammar

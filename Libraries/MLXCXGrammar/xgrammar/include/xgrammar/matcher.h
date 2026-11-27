@@ -71,12 +71,17 @@ class GrammarMatcher {
    * CompiledGrammar.
    * \param compiled_grammar The compiled grammar. It is obtained through
    * CreateCompiledGrammar as a result of preprocessing the grammar and tokenizer.
+   * \param override_stop_tokens Optional stop token ids that replace those from the tokenizer.
+   * \param terminate_without_stop_token Whether to terminate when the root rule is complete.
+   * \param max_rollback_tokens Deprecated and unused.
+   * \param default_temperature The temperature used when no active rule specifies one.
    */
   GrammarMatcher(
       const CompiledGrammar& compiled_grammar,
       std::optional<std::vector<int>> override_stop_tokens = std::nullopt,
       bool terminate_without_stop_token = false,
-      int max_rollback_tokens = -1
+      int max_rollback_tokens = -1,
+      std::optional<float> default_temperature = std::nullopt
   );
 
   /*!
@@ -111,6 +116,35 @@ class GrammarMatcher {
   bool FillNextTokenBitmask(DLTensor* next_token_bitmask, int index = 0, bool debug_print = false);
 
   /*!
+   * \brief Traverse a draft token tree and fill the token bitmask for each node.
+   *
+   * This function performs a DFS traversal of the speculative decoding tree and fills
+   * the token bitmask for each node based on grammar constraints.
+   *
+   * \param retrieve_next_token DLTensor where retrieve_next_token[i] gives the index of
+   *        the child node of node i, or -1 if no child exists.
+   * \param retrieve_next_sibling DLTensor where retrieve_next_sibling[i] gives the index of
+   *        the sibling node of node i, or -1 if no sibling exists.
+   * \param draft_tokens DLTensor of draft token ids at each node.
+   * \param token_bitmask DLTensor to store the bitmask (2D: num_nodes x bitmask_size).
+   * \param time_threshold Maximum allowed time in seconds for the DFS traversal.
+   *        If the traversal exceeds this threshold, it returns false.
+   *        A value <= 0 disables the timeout (default: -1.0).
+   * \param temperatures Optional DLTensor to store the effective temperature for each node
+   *        (1D float32 with num_nodes elements). -1 represents no effective temperature; it is
+   *        also written for nodes that were not visited or were rejected.
+   * \return true if the traversal completed successfully, false if it timed out.
+   */
+  bool TraverseDraftTree(
+      const DLTensor* retrieve_next_token,
+      const DLTensor* retrieve_next_sibling,
+      const DLTensor* draft_tokens,
+      DLTensor* token_bitmask,
+      double time_threshold = -1.0,
+      DLTensor* temperatures = nullptr
+  );
+
+  /*!
    * \brief Find the jump-forward string for jump-forward decoding. This is the longest string that
    will be valid according to the current syntax.
    * \note This method does not change the grammar state.
@@ -125,16 +159,50 @@ class GrammarMatcher {
   void Rollback(int num_tokens = 1);
 
   /*!
+   * \brief Get the capture groups recorded so far, ordered by completion position.
+   * \param deduplicate The Earley parser explores parse hypotheses in parallel, so one
+   * occurrence of a captured rule may complete at several candidate end positions (e.g. a
+   * /[0-9]+/ body completes after every digit). If true (default), only the last (longest)
+   * completion of each occurrence is kept. Distinct occurrences — repeated matches of the same
+   * rule at different positions — are always kept. If false, the raw completion events are
+   * returned.
+   * \return A list of (capture_name, matched_bytes) pairs. Rules gain a capture name via the
+   * Lark attribute rule[capture] / rule[capture="name"] or the EBNF form rule[capture="name"]
+   * ::= ... The bytes are the input span that the rule matched.
+   * \note Captures are recorded when a rule is completed during AcceptToken / AcceptString, and
+   * are rolled back together with Rollback. Mask computation never records captures. Completions
+   * on parse paths that are later abandoned may still be recorded; for unambiguous grammars
+   * whose captured rules have unambiguous boundaries, the deduplicated result is exact.
+   */
+  std::vector<std::pair<std::string, std::string>> GetCaptures(bool deduplicate = true) const;
+
+  /*!
    * \brief Check if the matcher has accepted the stop token and terminated.
    * \sa AcceptToken
    */
   bool IsTerminated() const;
 
+  /*!
+   * \brief Check if the grammar's root rule has been fully matched by the input accepted so far.
+   * Unlike IsTerminated(), this does not require the stop token to have been accepted.
+   * \sa IsTerminated, AcceptToken
+   */
+  bool IsCompleted() const;
+
   /*! \brief Reset the matcher to the initial state. */
   void Reset();
 
+  /*!
+   * \brief Fork the matcher. Returns a new GrammarMatcher with a deep copy of all state except
+   * compiled_grammar and tokenizer_info, which are shared with this matcher.
+   */
+  GrammarMatcher Fork() const;
+
   /*! \brief Get the maximum number of rollback tokens allowed. */
   int GetMaxRollbackTokens() const;
+
+  /*! \brief Get the effective sampling temperature for the next token. */
+  std::optional<float> GetTemperature() const;
 
   const std::vector<int>& GetStopTokenIds() const;
 
@@ -176,6 +244,20 @@ class BatchGrammarMatcher {
   );
 
   /*!
+   * \brief Fill the effective sampling temperature of each matcher into a tensor.
+   * \param matchers The array of GrammarMatcher objects.
+   * \param temperatures The pre-allocated 1D float32 CPU tensor to store the result. The entry of
+   * a matcher without an effective temperature is set to -1.
+   * \param indices The optional array of indices to specify which element each matcher writes to.
+   * If not provided, matchers[i] writes to temperatures[i].
+   */
+  static void BatchFillTemperature(
+      const std::vector<GrammarMatcher>& matchers,
+      DLTensor* temperatures,
+      const std::optional<std::vector<int32_t>>& indices = std::nullopt
+  );
+
+  /*!
    * \brief A batched version of AcceptString for better efficiency.
    * \param matchers The array of GrammarMatcher objects.
    * \param input_strs The array of input strings to be accepted.
@@ -199,6 +281,15 @@ class BatchGrammarMatcher {
       std::vector<GrammarMatcher>* matchers,
       const std::vector<int32_t>& token_ids,
       bool debug_print = false
+  );
+
+  /*!
+   * \brief A batched version of Rollback for better efficiency.
+   * \param matchers The array of GrammarMatcher objects.
+   * \param num_tokens The array of the number of tokens to rollback for each matcher.
+   */
+  static void BatchRollback(
+      std::vector<GrammarMatcher>* matchers, const std::vector<int>& num_tokens
   );
 
   XGRAMMAR_DEFINE_PIMPL_METHODS(BatchGrammarMatcher);

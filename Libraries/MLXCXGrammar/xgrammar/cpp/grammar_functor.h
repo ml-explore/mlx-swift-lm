@@ -9,6 +9,7 @@
 
 #include <xgrammar/xgrammar.h>
 
+#include <bitset>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -16,6 +17,7 @@
 #include "compiled_grammar_impl.h"
 #include "grammar_builder.h"
 #include "grammar_impl.h"
+#include "support/utils.h"
 #include "xgrammar/grammar.h"
 
 namespace xgrammar {
@@ -67,6 +69,14 @@ class GrammarFunctor {
         builder_->UpdateRuleBody(i, new_body_expr_id);
         // Handle lookahead assertion
         builder_->UpdateLookaheadAssertion(i, VisitLookaheadAssertion(rule.lookahead_assertion_id));
+        builder_->UpdateMaxTokens(i, rule.max_tokens);
+        builder_->UpdateMaxChars(i, rule.max_chars);
+        builder_->UpdateCaptureName(i, rule.capture_name);
+        if (const auto* suffix_stop_info = base_grammar_->GetSuffixStopInfo(i)) {
+          builder_->UpdateSuffixStopInfo(i, *suffix_stop_info);
+        }
+        builder_->UpdateLazy(i, rule.is_lazy);
+        builder_->UpdateRuleTemperature(i, rule.temperature);
       }
       return builder_->Get(base_grammar_->GetRootRule().name);
     } else {
@@ -137,6 +147,16 @@ class GrammarFunctor {
         return VisitTagDispatch(grammar_expr);
       case GrammarExprType::kRepeat:
         return VisitRepeat(grammar_expr);
+      case GrammarExprType::kToken:
+        return VisitToken(grammar_expr);
+      case GrammarExprType::kExcludeToken:
+        return VisitExcludeToken(grammar_expr);
+      case GrammarExprType::kTokenTagDispatch:
+        return VisitTokenTagDispatch(grammar_expr);
+      case GrammarExprType::kRegex:
+        return VisitRegex(grammar_expr);
+      case GrammarExprType::kSubstring:
+        return VisitSubstring(grammar_expr);
       default:
         XGRAMMAR_LOG(FATAL) << "Unexpected sequence type: " << static_cast<int>(grammar_expr.type);
         XGRAMMAR_UNREACHABLE();
@@ -221,6 +241,22 @@ class GrammarFunctor {
   /*! \brief Visit a repeat GrammarExpr. */
   virtual T VisitRepeat(const GrammarExpr& grammar_expr) { return VisitElement(grammar_expr); }
 
+  virtual T VisitToken(const GrammarExpr& grammar_expr) { return VisitElement(grammar_expr); }
+
+  virtual T VisitExcludeToken(const GrammarExpr& grammar_expr) {
+    return VisitElement(grammar_expr);
+  }
+
+  virtual T VisitTokenTagDispatch(const GrammarExpr& grammar_expr) {
+    return VisitElement(grammar_expr);
+  }
+
+  /*! \brief Visit a regex GrammarExpr. It is a leaf: the pattern string is carried as-is. */
+  virtual T VisitRegex(const GrammarExpr& grammar_expr) { return VisitElement(grammar_expr); }
+
+  /*! \brief Visit a substring GrammarExpr. It is a leaf: the chunk list is carried as-is. */
+  virtual T VisitSubstring(const GrammarExpr& grammar_expr) { return VisitElement(grammar_expr); }
+
   /*! \brief The grammar to visit or mutate. */
   Grammar base_grammar_{NullObj{}};
 
@@ -299,11 +335,14 @@ class StructureNormalizer {
 /*************************** Grammar Optimizer ***************************/
 
 /*!
- * \brief Fuse the byte string elements in the grammar.
+ * \brief Fuse adjacent byte string elements in sequences.
+ * \details Rewrites *grammar in place. Only sequences that actually contain adjacent byte strings
+ * are rewritten; if nothing needs fusing, the grammar is left untouched. The caller must own the
+ * grammar, as the input is mutated directly.
  */
 class ByteStringFuser {
  public:
-  static Grammar Apply(const Grammar& grammar);
+  static void Apply(Grammar* grammar);
 };
 
 /*!
@@ -316,10 +355,13 @@ class AllowEmptyRuleAnalyzer {
 
 /*!
  * \brief Inline the rule references in the grammar.
+ * \details Rewrites *grammar in place. Only choices with an inlinable leading rule reference are
+ * rewritten; if nothing can be inlined, the grammar is left untouched. The caller must own the
+ * grammar, as the input is mutated directly.
  */
 class RuleInliner {
  public:
-  static Grammar Apply(const Grammar& grammar);
+  static void Apply(Grammar* grammar);
 };
 
 /*!
@@ -349,9 +391,34 @@ class GrammarFSMBuilder {
   static FSMWithStartEnd RuleRef(const GrammarExpr& expr);
   static FSMWithStartEnd CharacterClass(const GrammarExpr& expr);
   static FSMWithStartEnd ByteString(const GrammarExpr& expr);
+  static FSMWithStartEnd Token(const GrammarExpr& expr);
+  static FSMWithStartEnd ExcludeToken(const GrammarExpr& expr);
+  static std::optional<FSMWithStartEnd> TokenTagDispatch(
+      const Grammar::Impl::TokenTagDispatch& token_tag_dispatch
+  );
   static std::optional<FSMWithStartEnd> Sequence(const GrammarExpr& expr, const Grammar& grammar);
   static std::optional<FSMWithStartEnd> Choices(const GrammarExpr& expr, const Grammar& grammar);
   static std::optional<FSMWithStartEnd> TagDispatch(const Grammar::Impl::TagDispatch& tag_dispatch);
+  /*!
+   * \brief Build the automaton of a regex pattern. Returns the error message on failure.
+   * \param regex The regex pattern string.
+   * \param json_string Whether the regex matches the body of a JSON string literal. If true,
+   * the characters in JSONStringForbiddenChars() are excluded from every character match.
+   */
+  static Result<FSMWithStartEnd> Regex(const std::string& regex, bool json_string = false);
+  /*!
+   * \brief Flatten a regular EBNF grammar without reinterpreting its terminal expressions.
+   * Supports finite rule calls, direct tail self-recursion, and repetition. Each call gets
+   * separate return states. Other recursion, non-byte terminals, and rule annotations return
+   * an error. Intended for the existing RegexToEBNF fallback, not arbitrary CFGs.
+   * \param max_num_states Bound on the intermediate automaton size.
+   */
+  static Result<FSMWithStartEnd> FromRegularGrammar(
+      const Grammar& grammar, int max_num_states = 100000
+  );
+  /*! \brief The characters that must be escaped inside a JSON string literal: the control
+   * characters 0x00-0x1F, the quote '"' and the backslash '\\'. */
+  static const std::bitset<256>& JSONStringForbiddenChars();
 };
 
 /*!
@@ -362,6 +429,15 @@ class GrammarFSMBuilder {
 class RepetitionNormalizer {
  public:
   static void Apply(Grammar* grammar);
+};
+
+/*!
+ * \brief Expand kRepeat grammar expressions using HandleRepetitionRange logic.
+ * Transforms repetition structures into explicit sequences and choices.
+ */
+class RepetitionRangeExpander {
+ public:
+  static Grammar Apply(const Grammar& grammar);
 };
 
 /*!

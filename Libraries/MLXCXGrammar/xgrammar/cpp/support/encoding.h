@@ -299,11 +299,9 @@ inline std::optional<CharHandlingError> Latin1ToBytes(
 */
 inline void ByteToLatin1(const std::string& bytes, std::string* result) {
   result->clear();
-  const char* data = bytes.c_str();
+  result->reserve(bytes.size());
 
-  for (int current_idx = 0; *(data + current_idx) != '\0'; current_idx++) {
-    const unsigned char& current_char = static_cast<unsigned char>(*(data + current_idx));
-
+  for (unsigned char current_char : bytes) {
     // Ascii character, directly add to result.
     if (current_char <= 0x7F) {
       result->push_back(static_cast<char>(current_char));
@@ -393,9 +391,9 @@ std::pair<TCodepoint, int32_t> ParseNextEscaped(
   // C escape characters
   static const std::unordered_map<char, TCodepoint> kEscapeToCodepoint = {
       // clang-format off
-      {'\'', '\''}, {'\"', '\"'}, {'?', '\?'}, {'\\', '\\'}, {'a', '\a'}, {'b', '\b'}, {'f', '\f'},
-      {'n', '\n'}, {'r', '\r'}, {'t', '\t'}, {'v', '\v'}, {'0', '\0'},
-      {'e', '\x1B'}  // clang-format on
+      {'\'', '\''}, {'\"', '\"'}, {'?', '\?'}, {'\\', '\\'}, {'/', '/'}, {'a', '\a'},
+      {'b', '\b'}, {'f', '\f'}, {'n', '\n'}, {'r', '\r'}, {'t', '\t'}, {'v', '\v'},
+      {'0', '\0'}, {'e', '\x1B'}  // clang-format on
   };
   if (data[0] != '\\') {
     return {CharHandlingError::kInvalidEscape, 0};

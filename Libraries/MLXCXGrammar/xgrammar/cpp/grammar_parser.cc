@@ -7,12 +7,16 @@
 
 #include <picojson.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
-#include <optional>
+#include <cstring>
+#include <limits>
 #include <string>
 #include <variant>
 #include <vector>
 
+#include "fsm_builder.h"
 #include "grammar_builder.h"
 #include "grammar_impl.h"
 #include "support/encoding.h"
@@ -140,6 +144,248 @@ EBNFLexer::Token EBNFLexer::Impl::ParseIdentifierOrBooleanToken() {
         start_line,
         start_column
     };
+  }
+
+  // A rule definition may carry an attribute block before ::=, e.g.
+  // name[max_tokens=10] ::= ..., name[max_chars=10] ::= ..., name[capture] ::= ...,
+  // name[capture="x"] ::= ...,
+  // name[capture_hidden_suffix_bytes=3] ::= ..., name[capture_hidden_stop_bytes=3] ::= ...,
+  // name[capture_hidden_body_rule_id=1, capture_hidden_marker_rule_id=2] ::= ...,
+  // name[stop_capture="marker"] ::= ..., name[lazy] ::= ..., name[temperature=0.7] ::= ..., or a
+  // comma-separated combination.
+  // The bracket group is treated as an attribute block only when it is followed by "::=";
+  // otherwise it is left to be lexed as a character class.
+  if (*cur_ == '[') {
+    int delta = 1;
+    auto skip_space = [&]() {
+      while (Peek(delta) == ' ' || Peek(delta) == '\t') {
+        ++delta;
+      }
+    };
+    // Match the keyword at the current position and advance delta past it on success.
+    auto match_keyword = [&](const char* keyword) {
+      int len = 0;
+      while (keyword[len] != '\0') {
+        if (Peek(delta + len) != keyword[len]) {
+          return false;
+        }
+        ++len;
+      }
+      delta += len;
+      return true;
+    };
+    bool matched = true;
+    bool has_max_tokens = false;
+    bool has_max_chars = false;
+    bool has_capture = false;
+    bool has_capture_hidden_suffix_bytes = false;
+    bool has_capture_hidden_stop_bytes = false;
+    bool has_capture_hidden_body_rule_id = false;
+    bool has_capture_hidden_marker_rule_id = false;
+    bool has_stop_capture = false;
+    bool has_lazy = false;
+    bool has_temperature = false;
+    double temperature_value = 0;
+    int64_t max_tokens_value = -1;
+    int64_t max_chars_value = -1;
+    int64_t capture_hidden_suffix_bytes_value = 0;
+    int64_t capture_hidden_stop_bytes_value = 0;
+    int64_t capture_hidden_body_rule_id_value = -1;
+    int64_t capture_hidden_marker_rule_id_value = -1;
+    std::string capture_value;
+    std::string stop_capture_value;
+    auto parse_integer_value = [&](int64_t* value) {
+      skip_space();
+      if (Peek(delta) != '=') {
+        return false;
+      }
+      ++delta;
+      skip_space();
+      *value = 0;
+      int digits = 0;
+      while (Peek(delta) >= '0' && Peek(delta) <= '9' && digits < 10) {
+        *value = *value * 10 + (Peek(delta) - '0');
+        ++delta;
+        ++digits;
+      }
+      return digits > 0 && !(Peek(delta) >= '0' && Peek(delta) <= '9');
+    };
+    auto parse_string_value = [&](std::string* value) {
+      skip_space();
+      if (Peek(delta) != '=') {
+        return false;
+      }
+      ++delta;
+      skip_space();
+      if (Peek(delta) != '"') {
+        return false;
+      }
+      ++delta;
+      while (Peek(delta) != '"') {
+        char c = Peek(delta);
+        if (c == '\0' || c == '\n' || c == '\r' || c == '\\') {
+          return false;
+        }
+        value->push_back(c);
+        ++delta;
+      }
+      ++delta;
+      return true;
+    };
+    auto parse_float_value = [&](double* value) {
+      skip_space();
+      if (Peek(delta) != '=') {
+        return false;
+      }
+      ++delta;
+      skip_space();
+      std::string text;
+      while (true) {
+        char c = Peek(delta);
+        if ((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-') {
+          text.push_back(c);
+          ++delta;
+        } else {
+          break;
+        }
+      }
+      if (text.empty()) {
+        return false;
+      }
+      try {
+        *value = std::stod(text);
+      } catch (const std::out_of_range&) {
+        *value = std::numeric_limits<double>::infinity();
+      } catch (const std::exception&) {
+        return false;
+      }
+      return true;
+    };
+    // Parse a comma-separated attribute list. Each attribute may appear at most once.
+    while (matched) {
+      skip_space();
+      if (!has_max_tokens && match_keyword("max_tokens")) {
+        has_max_tokens = true;
+        matched = parse_integer_value(&max_tokens_value);
+      } else if (!has_max_chars && match_keyword("max_chars")) {
+        has_max_chars = true;
+        matched = parse_integer_value(&max_chars_value);
+      } else if (!has_capture_hidden_suffix_bytes && match_keyword("capture_hidden_suffix_bytes")) {
+        has_capture_hidden_suffix_bytes = true;
+        matched = parse_integer_value(&capture_hidden_suffix_bytes_value);
+      } else if (!has_capture_hidden_stop_bytes && match_keyword("capture_hidden_stop_bytes")) {
+        has_capture_hidden_stop_bytes = true;
+        matched = parse_integer_value(&capture_hidden_stop_bytes_value);
+      } else if (!has_capture_hidden_body_rule_id && match_keyword("capture_hidden_body_rule_id")) {
+        has_capture_hidden_body_rule_id = true;
+        matched = parse_integer_value(&capture_hidden_body_rule_id_value);
+      } else if (!has_capture_hidden_marker_rule_id &&
+                 match_keyword("capture_hidden_marker_rule_id")) {
+        has_capture_hidden_marker_rule_id = true;
+        matched = parse_integer_value(&capture_hidden_marker_rule_id_value);
+      } else if (!has_stop_capture && match_keyword("stop_capture")) {
+        has_stop_capture = true;
+        matched = parse_string_value(&stop_capture_value);
+      } else if (!has_capture && match_keyword("capture")) {
+        has_capture = true;
+        skip_space();
+        if (Peek(delta) == '=') {
+          matched = parse_string_value(&capture_value);
+        } else {
+          capture_value = identifier;
+        }
+      } else if (!has_lazy && match_keyword("lazy")) {
+        has_lazy = true;
+      } else if (!has_temperature && match_keyword("temperature")) {
+        has_temperature = true;
+        matched = parse_float_value(&temperature_value);
+      } else {
+        matched = false;
+      }
+      if (!matched) {
+        break;
+      }
+      skip_space();
+      if (Peek(delta) == ',') {
+        ++delta;
+        continue;
+      }
+      break;
+    }
+    if (matched) {
+      skip_space();
+      if (Peek(delta) == ']') {
+        ++delta;
+      } else {
+        matched = false;
+      }
+    }
+    if (matched) {
+      int after_bracket = delta;
+      while (Peek(after_bracket) == ' ' || Peek(after_bracket) == '\t') {
+        ++after_bracket;
+      }
+      if (!(Peek(after_bracket) == ':' && Peek(after_bracket + 1) == ':' &&
+            Peek(after_bracket + 2) == '=')) {
+        matched = false;
+      }
+    }
+    if (matched) {
+      if (has_capture && capture_value.empty()) {
+        ReportLexerError("The capture name must not be empty", start_line, start_column);
+      }
+      if (has_stop_capture && stop_capture_value.empty()) {
+        ReportLexerError("The stop capture name must not be empty", start_line, start_column);
+      }
+      if (has_capture_hidden_body_rule_id != has_capture_hidden_marker_rule_id) {
+        ReportLexerError(
+            "The capture-hidden body and marker rule ids must be specified together",
+            start_line,
+            start_column
+        );
+      }
+      if ((has_capture_hidden_suffix_bytes && capture_hidden_suffix_bytes_value <= 0) ||
+          (has_capture_hidden_stop_bytes && capture_hidden_stop_bytes_value <= 0)) {
+        ReportLexerError(
+            "The number of capture-hidden bytes must be positive", start_line, start_column
+        );
+      }
+      constexpr int64_t kMaxInt32 = std::numeric_limits<int32_t>::max();
+      if (has_max_chars && max_chars_value < 0) {
+        ReportLexerError(
+            "The max_chars rule attribute must be non-negative", start_line, start_column
+        );
+      }
+      if ((has_max_chars && max_chars_value > kMaxInt32) ||
+          (has_capture_hidden_suffix_bytes && capture_hidden_suffix_bytes_value > kMaxInt32) ||
+          (has_capture_hidden_stop_bytes && capture_hidden_stop_bytes_value > kMaxInt32) ||
+          (has_capture_hidden_body_rule_id && capture_hidden_body_rule_id_value > kMaxInt32) ||
+          (has_capture_hidden_marker_rule_id && capture_hidden_marker_rule_id_value > kMaxInt32)) {
+        ReportLexerError("The rule attribute value is too large", start_line, start_column);
+      }
+      if (has_temperature && !(std::isfinite(temperature_value) && temperature_value >= 0 &&
+                               temperature_value <= std::numeric_limits<float>::max())) {
+        ReportLexerError(
+            "The temperature must be a finite non-negative number", start_line, start_column
+        );
+      }
+      Consume(delta);
+      Token token{TokenType::Identifier, identifier, identifier, start_line, start_column};
+      token.max_tokens = static_cast<int32_t>(max_tokens_value);
+      token.max_chars = static_cast<int32_t>(max_chars_value);
+      token.capture_name = capture_value;
+      token.capture_hidden_suffix_bytes = static_cast<int32_t>(capture_hidden_suffix_bytes_value);
+      token.capture_hidden_stop_bytes = static_cast<int32_t>(capture_hidden_stop_bytes_value);
+      token.capture_hidden_body_rule_id = static_cast<int32_t>(capture_hidden_body_rule_id_value);
+      token.capture_hidden_marker_rule_id =
+          static_cast<int32_t>(capture_hidden_marker_rule_id_value);
+      token.stop_capture_name = stop_capture_value;
+      token.is_lazy = has_lazy;
+      if (has_temperature) {
+        token.temperature = static_cast<float>(temperature_value);
+      }
+      return token;
+    }
   }
 
   // Otherwise it's an identifier
@@ -427,13 +673,23 @@ std::vector<EBNFLexer::Token> EBNFLexer::Tokenize(const std::string& input) {
 class EBNFParser {
  public:
   /*! \brief The logic of parsing the grammar string. */
-  Grammar Parse(const std::vector<EBNFLexer::Token>& tokens, const std::string& root_rule_name);
+  Grammar Parse(
+      const std::vector<EBNFLexer::Token>& tokens,
+      const std::string& root_rule_name,
+      const int& max_nest_layer = 1000
+  );
 
  private:
   using Rule = Grammar::Impl::Rule;
+  using SuffixStopInfo = Grammar::Impl::SuffixStopInfo;
   using GrammarExprType = Grammar::Impl::GrammarExprType;
   using Token = EBNFLexer::Token;
   using TokenType = EBNFLexer::TokenType;
+
+  struct ParsedRule {
+    Rule rule;
+    SuffixStopInfo suffix_stop_info;
+  };
 
   // Parsing different parts of the grammar
   std::string ParseIdentifier();
@@ -447,7 +703,7 @@ class EBNFParser {
   int32_t ParseLookaheadAssertion();
   int32_t ParseSequence();
   int32_t ParseChoices();
-  Rule ParseRule();
+  ParsedRule ParseRule();
 
   // Parser for macro
   class MacroIR {
@@ -486,6 +742,11 @@ class EBNFParser {
   MacroIR::NodePtr ParseMacroValue();
 
   int32_t ParseTagDispatch();
+  int32_t ParseTokenSet();
+  int32_t ParseExcludeToken();
+  int32_t ParseTokenTagDispatch();
+  int32_t ParseRegexMacro();
+  int32_t ParseSubstringMacro();
 
   // Helper functions
 
@@ -493,8 +754,6 @@ class EBNFParser {
   int32_t HandleStarQuantifier(int32_t grammar_expr_id);
   int32_t HandlePlusQuantifier(int32_t grammar_expr_id);
   int32_t HandleQuestionQuantifier(int32_t grammar_expr_id);
-  int32_t HandleRepetitionRange(int32_t grammar_expr_id, int64_t lower, int64_t upper);
-  int32_t LegacyHandleRepetitionRange(int32_t grammar_expr_id, int64_t lower, int64_t upper);
 
   // When parsing, we first find the names of all rules, and build the mapping from name to rule id.
   void InitRuleNames();
@@ -526,12 +785,21 @@ class EBNFParser {
   // The name of the root rule
   std::string root_rule_name_;
 
+  int nest_layer_guard_ = 0;
+
+  int max_nest_layer_ = 1000;  // Max nest layer of the grammar
+
   static const std::unordered_map<std::string, std::function<int32_t(EBNFParser*)>> kMacroFunctions;
 };
 
 const std::unordered_map<std::string, std::function<int32_t(EBNFParser*)>>
     EBNFParser::kMacroFunctions = {
         {"TagDispatch", [](EBNFParser* parser) { return parser->ParseTagDispatch(); }},
+        {"Token", [](EBNFParser* parser) { return parser->ParseTokenSet(); }},
+        {"ExcludeToken", [](EBNFParser* parser) { return parser->ParseExcludeToken(); }},
+        {"TokenTagDispatch", [](EBNFParser* parser) { return parser->ParseTokenTagDispatch(); }},
+        {"Regex", [](EBNFParser* parser) { return parser->ParseRegexMacro(); }},
+        {"Substring", [](EBNFParser* parser) { return parser->ParseSubstringMacro(); }},
 };
 
 const EBNFParser::Token& EBNFParser::Peek(int delta) const { return *(current_token_ + delta); }
@@ -642,14 +910,20 @@ int32_t EBNFParser::ParseRuleRef() {
 
 int32_t EBNFParser::ParseElement() {
   if (Peek().type == TokenType::LParen) {
+    nest_layer_guard_++;
+    if (nest_layer_guard_ > max_nest_layer_) {
+      ReportParseError("Nest layer exceeded the maximum limit", -1);
+    }
     Consume();
     if (Peek().type == TokenType::RParen) {
       // Special case: ( )
       Consume();
+      nest_layer_guard_--;
       return builder_.AddEmptyStr();
     }
     auto grammar_expr_id = ParseChoices();
     PeekAndConsume(TokenType::RParen, "Expect )");
+    nest_layer_guard_--;
     return grammar_expr_id;
   } else if (Peek().type == TokenType::LBracket) {
     return ParseCharClass();
@@ -689,6 +963,15 @@ std::pair<int64_t, int64_t> EBNFParser::ParseRepetitionRange() {
     Consume();
     if (Peek().type == TokenType::RBrace) {
       Consume();
+      return {lower, -1};
+    }
+    // The grammar printer emits {n, -1} for unbounded upper bounds, and
+    // '-' is a valid identifier-start char (IsNameChar), so the lexer
+    // produces Identifier("-1") rather than IntegerLiteral.  Accept it
+    // as equivalent to {n,}.
+    if (Peek().type == TokenType::Identifier && Peek().lexeme == "-1") {
+      Consume();
+      PeekAndConsume(TokenType::RBrace, "Expect }");
       return {lower, -1};
     }
     int64_t upper = ParseInteger();
@@ -758,145 +1041,6 @@ int32_t EBNFParser::HandleQuestionQuantifier(int32_t grammar_expr_id) {
   return builder_.AddRuleRef(new_rule_id);
 }
 
-int32_t EBNFParser::LegacyHandleRepetitionRange(
-    int32_t grammar_expr_id, int64_t lower, int64_t upper
-) {
-  // Construct expr expr ... expr (l times)
-
-  std::vector<int32_t> elements;
-  for (int64_t i = 0; i < lower; ++i) {
-    elements.push_back(grammar_expr_id);
-  }
-
-  // Case 1: {l}:
-  // expr expr ... expr (l times)
-  if (upper == lower) {
-    return builder_.AddSequence(elements);
-  }
-
-  // Case 2: {l,}:
-  // expr expr ... expr (l times) rest
-  // rest ::= "" | expr rest
-  if (upper == -1) {
-    auto new_rule_name = builder_.GetNewRuleName(cur_rule_name_);
-    auto new_rule_id = builder_.AddEmptyRule(new_rule_name);
-    auto ref_to_new_rule = builder_.AddRuleRef(new_rule_id);
-    auto new_grammar_expr_id = builder_.AddChoices(
-        {builder_.AddEmptyStr(), builder_.AddSequence({grammar_expr_id, ref_to_new_rule})}
-    );
-    builder_.UpdateRuleBody(new_rule_id, new_grammar_expr_id);
-    elements.push_back(builder_.AddRuleRef(new_rule_id));
-    return builder_.AddSequence(elements);
-  }
-
-  // Case 3: {l, r} (r - l >= 1)
-  // expr expr ... expr (l times) rest1
-  // rest1 ::= "" | expr rest2
-  // rest2 ::= "" | expr rest3
-  // ...
-  // rest(r - l) ::= "" | expr
-  std::vector<int32_t> rest_rule_ids;
-
-  for (int64_t i = 0; i < upper - lower; ++i) {
-    auto new_rule_name = builder_.GetNewRuleName(cur_rule_name_);
-    rest_rule_ids.push_back(builder_.AddEmptyRule(new_rule_name));
-  }
-  for (int64_t i = 0; i < upper - lower - 1; ++i) {
-    auto ref_to_next_rule = builder_.AddRuleRef(rest_rule_ids[i + 1]);
-    auto new_grammar_expr_id = builder_.AddChoices(
-        {builder_.AddEmptyStr(), builder_.AddSequence({grammar_expr_id, ref_to_next_rule})}
-    );
-    builder_.UpdateRuleBody(rest_rule_ids[i], new_grammar_expr_id);
-  }
-  auto last_grammar_expr_id = builder_.AddChoices({builder_.AddEmptyStr(), grammar_expr_id});
-  builder_.UpdateRuleBody(rest_rule_ids.back(), last_grammar_expr_id);
-
-  elements.push_back(builder_.AddRuleRef(rest_rule_ids[0]));
-  return builder_.AddSequence(elements);
-}
-
-int32_t EBNFParser::HandleRepetitionRange(
-    const int32_t grammar_expr_id, int64_t lower, int64_t upper
-) {
-  static const int64_t kUnzipThreshold = 128;
-  XGRAMMAR_DCHECK(lower >= 0);
-  XGRAMMAR_DCHECK(upper == -1 || upper >= lower);
-  // Case 1.1 small upper (<=threshold), unzip the repetition.
-  // Case 1.2 unbounded upper, and lower is also small (<=threshold), unzip the lower part.
-  if ((upper != -1 && upper <= kUnzipThreshold) || (upper == -1 && lower <= kUnzipThreshold)) {
-    return LegacyHandleRepetitionRange(grammar_expr_id, lower, upper);
-  }
-
-  // Case 2. upper is unbounded, and lower is large (>threshold).
-  // Or upper is bounded, but upper > threshold.
-
-  // Case 2.1.1. lower is smaller than threshold, and upper is large. Transform {lower, upper} into:
-  // {threshold, upper} | {lower, threshold}
-  std::vector<int32_t> choices;
-  if (lower < kUnzipThreshold) {
-    choices.push_back(LegacyHandleRepetitionRange(grammar_expr_id, lower, kUnzipThreshold - 1));
-    lower = kUnzipThreshold;
-  }
-
-  std::optional<int32_t> infinite_repetition_id = std::nullopt;
-  std::vector<int32_t> repeated_sequence;
-  // Now, we transform {lower, upper} into {max{threshold, lower}, upper}.
-  // Case 2.2 upper is unbounded. We will transform it into {lower} {0, inf}.
-  if (upper == -1) {
-    const auto& rule_expr = builder_.GetGrammarExpr(grammar_expr_id);
-    if (rule_expr.type == GrammarBuilder::GrammarExprType::kCharacterClass) {
-      std::vector<GrammarBuilder::CharacterClassElement> character_ranges;
-      bool is_negative = rule_expr[0];
-      for (int i = 1; i < static_cast<int>(rule_expr.size()); i += 2) {
-        character_ranges.push_back({rule_expr[i], rule_expr[i + 1]});
-      }
-      infinite_repetition_id = builder_.AddCharacterClassStar(character_ranges, is_negative);
-    } else {
-      const auto& unbounded_rule_id =
-          builder_.AddEmptyRule(builder_.GetNewRuleName(cur_rule_name_ + "_repeat_inf"));
-      int recursion_sequence =
-          builder_.AddSequence({grammar_expr_id, builder_.AddRuleRef(unbounded_rule_id)});
-      int recursion_choice = builder_.AddChoices({builder_.AddEmptyStr(), recursion_sequence});
-      builder_.UpdateRuleBody(unbounded_rule_id, recursion_choice);
-      infinite_repetition_id = builder_.AddRuleRef(unbounded_rule_id);
-    }
-    upper = lower;
-  }
-
-  // Handle the {lower, upper} part, where threshold <= lower <= upper.
-  const auto repeat_name = cur_rule_name_ + "_repeat_1";
-  XGRAMMAR_DCHECK(lower >= kUnzipThreshold && upper >= lower);
-
-  // If we have infinite repetition part, add it to the sequence.
-  if (infinite_repetition_id.has_value()) {
-    repeated_sequence.push_back(infinite_repetition_id.value());
-  }
-
-  // The repetition body.
-  if (upper != kUnzipThreshold) {
-    XGRAMMAR_DCHECK(upper > kUnzipThreshold);
-    auto new_grammar_expr_id = builder_.AddChoices({builder_.AddSequence({grammar_expr_id})});
-    auto new_rule_id = builder_.AddRuleWithHint(repeat_name, new_grammar_expr_id);
-    auto new_repeated_ref_rule_expr = builder_.AddChoices({builder_.AddSequence(
-        {builder_.AddRepeat(new_rule_id, lower - kUnzipThreshold, upper - kUnzipThreshold)}
-    )});
-    auto new_repeated_rule_id =
-        builder_.AddRuleWithHint(repeat_name + "_inner", new_repeated_ref_rule_expr);
-    repeated_sequence.push_back(builder_.AddRuleRef(new_repeated_rule_id));
-    std::vector<int32_t> repetition_lookahead(kUnzipThreshold, grammar_expr_id);
-    builder_.UpdateLookaheadAssertion(new_rule_id, builder_.AddSequence(repetition_lookahead));
-  }
-
-  // Add the last threshold grammar_expr_id to the sequence.
-  for (int i = 0; i < kUnzipThreshold; ++i) {
-    repeated_sequence.push_back(grammar_expr_id);
-  }
-
-  // Add the sequence to choices.
-  choices.push_back(builder_.AddSequence(repeated_sequence));
-  return builder_.AddChoices(choices);
-}
-
 int32_t EBNFParser::ParseElementWithQuantifier() {
   int32_t grammar_expr_id = ParseElement();
 
@@ -911,7 +1055,12 @@ int32_t EBNFParser::ParseElementWithQuantifier() {
     return HandleQuestionQuantifier(grammar_expr_id);
   } else if (Peek().type == TokenType::LBrace) {
     auto [lower, upper] = ParseRepetitionRange();
-    return HandleRepetitionRange(grammar_expr_id, lower, upper);
+    return builder_.AddRepeatFromExpr(
+        cur_rule_name_,
+        grammar_expr_id,
+        static_cast<int32_t>(lower),
+        upper == -1 ? -1 : static_cast<int32_t>(upper)
+    );
   }
 
   return grammar_expr_id;
@@ -1002,18 +1151,26 @@ EBNFParser::MacroIR::NodePtr EBNFParser::ParseMacroValue() {
     Consume();
     return std::make_unique<MacroIR::Node>(MacroIR::IdentifierNode{name});
   } else if (Peek().type == TokenType::LParen) {
-    // Tuple value
+    // Tuple value. Nested tuples recurse once per layer, so guard the depth the same way the
+    // ordinary parenthesis path does to avoid a stack overflow on deeply nested input.
+    nest_layer_guard_++;
+    if (nest_layer_guard_ > max_nest_layer_) {
+      ReportParseError("Nest layer exceeded the maximum limit", -1);
+    }
     Consume();  // Consume (
 
     MacroIR::TupleNode tuple;
 
-    // Parse tuple elements
+    // Parse tuple elements (supports trailing comma)
     if (Peek().type != TokenType::RParen) {
       while (true) {
         tuple.elements.push_back(ParseMacroValue());
 
         if (Peek().type == TokenType::Comma) {
           Consume();
+          if (Peek().type == TokenType::RParen) {
+            break;
+          }
         } else if (Peek().type == TokenType::RParen) {
           break;
         } else {
@@ -1023,6 +1180,7 @@ EBNFParser::MacroIR::NodePtr EBNFParser::ParseMacroValue() {
     }
 
     Consume();  // Consume )
+    nest_layer_guard_--;
     return std::make_unique<MacroIR::Node>(std::move(tuple));
   } else {
     ReportParseError("Expect string, integer, boolean, or tuple in macro argument");
@@ -1037,7 +1195,16 @@ int32_t EBNFParser::ParseTagDispatch() {
 
   Grammar::Impl::TagDispatch tag_dispatch;
 
-  // Position parameters: ("tag", rule_name)
+  static const std::unordered_set<std::string> kValidNamedArgs = {
+      "loop_after_dispatch", "excludes"
+  };
+  for (const auto& [name, _] : args.named_arguments) {
+    if (kValidNamedArgs.count(name) == 0) {
+      ReportParseError("Unknown named argument for TagDispatch: " + name, delta_element);
+    }
+  }
+
+  // Positional parameters: ("tag_string", rule_name) — string triggers only
   for (const auto& arg : args.arguments) {
     auto tuple_node = std::get_if<MacroIR::TupleNode>(arg.get());
     if (tuple_node == nullptr) {
@@ -1048,12 +1215,11 @@ int32_t EBNFParser::ParseTagDispatch() {
       ReportParseError("Each tag dispatch element must be a pair (tag, rule)", delta_element);
     }
 
-    // First element should be a string (tag)
     auto tag_str_node = std::get_if<MacroIR::StringNode>(tuple_node->elements[0].get());
     if (tag_str_node == nullptr || tag_str_node->value.empty()) {
       ReportParseError("Tag must be a non-empty string literal", delta_element);
     }
-    // Second element should be an identifier (rule name)
+
     auto rule_name_node = std::get_if<MacroIR::IdentifierNode>(tuple_node->elements[1].get());
     if (rule_name_node == nullptr) {
       ReportParseError("Rule reference must be an identifier", delta_element);
@@ -1063,34 +1229,7 @@ int32_t EBNFParser::ParseTagDispatch() {
     if (rule_id == -1) {
       ReportParseError("Rule \"" + rule_name_node->name + "\" is not defined", delta_element);
     }
-
     tag_dispatch.tag_rule_pairs.push_back({tag_str_node->value, rule_id});
-  }
-
-  // stop_eos
-  tag_dispatch.stop_eos = true;
-  if (auto it = args.named_arguments.find("stop_eos"); it != args.named_arguments.end()) {
-    auto bool_node = std::get_if<MacroIR::BooleanNode>(it->second.get());
-    if (bool_node == nullptr) {
-      ReportParseError("stop_eos must be a boolean literal", delta_element);
-    }
-    tag_dispatch.stop_eos = bool_node->value;
-  }
-
-  // stop_str
-  if (auto it = args.named_arguments.find("stop_str"); it != args.named_arguments.end()) {
-    auto tuple_node = std::get_if<MacroIR::TupleNode>(it->second.get());
-    if (tuple_node == nullptr) {
-      ReportParseError("Stop strings must be a tuple", delta_element);
-    }
-
-    for (const auto& element : tuple_node->elements) {
-      auto stop_str_node = std::get_if<MacroIR::StringNode>(element.get());
-      if (stop_str_node == nullptr || stop_str_node->value.empty()) {
-        ReportParseError("Stop string must be a non-empty string literal", delta_element);
-      }
-      tag_dispatch.stop_str.push_back(stop_str_node->value);
-    }
   }
 
   // loop_after_dispatch
@@ -1104,40 +1243,248 @@ int32_t EBNFParser::ParseTagDispatch() {
     tag_dispatch.loop_after_dispatch = bool_node->value;
   }
 
-  // exclude_str
+  // excludes — string only
   if (auto it = args.named_arguments.find("excludes"); it != args.named_arguments.end()) {
     auto tuple_node = std::get_if<MacroIR::TupleNode>(it->second.get());
     if (tuple_node == nullptr) {
-      ReportParseError("excluded strings must be a tuple", delta_element);
+      ReportParseError("excludes must be a tuple", delta_element);
     }
-
     for (const auto& element : tuple_node->elements) {
-      auto exclude_str_node = std::get_if<MacroIR::StringNode>(element.get());
-      if (exclude_str_node == nullptr || exclude_str_node->value.empty()) {
-        ReportParseError("Stop string must be a non-empty string literal", delta_element);
+      auto str_node = std::get_if<MacroIR::StringNode>(element.get());
+      if (str_node == nullptr || str_node->value.empty()) {
+        ReportParseError("Exclude must be a non-empty string literal", delta_element);
       }
-      tag_dispatch.excluded_str.push_back(exclude_str_node->value);
+      tag_dispatch.excludes.push_back(str_node->value);
     }
   }
 
-  // Well formed check
-  if (!tag_dispatch.stop_eos && tag_dispatch.stop_str.empty()) {
-    ReportParseError(
-        "The TagDispatch must have stop_eos=true or stop_str is not empty", delta_element
-    );
-  }
-  for (const auto& exclude_str : tag_dispatch.excluded_str) {
-    for (const auto& stop_str : tag_dispatch.stop_str) {
-      if (stop_str == exclude_str) {
+  // Well-formedness checks: string excludes vs string triggers
+  for (const auto& excl_str : tag_dispatch.excludes) {
+    for (const auto& [trigger_str, _] : tag_dispatch.tag_rule_pairs) {
+      if (trigger_str.rfind(excl_str, 0) == 0) {
         ReportParseError(
-            "The TagDispatch should not have a common stop_str and exclude_str: " + stop_str,
-            delta_element
+            "Exclude string must not be a prefix of trigger string: " + excl_str, delta_element
         );
       }
     }
   }
 
   return builder_.AddTagDispatch(tag_dispatch);
+}
+
+int32_t EBNFParser::ParseRegexMacro() {
+  Consume();  // Consume Regex operator
+  auto start = current_token_;
+  auto args = ParseMacroArguments();
+  auto delta_element = start - current_token_;  // Used to report parse errors
+
+  if (args.arguments.size() != 1) {
+    ReportParseError("Regex expects exactly one string argument", delta_element);
+  }
+  auto pattern_node = std::get_if<MacroIR::StringNode>(args.arguments[0].get());
+  if (pattern_node == nullptr) {
+    ReportParseError("Regex pattern must be a string literal", delta_element);
+  }
+
+  bool json_string = false;
+  for (const auto& [name, _] : args.named_arguments) {
+    if (name != "json_string" && name != "flags") {
+      ReportParseError("Regex does not support the named argument " + name, delta_element);
+    }
+  }
+  if (auto it = args.named_arguments.find("json_string"); it != args.named_arguments.end()) {
+    auto bool_node = std::get_if<MacroIR::BooleanNode>(it->second.get());
+    if (bool_node == nullptr) {
+      ReportParseError("json_string must be a boolean", delta_element);
+    }
+    json_string = bool_node->value;
+  }
+  std::string pattern = pattern_node->value;
+  if (auto it = args.named_arguments.find("flags"); it != args.named_arguments.end()) {
+    auto flags_node = std::get_if<MacroIR::StringNode>(it->second.get());
+    if (flags_node == nullptr) {
+      ReportParseError("flags must be a string", delta_element);
+    }
+    bool case_insensitive = false;
+    bool dot_all = false;
+    for (char flag : flags_node->value) {
+      if (flag == 'i') {
+        case_insensitive = true;
+      } else if (flag == 's') {
+        dot_all = true;
+      } else if (flag == 'u') {
+        // XGrammar regular expressions use Unicode codepoint semantics by default.
+      } else {
+        ReportParseError(
+            "regular-expression flag '" + std::string(1, flag) + "' is not supported", delta_element
+        );
+      }
+    }
+    // The flags argument opts into the standard dot semantics: '.' does not match '\n' unless
+    // the 's' flag is given. Without the argument the pattern is stored verbatim, where the
+    // engine's '.' matches every codepoint.
+    pattern = RewriteRegexDots(pattern, dot_all);
+    if (case_insensitive && pattern.compare(0, 4, "(?i)") != 0) {
+      pattern = "(?i)" + pattern;
+    }
+  }
+  return builder_.AddRegex(pattern, json_string);
+}
+
+int32_t EBNFParser::ParseSubstringMacro() {
+  Consume();  // Consume Substring identifier
+  auto start = current_token_;
+  auto args = ParseMacroArguments();
+  auto delta_element = start - current_token_;
+
+  if (!args.named_arguments.empty()) {
+    ReportParseError("Substring() does not accept named arguments", delta_element);
+  }
+
+  std::vector<std::string> chunks;
+  chunks.reserve(args.arguments.size());
+  for (const auto& arg : args.arguments) {
+    auto string_node = std::get_if<MacroIR::StringNode>(arg.get());
+    if (string_node == nullptr) {
+      ReportParseError("Substring() arguments must be strings", delta_element);
+    }
+    chunks.push_back(string_node->value);
+  }
+
+  return builder_.AddSubstring(chunks);
+}
+
+int32_t EBNFParser::ParseTokenSet() {
+  Consume();  // Consume Token identifier
+  auto start = current_token_;
+  auto args = ParseMacroArguments();
+  auto delta_element = start - current_token_;
+
+  if (!args.named_arguments.empty()) {
+    ReportParseError("Token() does not accept named arguments", delta_element);
+  }
+
+  if (args.arguments.empty()) {
+    ReportParseError("Token() requires at least one integer argument", delta_element);
+  }
+
+  std::vector<int32_t> token_ids;
+  for (const auto& arg : args.arguments) {
+    auto int_node = std::get_if<MacroIR::IntegerNode>(arg.get());
+    if (int_node == nullptr || int_node->value < 0) {
+      ReportParseError("Token() arguments must be non-negative integers", delta_element);
+    }
+    token_ids.push_back(static_cast<int32_t>(int_node->value));
+  }
+
+  std::sort(token_ids.begin(), token_ids.end());
+  token_ids.erase(std::unique(token_ids.begin(), token_ids.end()), token_ids.end());
+
+  return builder_.AddTokenSet(token_ids);
+}
+
+int32_t EBNFParser::ParseExcludeToken() {
+  Consume();
+  auto start = current_token_;
+  auto args = ParseMacroArguments();
+  auto delta_element = start - current_token_;
+
+  if (!args.named_arguments.empty()) {
+    ReportParseError("ExcludeToken() does not accept named arguments", delta_element);
+  }
+  if (args.arguments.empty()) {
+    ReportParseError("ExcludeToken() requires at least one integer argument", delta_element);
+  }
+
+  std::vector<int32_t> token_ids;
+  for (const auto& arg : args.arguments) {
+    auto int_node = std::get_if<MacroIR::IntegerNode>(arg.get());
+    if (int_node == nullptr || int_node->value < 0) {
+      ReportParseError("ExcludeToken() arguments must be non-negative integers", delta_element);
+    }
+    token_ids.push_back(static_cast<int32_t>(int_node->value));
+  }
+  std::sort(token_ids.begin(), token_ids.end());
+  token_ids.erase(std::unique(token_ids.begin(), token_ids.end()), token_ids.end());
+
+  return builder_.AddExcludeTokenSet(token_ids);
+}
+
+int32_t EBNFParser::ParseTokenTagDispatch() {
+  Consume();
+  auto start = current_token_;
+  auto args = ParseMacroArguments();
+  auto delta_element = start - current_token_;
+
+  Grammar::Impl::TokenTagDispatch ttd;
+
+  static const std::unordered_set<std::string> kValidNamedArgs = {
+      "loop_after_dispatch", "excludes"
+  };
+  for (const auto& [name, _] : args.named_arguments) {
+    if (kValidNamedArgs.count(name) == 0) {
+      ReportParseError("Unknown named argument for TokenTagDispatch: " + name, delta_element);
+    }
+  }
+
+  for (const auto& arg : args.arguments) {
+    auto tuple_node = std::get_if<MacroIR::TupleNode>(arg.get());
+    if (tuple_node == nullptr || tuple_node->elements.size() != 2) {
+      ReportParseError(
+          "Each TokenTagDispatch element must be a pair (token_id, rule)", delta_element
+      );
+    }
+    auto id_node = std::get_if<MacroIR::IntegerNode>(tuple_node->elements[0].get());
+    if (id_node == nullptr || id_node->value < 0) {
+      ReportParseError("Token trigger ID must be a non-negative integer", delta_element);
+    }
+    auto rule_node = std::get_if<MacroIR::IdentifierNode>(tuple_node->elements[1].get());
+    if (rule_node == nullptr) {
+      ReportParseError("Rule reference must be an identifier", delta_element);
+    }
+    auto rule_id = builder_.GetRuleId(rule_node->name);
+    if (rule_id == -1) {
+      ReportParseError("Rule \"" + rule_node->name + "\" is not defined", delta_element);
+    }
+    ttd.trigger_rule_pairs.push_back({static_cast<int32_t>(id_node->value), rule_id});
+  }
+
+  ttd.loop_after_dispatch = true;
+  if (auto it = args.named_arguments.find("loop_after_dispatch");
+      it != args.named_arguments.end()) {
+    auto bool_node = std::get_if<MacroIR::BooleanNode>(it->second.get());
+    if (bool_node == nullptr) {
+      ReportParseError("loop_after_dispatch must be a boolean", delta_element);
+    }
+    ttd.loop_after_dispatch = bool_node->value;
+  }
+
+  if (auto it = args.named_arguments.find("excludes"); it != args.named_arguments.end()) {
+    auto tuple_node = std::get_if<MacroIR::TupleNode>(it->second.get());
+    if (tuple_node == nullptr) {
+      ReportParseError("excludes must be a tuple", delta_element);
+    }
+    for (const auto& element : tuple_node->elements) {
+      auto int_node = std::get_if<MacroIR::IntegerNode>(element.get());
+      if (int_node == nullptr || int_node->value < 0) {
+        ReportParseError("Exclude token ID must be a non-negative integer", delta_element);
+      }
+      ttd.excludes.push_back(static_cast<int32_t>(int_node->value));
+    }
+  }
+
+  for (auto excl_id : ttd.excludes) {
+    for (const auto& [tid, _] : ttd.trigger_rule_pairs) {
+      if (tid == excl_id) {
+        ReportParseError(
+            "Token trigger ID " + std::to_string(tid) + " must not overlap with exclude token ID",
+            delta_element
+        );
+      }
+    }
+  }
+
+  return builder_.AddTokenTagDispatch(ttd);
 }
 
 int32_t EBNFParser::ParseLookaheadAssertion() {
@@ -1147,11 +1494,21 @@ int32_t EBNFParser::ParseLookaheadAssertion() {
   return result;
 }
 
-EBNFParser::Rule EBNFParser::ParseRule() {
+EBNFParser::ParsedRule EBNFParser::ParseRule() {
   if (Peek().type != TokenType::RuleName) {
     ReportParseError("Expect rule name");
   }
   cur_rule_name_ = std::any_cast<std::string>(Peek().value);
+  int32_t max_tokens = Peek().max_tokens;
+  int32_t max_chars = Peek().max_chars;
+  std::string capture_name = Peek().capture_name;
+  int32_t capture_hidden_suffix_bytes = Peek().capture_hidden_suffix_bytes;
+  int32_t capture_hidden_stop_bytes = Peek().capture_hidden_stop_bytes;
+  int32_t capture_hidden_body_rule_id = Peek().capture_hidden_body_rule_id;
+  int32_t capture_hidden_marker_rule_id = Peek().capture_hidden_marker_rule_id;
+  std::string stop_capture_name = Peek().stop_capture_name;
+  bool is_lazy = Peek().is_lazy;
+  std::optional<float> temperature = Peek().temperature;
   Consume();
 
   PeekAndConsume(TokenType::Assign, "Expect ::=");
@@ -1163,7 +1520,19 @@ EBNFParser::Rule EBNFParser::ParseRule() {
     lookahead_id = ParseLookaheadAssertion();
   }
 
-  return {cur_rule_name_, body_id, lookahead_id};
+  ParsedRule result;
+  result.rule = Rule{cur_rule_name_, body_id, lookahead_id};
+  result.rule.max_tokens = max_tokens;
+  result.rule.max_chars = max_chars;
+  result.rule.capture_name = capture_name;
+  result.rule.is_lazy = is_lazy;
+  result.rule.temperature = temperature;
+  result.suffix_stop_info.hidden_suffix_bytes = capture_hidden_suffix_bytes;
+  result.suffix_stop_info.hidden_stop_bytes = capture_hidden_stop_bytes;
+  result.suffix_stop_info.body_rule_id = capture_hidden_body_rule_id;
+  result.suffix_stop_info.marker_rule_id = capture_hidden_marker_rule_id;
+  result.suffix_stop_info.stop_capture_name = std::move(stop_capture_name);
+  return result;
 }
 
 void EBNFParser::InitRuleNames() {
@@ -1184,8 +1553,12 @@ void EBNFParser::InitRuleNames() {
 }
 
 Grammar EBNFParser::Parse(
-    const std::vector<EBNFLexer::Token>& tokens, const std::string& root_rule_name
+    const std::vector<EBNFLexer::Token>& tokens,
+    const std::string& root_rule_name,
+    const int& max_nest_layer
 ) {
+  max_nest_layer_ = max_nest_layer;
+  nest_layer_guard_ = 0;
   tokens_ = tokens;
   current_token_ = tokens_.data();
   root_rule_name_ = root_rule_name;
@@ -1195,9 +1568,16 @@ Grammar EBNFParser::Parse(
 
   // Then parse all the rules
   while (Peek().type != TokenType::EndOfFile) {
-    auto new_rule = ParseRule();
-    builder_.UpdateRuleBody(new_rule.name, new_rule.body_expr_id);
-    builder_.UpdateLookaheadAssertion(new_rule.name, new_rule.lookahead_assertion_id);
+    auto parsed_rule = ParseRule();
+    const auto& rule = parsed_rule.rule;
+    builder_.UpdateRuleBody(rule.name, rule.body_expr_id);
+    builder_.UpdateLookaheadAssertion(rule.name, rule.lookahead_assertion_id);
+    builder_.UpdateMaxTokens(rule.name, rule.max_tokens);
+    builder_.UpdateMaxChars(rule.name, rule.max_chars);
+    builder_.UpdateCaptureName(rule.name, rule.capture_name);
+    builder_.UpdateSuffixStopInfo(rule.name, parsed_rule.suffix_stop_info);
+    builder_.UpdateLazy(rule.name, rule.is_lazy);
+    builder_.UpdateRuleTemperature(builder_.GetRuleId(rule.name), rule.temperature);
   }
 
   return builder_.Get(root_rule_name);

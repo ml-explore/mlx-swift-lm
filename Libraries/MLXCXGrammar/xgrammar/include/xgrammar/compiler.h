@@ -78,11 +78,21 @@ class GrammarCompiler {
       std::optional<int> indent = std::nullopt,
       std::optional<std::pair<std::string, std::string>> separators = std::nullopt,
       bool strict_mode = true,
-      std::optional<int> max_whitespace_cnt = std::nullopt
+      std::optional<int> max_whitespace_cnt = std::nullopt,
+      bool any_order = false
   );
 
   /*! \brief Get the compiled grammar for pure JSON. */
   CompiledGrammar CompileBuiltinJSONGrammar();
+
+  /*!
+   * \brief Get the compiled grammar for a Lark grammar string.
+   * \param lark_string The Lark grammar. The root rule must be named "start".
+   * \param named_grammars Grammar objects or Lark sources that can be referenced with `@name`.
+   */
+  CompiledGrammar CompileLark(
+      const std::string& lark_string, const std::vector<NamedGrammar>& named_grammars = {}
+  );
 
   /*! \brief Get the compiled grammar for a grammar. */
   CompiledGrammar CompileGrammar(const Grammar& grammar);

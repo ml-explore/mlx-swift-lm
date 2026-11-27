@@ -210,6 +210,21 @@ class DynamicBitset {
     return (data_[buffer_size_ - 1] & last_block_mask) == last_block_mask;
   }
 
+  bool Any() const {
+    if (size_ == 0) return false;
+    // Check all complete blocks except the last one
+    for (int i = 0; i < buffer_size_ - 1; ++i) {
+      if (data_[i] != 0) {
+        return true;
+      }
+    }
+    // For the last block, only consider the valid bits
+    int remaining_bits = size_ % BITS_PER_BLOCK;
+    uint32_t last_block_mask = remaining_bits ? (static_cast<uint32_t>(1) << remaining_bits) - 1
+                                              : ~static_cast<uint32_t>(0);
+    return (data_[buffer_size_ - 1] & last_block_mask) != 0;
+  }
+
   static constexpr int BITS_PER_BLOCK = 32;
 
   friend std::size_t MemorySize(const DynamicBitset& bitset) {
@@ -246,9 +261,14 @@ class DynamicBitset {
       return ConstructDeserializeError("Expect an integer for buffer_size", type_name);
     }
     int buffer_size = static_cast<int>(arr[1].get<int64_t>());
-    if (buffer_size != GetBufferSize(size)) {
+    if (size < 0 || buffer_size != GetBufferSize(size)) {
       return ConstructDeserializeError(
           "Invalid buffer_size. Buffer size should be ceil(size / 32)", type_name
+      );
+    }
+    if (static_cast<int64_t>(arr.size()) != static_cast<int64_t>(buffer_size) + 2) {
+      return ConstructDeserializeError(
+          "Expect exactly buffer_size + 2 elements in the array", type_name
       );
     }
 

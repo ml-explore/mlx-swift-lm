@@ -39,11 +39,11 @@ extension ModelLoadingSuite.ForkIndependenceTests {
         "fork of a matcher diverges from parent on independent commits",
         .disabled(
             """
-            xgrammar matcher Fork()/clone() requires xgrammar >= v0.1.33; the vendored \
-            version (v0.1.30) does not provide it. Production handles its absence \
+            xgrammar matcher Fork()/clone() requires xgrammar >= v0.1.33; the shim's \
+            xg_matcher_fork does not call Fork() yet. Production handles its absence \
             gracefully — makeConstraint() catches forkFailed and recompiles a fresh \
             constraint — so this is a perf-only optimization, not a correctness gap. \
-            Re-enable if the vendored xgrammar is bumped to a version with Fork().
+            Re-enable when xg_matcher_fork calls Fork().
             """))
     func testForkDiverges() async throws {
         guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
