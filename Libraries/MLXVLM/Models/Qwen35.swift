@@ -419,6 +419,8 @@ public enum Qwen35Language {
     }
 
     final class Attention: Module {
+        private static let qkvProjectionKeys: Set<String> = ["q_proj", "k_proj", "v_proj"]
+
         let numKeyValueHeads: Int
         let numAttentionHeads: Int
         let headDim: Int
@@ -428,6 +430,8 @@ public enum Qwen35Language {
         @ModuleInfo(key: "k_proj") var kProj: Linear
         @ModuleInfo(key: "v_proj") var vProj: Linear
         @ModuleInfo(key: "o_proj") var oProj: Linear
+
+        private let fusedQKVProjection = FusedQuantizedLinearProjectionCache()
 
         @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
         @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
@@ -461,6 +465,50 @@ public enum Qwen35Language {
             super.init()
         }
 
+        @discardableResult
+        override func update(
+            parameters: ModuleParameters, verify: VerifyUpdate,
+            path: [String] = [], modulePath: [String] = []
+        ) throws -> Self {
+            defer {
+                fusedQKVProjection.invalidateIfReplacing(
+                    parameters: parameters, keys: Self.qkvProjectionKeys)
+            }
+            return try super.update(
+                parameters: parameters, verify: verify, path: path, modulePath: modulePath)
+        }
+
+        override func updateModule(key: String, _ value: Any) throws {
+            defer {
+                fusedQKVProjection.invalidateIfReplacing(
+                    moduleKey: key, keys: Self.qkvProjectionKeys)
+            }
+            try super.updateModule(key: key, value)
+        }
+
+        var hasFusedQKVProjection: Bool { fusedQKVProjection.isPrepared }
+
+        func fusedProjectionTraceState(
+            registering trace: any CompiledTraceInvalidating
+        ) -> [Module] {
+            fusedQKVProjection.traceState(registering: trace)
+        }
+
+        @discardableResult
+        func prepareFusedQKVProjection(enabled: Bool = qwen35FourGDNEnabled) throws -> Bool {
+            try fusedQKVProjection.prepare(
+                enabled: enabled,
+                linears: [qProj, kProj, vProj]
+            ) { sourceViews in
+                try update(
+                    modules: ModuleChildren(values: [
+                        "q_proj": .value(sourceViews[0]),
+                        "k_proj": .value(sourceViews[1]),
+                        "v_proj": .value(sourceViews[2]),
+                    ]), verify: [])
+            }
+        }
+
         func callAsFunction(
             _ x: MLXArray,
             mask: MLXArray?,
@@ -485,13 +533,25 @@ public enum Qwen35Language {
             let B = x.dim(0)
             let L = x.dim(1)
 
-            let qProjOutput = qProj(x)
+            let qProjOutput: MLXArray
+            var keys: MLXArray
+            var values: MLXArray
+            if qwen35FourGDNEnabled, let fusedQKV = fusedQKVProjection.fused {
+                let projected = fusedQKV(x)
+                let qEnd = numAttentionHeads * headDim * 2
+                let kvDim = numKeyValueHeads * headDim
+                qProjOutput = projected[0..., 0..., ..<qEnd]
+                keys = projected[0..., 0..., qEnd ..< (qEnd + kvDim)]
+                values = projected[0..., 0..., (qEnd + kvDim) ..< (qEnd + 2 * kvDim)]
+            } else {
+                qProjOutput = qProj(x)
+                keys = kProj(x)
+                values = vProj(x)
+            }
+
             let qSplit = qProjOutput.reshaped(B, L, numAttentionHeads, -1).split(parts: 2, axis: -1)
             var queries = qSplit[0]
             let gate = qSplit[1].reshaped(B, L, -1)
-
-            var keys = kProj(x)
-            var values = vProj(x)
 
             queries = qNorm(queries).transposed(0, 2, 1, 3)
             keys = kNorm(keys.reshaped(B, L, numKeyValueHeads, -1)).transposed(0, 2, 1, 3)
@@ -553,23 +613,83 @@ public enum Qwen35Language {
     }
 
     final class MLP: Module, UnaryLayer {
+        private static let gateUpProjectionKeys: Set<String> = ["gate_proj", "up_proj"]
+
+        let hiddenDimensions: Int
+
         @ModuleInfo(key: "gate_proj") var gateProj: Linear
         @ModuleInfo(key: "down_proj") var downProj: Linear
         @ModuleInfo(key: "up_proj") var upProj: Linear
 
+        private let fusedGateUpProjection = FusedQuantizedLinearProjectionCache()
+
         init(dimensions: Int, hiddenDimensions: Int) {
+            self.hiddenDimensions = hiddenDimensions
             _gateProj.wrappedValue = Linear(dimensions, hiddenDimensions, bias: false)
             _downProj.wrappedValue = Linear(hiddenDimensions, dimensions, bias: false)
             _upProj.wrappedValue = Linear(dimensions, hiddenDimensions, bias: false)
             super.init()
         }
 
+        @discardableResult
+        override func update(
+            parameters: ModuleParameters, verify: VerifyUpdate,
+            path: [String] = [], modulePath: [String] = []
+        ) throws -> Self {
+            defer {
+                fusedGateUpProjection.invalidateIfReplacing(
+                    parameters: parameters, keys: Self.gateUpProjectionKeys)
+            }
+            return try super.update(
+                parameters: parameters, verify: verify, path: path, modulePath: modulePath)
+        }
+
+        override func updateModule(key: String, _ value: Any) throws {
+            defer {
+                fusedGateUpProjection.invalidateIfReplacing(
+                    moduleKey: key, keys: Self.gateUpProjectionKeys)
+            }
+            try super.updateModule(key: key, value)
+        }
+
+        var hasFusedGateUpProjection: Bool { fusedGateUpProjection.isPrepared }
+
+        func fusedProjectionTraceState(
+            registering trace: any CompiledTraceInvalidating
+        ) -> [Module] {
+            fusedGateUpProjection.traceState(registering: trace)
+        }
+
+        @discardableResult
+        func prepareFusedGateUpProjection(enabled: Bool = qwen35FourGDNEnabled) throws -> Bool {
+            try fusedGateUpProjection.prepare(
+                enabled: enabled,
+                linears: [gateProj, upProj]
+            ) { sourceViews in
+                try update(
+                    modules: ModuleChildren(values: [
+                        "gate_proj": .value(sourceViews[0]),
+                        "up_proj": .value(sourceViews[1]),
+                    ]), verify: [])
+            }
+        }
+
         func callAsFunction(_ x: MLXArray) -> MLXArray {
-            downProj(silu(gateProj(x)) * upProj(x))
+            if qwen35FourGDNEnabled, let fusedGateUp = fusedGateUpProjection.fused {
+                let projected = fusedGateUp(x)
+                let gate = projected[.ellipsis, ..<hiddenDimensions]
+                let up = projected[.ellipsis, hiddenDimensions ..< (2 * hiddenDimensions)]
+                return downProj(silu(gate) * up)
+            }
+            return downProj(silu(gateProj(x)) * upProj(x))
         }
     }
 
     open class GatedDeltaNet: Module {
+        private static let inputProjectionKeys: Set<String> = [
+            "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a",
+        ]
+
         let hiddenSize: Int
         let numVHeads: Int
         let numKHeads: Int
@@ -590,13 +710,6 @@ public enum Qwen35Language {
         // remain as views so checkpoint and adapter paths stay unchanged.
         private let fusedInputProjection = FusedQuantizedLinearProjectionCache()
         var fusedInputProjectionEnabled = qwen35FourGDNEnabled
-
-        private struct ProjectionTrace {
-            weak var value: (any CompiledTraceInvalidating)?
-        }
-        // Submodule updates must also drop traces owned by parent decoders.
-        private let fusedProjectionTracesLock = NSLock()
-        private var fusedProjectionTraces: [ObjectIdentifier: ProjectionTrace] = [:]
 
         @ParameterInfo(key: "dt_bias") var dtBias: MLXArray
         @ParameterInfo(key: "A_log") var aLog: MLXArray
@@ -650,29 +763,18 @@ public enum Qwen35Language {
             parameters: ModuleParameters, verify: VerifyUpdate,
             path: [String] = [], modulePath: [String] = []
         ) throws -> Self {
-            let inputProjectionPrefixes = [
-                "in_proj_qkv.", "in_proj_z.", "in_proj_b.", "in_proj_a.",
-            ]
-            let replacesInputProjection = parameters.flattened().contains { key, _ in
-                inputProjectionPrefixes.contains(where: key.hasPrefix)
-            }
             defer {
-                if replacesInputProjection {
-                    invalidateFusedInputProjection()
-                }
+                fusedInputProjection.invalidateIfReplacing(
+                    parameters: parameters, keys: Self.inputProjectionKeys)
             }
             return try super.update(
                 parameters: parameters, verify: verify, path: path, modulePath: modulePath)
         }
 
         open override func updateModule(key: String, _ value: Any) throws {
-            let replacesInputProjection =
-                key == "in_proj_qkv" || key == "in_proj_z"
-                || key == "in_proj_b" || key == "in_proj_a"
             defer {
-                if replacesInputProjection {
-                    invalidateFusedInputProjection()
-                }
+                fusedInputProjection.invalidateIfReplacing(
+                    moduleKey: key, keys: Self.inputProjectionKeys)
             }
             try super.updateModule(key: key, value)
         }
@@ -680,29 +782,13 @@ public enum Qwen35Language {
         var hasFusedInputProjection: Bool { fusedInputProjection.isPrepared }
 
         func registerFusedProjectionTrace(_ trace: any CompiledTraceInvalidating) {
-            fusedProjectionTracesLock.withLock {
-                fusedProjectionTraces[ObjectIdentifier(trace)] = ProjectionTrace(value: trace)
-            }
+            fusedInputProjection.registerTrace(trace)
         }
 
-        private func invalidateFusedInputProjection() {
-            fusedInputProjection.invalidate()
-            let traces = fusedProjectionTracesLock.withLock {
-                let traces = fusedProjectionTraces.values.compactMap(\.value)
-                fusedProjectionTraces.removeAll()
-                return traces
-            }
-            // Trace setup takes its own lock first, so invalidate after unlocking.
-            for trace in traces {
-                trace.invalidate()
-            }
-        }
-
-        /// The fused projection as compile state for a trace that runs this
-        /// layer. It is not a registered child because the four source
-        /// projections retain the checkpoint topology.
-        var fusedProjectionTraceState: [Module] {
-            fusedInputProjection.fused.map { [$0] } ?? []
+        func fusedProjectionTraceState(
+            registering trace: any CompiledTraceInvalidating
+        ) -> [Module] {
+            fusedInputProjection.traceState(registering: trace)
         }
 
         @discardableResult
@@ -936,9 +1022,15 @@ public enum Qwen35Language {
             return compiledForward(self, x)
         }
 
-        private let compiledForward = CompiledTrace<SparseMoeBlock> { block, arguments in
-            [block.forward(arguments[0])]
-        }
+        private let compiledForward: CompiledTrace<SparseMoeBlock> = CompiledTrace(
+            state: { block in
+                [block]
+                    + block.sharedExpert.fusedProjectionTraceState(
+                        registering: block.compiledForward)
+            },
+            body: { block, arguments in
+                [block.forward(arguments[0])]
+            })
 
         var compiledDecodeIsCompiled: Bool { compiledForward.isCompiled }
 
@@ -1065,14 +1157,28 @@ public enum Qwen35Language {
 
         private let compiledLinearLayer: CompiledTrace<DecoderLayer> = CompiledTrace(
             state: { layer in
-                layer.linearAttn?.registerFusedProjectionTrace(layer.compiledLinearLayer)
-                return [layer] + (layer.linearAttn?.fusedProjectionTraceState ?? [])
+                [layer]
+                    + (layer.linearAttn?.fusedProjectionTraceState(
+                        registering: layer.compiledLinearLayer) ?? [])
+                    + layer.mlpFusedProjectionTraceState(registering: layer.compiledLinearLayer)
             },
             body: { layer, arguments in
                 let result = layer.linearLayerBody(
                     x: arguments[0], convState: arguments[1], recState: arguments[2])
                 return [result.output, result.convState, result.recurrentState]
             })
+
+        fileprivate func mlpFusedProjectionTraceState(
+            registering trace: any CompiledTraceInvalidating
+        ) -> [Module] {
+            if let denseMLP = mlp as? MLP {
+                return denseMLP.fusedProjectionTraceState(registering: trace)
+            }
+            if let moe = mlp as? SparseMoeBlock {
+                return moe.sharedExpert.fusedProjectionTraceState(registering: trace)
+            }
+            return []
+        }
 
         var compiledGDNIsCompiled: Bool { compiledLinearLayer.isCompiled }
 
@@ -1314,10 +1420,14 @@ public enum Qwen35Language {
         }
 
         private func traceState(forLayers indices: [Int]) -> [Module] {
-            indices.flatMap { index in
+            indices.flatMap { index -> [Module] in
                 let layer = layers[index]
-                layer.linearAttn?.registerFusedProjectionTrace(compiledSegments)
-                return [layer] + (layer.linearAttn?.fusedProjectionTraceState ?? [])
+                return [layer]
+                    + (layer.linearAttn?.fusedProjectionTraceState(registering: compiledSegments)
+                        ?? [])
+                    + (layer.selfAttn?.fusedProjectionTraceState(registering: compiledSegments)
+                        ?? [])
+                    + layer.mlpFusedProjectionTraceState(registering: compiledSegments)
             }
         }
 
@@ -1576,6 +1686,14 @@ public enum Qwen35Language {
             for layer in model.layers {
                 if let linearAttn = layer.linearAttn {
                     _ = try linearAttn.prepareFusedInputProjection()
+                }
+                if let selfAttn = layer.selfAttn {
+                    _ = try selfAttn.prepareFusedQKVProjection()
+                }
+                if let denseMLP = layer.mlp as? MLP {
+                    _ = try denseMLP.prepareFusedGateUpProjection()
+                } else if let moe = layer.mlp as? SparseMoeBlock {
+                    _ = try moe.sharedExpert.prepareFusedGateUpProjection()
                 }
             }
         }
