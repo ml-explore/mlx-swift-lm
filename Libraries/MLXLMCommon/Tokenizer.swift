@@ -179,9 +179,9 @@ public struct NaiveStreamingDetokenizer: StreamingDetokenizer {
             .prefix { $0 == $1 }.count
         let new = String(newSegment.unicodeScalars.dropFirst(common))
 
-        // if the new segment ends with REPLACEMENT CHARACTER this means
-        // that the token didn't produce a complete unicode character
-        if !isFinal, new.last == "\u{fffd}" {
+        // Hold incomplete UTF-8 ending in U+FFFD. Check the last scalar, not Character:
+        // a Prepend scalar merges with a following U+FFFD into one grapheme cluster.
+        if !isFinal, new.unicodeScalars.last == "\u{fffd}" {
             return nil
         }
 
