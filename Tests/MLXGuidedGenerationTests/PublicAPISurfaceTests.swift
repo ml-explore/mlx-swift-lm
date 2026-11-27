@@ -41,6 +41,26 @@ struct PublicAPISurfaceTests {
     }
 
     @Test
+    func grammarTokenizerInitializersArePublic() throws {
+        let vocab: [String] = (0 ..< 256).map { String(format: "<0x%02X>", $0) }
+        let declaring = try GrammarTokenizer(
+            vocab: vocab, vocabType: .byteFallback, eosTokenId: 255, stopTokenIds: [0x78])
+        #expect(declaring.vocabSize == 256)
+
+        // The three-argument form stays an overload of its own.
+        let eosOnly: ([String], VocabType, Int32) throws -> GrammarTokenizer =
+            GrammarTokenizer.init(vocab:vocabType:eosTokenId:)
+        #expect(try eosOnly(vocab, .byteFallback, 255).vocabSize == 256)
+    }
+
+    @Test
+    func noAllowedTokenIsPublicAndComparable() {
+        let error: GuidedGenerationError = .noAllowedToken(stopTokenIds: [120, 255])
+        #expect(error == .noAllowedToken(stopTokenIds: [120, 255]))
+        #expect(error != .incompleteOutput)
+    }
+
+    @Test
     func commitResultIsPublic() throws {
         let vocab: [String] = (0 ..< 256).map { String(format: "<0x%02X>", $0) }
         let tokenizer = try GrammarTokenizer(

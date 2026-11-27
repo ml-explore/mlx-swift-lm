@@ -171,9 +171,11 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
     /// Gets or creates a cached GrammarTokenizer for the given model.
     static func makeGrammarTokenizer(
         modelID: String,
-        tokenizer: any Tokenizer
+        tokenizer: any Tokenizer,
+        configuration: ModelConfiguration
     ) async throws -> GrammarTokenizer {
-        try await cache.makeGrammarTokenizer(modelID: modelID, tokenizer: tokenizer)
+        try await cache.makeGrammarTokenizer(
+            modelID: modelID, tokenizer: tokenizer, configuration: configuration)
     }
 
     /// Gets the cached per-model tokenizer-derived logit biases (closing +
@@ -434,8 +436,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         // per-request schema/tool grammar that prewarm doesn't possess — a
         // pre-built constraint would land under a key no real respond() reads.
         let tokenizer = await container.tokenizer
+        let configuration = await container.configuration
         _ = try await Self.makeGrammarTokenizer(
-            modelID: modelID, tokenizer: tokenizer)
+            modelID: modelID, tokenizer: tokenizer, configuration: configuration)
 
         // Force Metal shader JIT with a minimal 1-token generate, run inside
         // `perform` so the forward pass + synchronize serialize against any
@@ -1090,7 +1093,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
 
                         let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                             modelID: modelID,
-                            tokenizer: context.tokenizer
+                            tokenizer: context.tokenizer,
+                            configuration: context.configuration
                         )
                         let constraint = try await MLXLanguageModel.makeConstraint(
                             modelID: modelID,
@@ -1487,7 +1491,8 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         ) async throws {
             let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                 modelID: modelID,
-                tokenizer: context.tokenizer)
+                tokenizer: context.tokenizer,
+                configuration: context.configuration)
             let constraint = try await MLXLanguageModel.makeConstraint(
                 modelID: modelID,
                 kind: .json,

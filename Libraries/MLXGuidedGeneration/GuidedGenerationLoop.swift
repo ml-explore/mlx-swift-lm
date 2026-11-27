@@ -41,7 +41,9 @@ public enum GuidedGenerationLoop {
     /// - Parameters:
     ///   - input: Prepared model input (prompt already tokenized)
     ///   - context: Model context (model, tokenizer, configuration)
-    ///   - constraint: The xgrammar constraint (must have `fastForward: true`)
+    ///   - constraint: The xgrammar constraint (must have `fastForward: true`).
+    ///     Build its `GrammarTokenizer` with every id this loop stops on as
+    ///     `stopTokenIds`; the loop logs a warning when one is missing.
     ///   - maxTokens: Maximum tokens to generate
     ///   - completionReserve: Number of tokens before maxTokens at which closing
     ///     bias activates. When `tokenCount >= maxTokens - completionReserve`,
@@ -87,9 +89,11 @@ public enum GuidedGenerationLoop {
     ///   - emit: Callback for each text delta. Return `false` to stop.
     /// - Returns: Total number of tokens generated (including FF tokens).
     /// - Throws: `GuidedGenerationError.incompleteOutput` if maxTokens is
-    ///   exhausted before the grammar reaches a stop state.
+    ///   exhausted and the grammar cannot stop after the emitted tokens.
     ///   `GuidedGenerationError.prematureEOS` if the model emits EOS
     ///   before the grammar accepts.
+    ///   `GuidedGenerationError.noAllowedToken` if the grammar allows no
+    ///   token the model can produce; the sampler is not called.
     @discardableResult
     public static func run(
         input: LMInput,
@@ -128,11 +132,20 @@ public enum GuidedGenerationLoop {
         processor?.prompt(input.text.tokens)
         defer { processor?.finalizeGeneration() }
 
-        // Build EOS token set
-        let stopTokenIDs = Self.buildStopTokenIDs(
+        let stopTokenIDs = Self.stopTokenIDs(
             tokenizer: context.tokenizer,
             configuration: context.configuration
         )
+
+        // A stop id the grammar does not know is text to it, so the output
+        // can end early on it.
+        let undeclaredStopTokenIDs = stopTokenIDs.subtracting(constraint.stopTokenIDs)
+            .filter { $0 >= 0 && $0 < vocabSize }.sorted()
+        if !undeclaredStopTokenIDs.isEmpty {
+            logger.warning(
+                "Guided generation stops on token ids \(undeclaredStopTokenIDs) that the grammar treats as text. Pass them as stopTokenIds when you create the GrammarTokenizer."
+            )
+        }
 
         // Prefill prompt and get first set of logits
         var logits: MLXArray
@@ -164,6 +177,8 @@ public enum GuidedGenerationLoop {
         var tokenCount = 0
         var grammarStopped = false
         var consumerStopped = false
+        // Fast-forward tokens the grammar accepted but the cap kept out of the output.
+        var unemittedFastForwardCount = 0
         var whitespaceTracker = WhitespaceRunTracker(whitespaceTokenIDs: whitespaceTokenIDs)
 
         // Pre-compute bias arrays used in the zone policy.
@@ -235,6 +250,14 @@ public enum GuidedGenerationLoop {
                 }
                 grammarStopped = true
                 break
+            }
+
+            // Every mask we sample from passes here. Never sample from an empty
+            // one; ids past the logit row cannot be sampled, as in `bitmaskToMLXArray`.
+            if mask.needsApply
+                && !maskAllowsAnyToken(mask, vocabSize: min(vocabSize, logitDim))
+            {
+                throw GuidedGenerationError.noAllowedToken(stopTokenIds: constraint.stopTokenIDs)
             }
 
             // Zone policy for budget management:
@@ -323,7 +346,7 @@ public enum GuidedGenerationLoop {
             // `applyMaskAndSample` set it to -inf, so the sampler could not
             // have selected it.
             if mask.needsApply {
-                if tokenId == context.tokenizer.unknownTokenId || stopTokenIDs.contains(tokenId) {
+                if stopTokenIDs.contains(tokenId) {
                     if diagnosticLog {
                         logger.info(
                             "[GuidedGen] Stop reason: EOS/unk tokenId=\(tokenId) at token \(tokenCount)"
@@ -388,8 +411,9 @@ public enum GuidedGenerationLoop {
                 // through `shouldStopAfterFF` and break the outer
                 // `while` after the FF block.
                 var shouldStopAfterFF = false
-                for ffToken in ffTokens {
+                for (index, ffToken) in ffTokens.enumerated() {
                     if tokenCount >= maxTokens {
+                        unemittedFastForwardCount = ffTokens.count - index
                         shouldStopAfterFF = true
                         break
                     }
@@ -498,10 +522,21 @@ public enum GuidedGenerationLoop {
         diagnosticSink?.recordTermination(
             grammarTerminated: grammarStopped, generatedTokenCount: tokenCount)
 
-        // If we exhausted maxTokens without the grammar reaching a stop state,
-        // the output is structurally incomplete (e.g., truncated JSON).
+        // At the cap the output is incomplete (e.g., truncated JSON) unless
+        // the emitted tokens already let the grammar stop.
         if !grammarStopped && tokenCount >= maxTokens {
-            throw GuidedGenerationError.incompleteOutput
+            var completeAtCap = false
+            if !consumerStopped {
+                // Ask the matcher, not the last mask, after dropping the
+                // fast-forward tokens the cap kept out of the output.
+                if unemittedFastForwardCount > 0 {
+                    try constraint.rollback(Int32(unemittedFastForwardCount))
+                }
+                completeAtCap = try constraint.canStop()
+            }
+            if !completeAtCap {
+                throw GuidedGenerationError.incompleteOutput
+            }
         }
 
         return tokenCount
@@ -538,6 +573,22 @@ public enum GuidedGenerationLoop {
             if let id = tokenizer.convertTokenToId(token) {
                 stopTokenIDs.insert(id)
             }
+        }
+        return stopTokenIDs
+    }
+
+    /// The token ids a guided run stops on: `buildStopTokenIDs(tokenizer:configuration:)`
+    /// plus the tokenizer's unknown token.
+    ///
+    /// Pass the same ids to the grammar as `stopTokenIds` when you create the
+    /// `GrammarTokenizer`, so the grammar allows them only where the output can end.
+    package static func stopTokenIDs(
+        tokenizer: any Tokenizer,
+        configuration: ModelConfiguration
+    ) -> Set<Int> {
+        var stopTokenIDs = buildStopTokenIDs(tokenizer: tokenizer, configuration: configuration)
+        if let unknown = tokenizer.unknownTokenId {
+            stopTokenIDs.insert(unknown)
         }
         return stopTokenIDs
     }
@@ -601,6 +652,19 @@ public enum GuidedGenerationLoop {
             return false
         }
         return (UInt32(bitPattern: mask.mask[tokenId / 32]) >> UInt32(tokenId % 32)) & 1 == 1
+    }
+
+    /// Whether `mask` allows at least one id below `vocabSize`. Bits at or
+    /// beyond `vocabSize` in the last word do not count.
+    static func maskAllowsAnyToken(_ mask: MaskResult, vocabSize: Int) -> Bool {
+        let fullWords = min(max(vocabSize, 0) / 32, mask.mask.count)
+        if mask.mask[..<fullWords].contains(where: { $0 != 0 }) {
+            return true
+        }
+        let tailBits = vocabSize % 32
+        guard tailBits > 0, fullWords < mask.mask.count else { return false }
+        let tailMask = (UInt32(1) << UInt32(tailBits)) - 1
+        return UInt32(bitPattern: mask.mask[fullWords]) & tailMask != 0
     }
 
     /// Build the additive grammar-mask array for a freshly computed `MaskResult`,

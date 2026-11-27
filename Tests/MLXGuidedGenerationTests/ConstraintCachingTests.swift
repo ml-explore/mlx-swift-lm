@@ -12,12 +12,12 @@ import Testing
 @Suite(
     .disabled(
         """
-        GrammarConstraint.clone() requires xgrammar's GrammarMatcher::Fork() (xgrammar >= \
-        v0.1.33); the vendored version (v0.1.30) does not provide it, so every clone() \
+        GrammarConstraint.clone() requires xgrammar's GrammarMatcher::Fork(), which exists \
+        upstream since v0.1.33; the shim's xg_matcher_fork does not call it yet, so every clone() \
         in this suite throws. Production handles the absence gracefully — makeConstraint() \
         catches forkFailed and recompiles a fresh constraint — so constraint caching is a \
-        perf-only optimization, not a correctness gap. Re-enable when the vendored \
-        xgrammar is bumped to a version with Fork() and xg_matcher_fork calls it.
+        perf-only optimization, not a correctness gap. Re-enable when xg_matcher_fork \
+        calls Fork().
         """))
 struct ConstraintCachingTests {
 

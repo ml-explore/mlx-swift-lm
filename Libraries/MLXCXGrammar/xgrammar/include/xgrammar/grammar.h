@@ -8,10 +8,12 @@
 #define XGRAMMAR_GRAMMAR_H_
 
 #include <xgrammar/object.h>
+#include <xgrammar/tokenizer_info.h>
 
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -28,6 +30,8 @@ struct StructuralTagItem {
     return begin == other.begin && schema == other.schema && end == other.end;
   }
 };
+
+struct NamedGrammar;
 
 /*!
  * \brief This class stores the abstract syntax tree (AST) of the Backus-Naur Form (BNF) grammar.
@@ -77,6 +81,8 @@ struct StructuralTagItem {
  * rule2 ::= character_class_star_grammar_expr(id_of_a_character_class_grammar_expr)
  */
 class Grammar {
+  static const std::vector<NamedGrammar>& EmptyNamedGrammars();
+
  public:
   /*!
    * \brief Get the EBNF string of the grammar.
@@ -117,7 +123,8 @@ class Grammar {
       std::optional<std::pair<std::string, std::string>> separators = std::nullopt,
       bool strict_mode = true,
       std::optional<int> max_whitespace_cnt = std::nullopt,
-      bool print_converted_ebnf = false
+      bool print_converted_ebnf = false,
+      bool any_order = false
   );
 
   /*!
@@ -129,11 +136,25 @@ class Grammar {
   static Grammar FromRegex(const std::string& regex, bool print_converted_ebnf = false);
 
   /*!
+   * \brief Construct a grammar from Lark syntax.
+   * \param lark_string The Lark grammar. The root rule must be named "start".
+   * \param tokenizer_info Optional tokenizer metadata used to resolve named special tokens.
+   * \param named_grammars Grammar objects or Lark sources that can be referenced with `@name`.
+   */
+  static Grammar FromLark(
+      const std::string& lark_string,
+      const std::optional<TokenizerInfo>& tokenizer_info = std::nullopt,
+      const std::vector<NamedGrammar>& named_grammars = EmptyNamedGrammars()
+  );
+
+  /*!
    * \brief Construct a grammar from a structural tag string.
    * \param structural_tag_json The structural tag string.
+   * \param tokenizer_info Optional tokenizer info for resolving string token references.
    */
   static std::variant<Grammar, StructuralTagError> FromStructuralTag(
-      const std::string& structural_tag_json
+      const std::string& structural_tag_json,
+      const std::optional<TokenizerInfo>& tokenizer_info = std::nullopt
   );
 
   /*!
@@ -180,8 +201,27 @@ class Grammar {
    */
   static std::variant<Grammar, SerializationError> DeserializeJSON(const std::string& json_string);
 
+  // Allow the builder to bind to this grammar's impl for in-place editing (FromMutableGrammar).
+  friend class GrammarBuilder;
+
   XGRAMMAR_DEFINE_PIMPL_METHODS(Grammar);
 };
+
+/*!
+ * \brief A grammar or Lark source that can be referenced by name from another Lark grammar.
+ */
+struct NamedGrammar {
+  /*! \brief The reference name, without the leading `@`. */
+  std::string name;
+
+  /*! \brief An existing grammar or a Lark source with its own `start` rule. */
+  std::variant<Grammar, std::string> grammar;
+};
+
+inline const std::vector<NamedGrammar>& Grammar::EmptyNamedGrammars() {
+  static const std::vector<NamedGrammar> empty;
+  return empty;
+}
 
 }  // namespace xgrammar
 

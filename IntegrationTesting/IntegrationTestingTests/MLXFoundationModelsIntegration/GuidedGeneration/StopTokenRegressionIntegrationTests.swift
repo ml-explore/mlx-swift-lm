@@ -119,6 +119,37 @@ extension ModelLoadingSuite.StopTokenRegressionIntegrationTests {
         }
     }
 
+    /// The adapter's grammar tokenizer knows the loop's stop tokens, so a JSON
+    /// string cannot end on `<end_of_turn>` (id 106).
+    @Test("Gemma 3 270M: the grammar knows the loop's stop tokens")
+    func gemmaGrammarKnowsLoopStopTokens() async throws {
+        guard #available(iOS 27.0, macOS 27.0, visionOS 27.0, *) else { return }
+        try await withContext(modelID: TestFixtures.gemmaModelID) { tokenizer, configuration in
+            let stopSet = GuidedGenerationLoop.stopTokenIDs(
+                tokenizer: tokenizer, configuration: configuration)
+            let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
+                modelID: TestFixtures.gemmaModelID, tokenizer: tokenizer,
+                configuration: configuration)
+            #expect(stopSet.contains(106))
+            #expect(
+                Set(grammarTokenizer.stopTokenIDs)
+                    == stopSet.filter { $0 < grammarTokenizer.vocabSize },
+                "Grammar stops \(grammarTokenizer.stopTokenIDs), loop stops \(stopSet.sorted())")
+
+            let constraint = try GrammarConstraint(
+                tokenizer: grammarTokenizer,
+                jsonSchema:
+                    #"{"type":"object","properties":{"s":{"type":"string"}},"required":["s"]}"#)
+            for token in tokenizer.encode(text: #"{"s":""#, addSpecialTokens: false) {
+                _ = try constraint.commitToken(Int32(token))
+            }
+            let mask = try constraint.computeMask()
+            #expect(
+                !GuidedGenerationLoop.maskAllows(
+                    mask, tokenId: 106, vocabSize: grammarTokenizer.vocabSize))
+        }
+    }
+
     // MARK: - Helpers
 
     @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)

@@ -329,7 +329,8 @@ extension ModelLoadingSuite.GuidedGenerationTests {
         let raw: String = try await container.perform { context in
             let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                 modelID: modelID,
-                tokenizer: context.tokenizer
+                tokenizer: context.tokenizer,
+                configuration: context.configuration
             )
             let constraint = try GrammarConstraint(
                 tokenizer: grammarTokenizer,
@@ -410,7 +411,7 @@ extension ModelLoadingSuite.GuidedGenerationTests {
                 maxTokens: 128,
                 hardReserve: 0
             )
-        } catch is GuidedGenerationError {
+        } catch GuidedGenerationError.incompleteOutput {
             // incompleteOutput is one valid way to fail -- test passes
             return
         }
@@ -495,7 +496,8 @@ extension ModelLoadingSuite.GuidedGenerationTests {
         let raw: String = try await container.perform { context in
             let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                 modelID: modelID,
-                tokenizer: context.tokenizer
+                tokenizer: context.tokenizer,
+                configuration: context.configuration
             )
             let constraint = try GrammarConstraint(
                 tokenizer: grammarTokenizer,

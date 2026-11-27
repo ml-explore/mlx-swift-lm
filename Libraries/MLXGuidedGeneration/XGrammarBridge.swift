@@ -66,6 +66,26 @@ public enum GrammarError: Error {
 public final class GrammarTokenizer: @unchecked Sendable {
     let pointer: OpaquePointer
     public let vocabSize: Int
+    /// The stop token ids xgrammar knows, sorted. Any other id is text to it.
+    package let stopTokenIDs: [Int]
+
+    /// The stop ids a tokenizer declares: `stopTokenIds` and the EOS, inside
+    /// the vocabulary, sorted and without duplicates.
+    package static func declaredStopTokenIDs(
+        eosTokenId: Int32, stopTokenIds: [Int], vocabSize: Int
+    ) -> [Int] {
+        Set(stopTokenIds + [Int(eosTokenId)]).filter { (0 ..< vocabSize).contains($0) }.sorted()
+    }
+
+    /// Construct a tokenizer from a pre-decoded vocab, with `eosTokenId` as
+    /// its only stop token.
+    ///
+    /// Other ids that ``GuidedGenerationLoop`` stops on are text to the
+    /// grammar, so the output can end early on them. Prefer
+    /// ``init(vocab:vocabType:eosTokenId:stopTokenIds:)``.
+    public convenience init(vocab: [String], vocabType: VocabType, eosTokenId: Int32) throws {
+        try self.init(vocab: vocab, vocabType: vocabType, eosTokenId: eosTokenId, stopTokenIds: [])
+    }
 
     /// Construct a tokenizer from a pre-decoded vocab.
     ///
@@ -78,13 +98,29 @@ public final class GrammarTokenizer: @unchecked Sendable {
     ///     `.byteFallback` applies SentencePiece `<0xNN>` + `▁`
     ///     decoding; `.byteLevel` applies GPT-2 `bytes_to_unicode`
     ///     decoding.
-    ///   - eosTokenId: End-of-sequence token ID, registered as a stop
-    ///     token on the xgrammar TokenizerInfo.
-    public init(vocab: [String], vocabType: VocabType, eosTokenId: Int32) throws {
+    ///   - eosTokenId: End-of-sequence token ID. It is a stop token too,
+    ///     when it is in the vocabulary.
+    ///   - stopTokenIds: Other token ids that end generation, such as a
+    ///     chat model's end-of-turn token. Pass every id that
+    ///     ``GuidedGenerationLoop`` stops on. The grammar then allows them
+    ///     only where the output can end, and never as text: the text of a
+    ///     stop token cannot be produced with that token, not even by
+    ///     fast-forward. An id the loop stops on but the grammar does not
+    ///     know is text to the grammar, so the output can end early on it,
+    ///     for example inside a JSON string. Duplicates and ids outside the
+    ///     vocabulary are ignored.
+    public init(
+        vocab: [String], vocabType: VocabType, eosTokenId: Int32, stopTokenIds: [Int]
+    ) throws {
         self.vocabSize = vocab.count
+        self.stopTokenIDs = Self.declaredStopTokenIDs(
+            eosTokenId: eosTokenId, stopTokenIds: stopTokenIds, vocabSize: vocab.count)
 
         var info: OpaquePointer?
-        let stopTokens: [Int32] = [eosTokenId]
+        // An empty list makes xgrammar guess stop tokens from their text, so
+        // keep passing the EOS as before; xgrammar ignores ids outside the vocab.
+        let stopTokens: [Int32] =
+            stopTokenIDs.isEmpty ? [eosTokenId] : stopTokenIDs.map { Int32($0) }
 
         let status: XGStatus = vocab.withCStringPointers { ptrs in
             stopTokens.withUnsafeBufferPointer { stopBuf in
@@ -512,9 +548,65 @@ public final class GrammarConstraint: @unchecked Sendable {
 
     /// Compute the bitmask of grammar-accepted next tokens at the
     /// matcher's current state.
+    ///
+    /// Stop tokens are allowed only where the grammar confirms it can end.
+    /// xgrammar can leave their bits set at other states, so they are
+    /// cleared there.
     public func computeMask() throws -> MaskResult {
         lock.lock()
         defer { lock.unlock() }
+        let mask = try computeRawMaskLocked()
+        let stopAllowed = stopTokenIDs.contains {
+            (UInt32(bitPattern: mask.mask[$0 / 32]) >> UInt32($0 % 32)) & 1 == 1
+        }
+        guard stopAllowed else { return mask }
+        // The probe drops the max_tokens decision of this mask, so fill it again.
+        if try canStopLocked() {
+            return try computeRawMaskLocked()
+        }
+        var words = mask.mask
+        for id in stopTokenIDs {
+            words[id / 32] &= ~Int32(bitPattern: UInt32(1) << UInt32(id % 32))
+        }
+        return MaskResult(mask: words, isTerminated: mask.isTerminated, needsApply: true)
+    }
+
+    /// Test seam: changes the mask xgrammar fills before anything reads it.
+    var rawMaskHookForTesting: (@Sendable (MaskResult) -> MaskResult)?
+
+    /// The mask exactly as xgrammar fills it.
+    func computeRawMask() throws -> MaskResult {
+        lock.lock()
+        defer { lock.unlock() }
+        return try computeRawMaskLocked()
+    }
+
+    /// Whether the grammar can end at the current state. It accepts a
+    /// declared stop token and rolls it back; with no stop token it is false.
+    func canStop() throws -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return try canStopLocked()
+    }
+
+    private func canStopLocked() throws -> Bool {
+        if isMatcherTerminatedLocked() {
+            return true
+        }
+        guard let stopTokenId = stopTokenIDs.first,
+            xg_matcher_accept_token(matcher, Int32(stopTokenId)) == XG_OK
+        else {
+            return false
+        }
+        let status = xg_matcher_rollback(matcher, 1)
+        guard status == XG_OK else {
+            throw GrammarError.rollbackFailed(
+                Self.captureShimError(status: status, fallback: "xg_matcher_rollback n=1"))
+        }
+        return true
+    }
+
+    private func computeRawMaskLocked() throws -> MaskResult {
         var mask = [Int32](repeating: 0, count: bitmaskWords)
         var needsApplyFlag: Int32 = 0
         let status = mask.withUnsafeMutableBufferPointer { buf in
@@ -532,11 +624,12 @@ public final class GrammarConstraint: @unchecked Sendable {
                     status: status, fallback: "xg_matcher_fill_next_token_bitmask")
             )
         }
-        return MaskResult(
+        let result = MaskResult(
             mask: mask,
             isTerminated: isMatcherTerminatedLocked(),
             needsApply: needsApplyFlag != 0
         )
+        return rawMaskHookForTesting?(result) ?? result
     }
 
     /// Commit a sampled token to advance grammar state.
@@ -686,6 +779,9 @@ public final class GrammarConstraint: @unchecked Sendable {
         defer { lock.unlock() }
         return _fastForwardDisagreementCount
     }
+
+    /// The stop token ids of the bound tokenizer, sorted.
+    var stopTokenIDs: [Int] { tokenizer.stopTokenIDs }
 
     /// Roll back the most recently accepted `n` tokens, restoring the
     /// matcher to the state it held before those commits. A subsequent

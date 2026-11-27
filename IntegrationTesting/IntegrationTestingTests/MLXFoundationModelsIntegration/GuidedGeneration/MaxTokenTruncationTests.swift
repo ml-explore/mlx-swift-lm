@@ -48,7 +48,8 @@ extension ModelLoadingSuite.MaxTokenTruncationTests {
 
             let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                 modelID: TestFixtures.defaultModelID,
-                tokenizer: context.tokenizer
+                tokenizer: context.tokenizer,
+                configuration: context.configuration
             )
 
             let constraint = try GrammarConstraint(
@@ -127,7 +128,8 @@ extension ModelLoadingSuite.MaxTokenTruncationTests {
         try await container.perform { context in
             let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                 modelID: TestFixtures.defaultModelID,
-                tokenizer: context.tokenizer
+                tokenizer: context.tokenizer,
+                configuration: context.configuration
             )
 
             // Array of strings schema -- needs at least an opening bracket,

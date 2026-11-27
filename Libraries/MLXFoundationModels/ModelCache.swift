@@ -154,19 +154,31 @@ actor ModelCache {
         lastErrors[modelID]
     }
 
-    /// Gets or creates a cached GrammarTokenizer for the given model.
+    /// Gets or creates the cached GrammarTokenizer for a model, declaring the loop's stop tokens.
+    /// An entry with other stop tokens is rebuilt, and the model's compiled grammars are dropped.
     func makeGrammarTokenizer(
         modelID: String,
-        tokenizer: any Tokenizer
+        tokenizer: any Tokenizer,
+        configuration: ModelConfiguration
     ) throws -> GrammarTokenizer {
+        let eosTokenId = Int32(tokenizer.eosTokenId ?? 0)
+        let stopTokenIDs = GuidedGenerationLoop.stopTokenIDs(
+            tokenizer: tokenizer, configuration: configuration
+        ).sorted()
         if let cached = grammarTokenizers[modelID] {
-            return cached
+            let declared = GrammarTokenizer.declaredStopTokenIDs(
+                eosTokenId: eosTokenId, stopTokenIds: stopTokenIDs, vocabSize: cached.vocabSize)
+            if cached.stopTokenIDs == declared {
+                return cached
+            }
+            constraintTemplates = constraintTemplates.filter { !$0.key.hasPrefix("\(modelID):") }
         }
         let vocabulary = TokenizerVocabExtractor.extractForGrammar(from: tokenizer)
         let grammarTokenizer = try GrammarTokenizer(
             vocab: vocabulary.vocab,
             vocabType: vocabulary.vocabType,
-            eosTokenId: Int32(tokenizer.eosTokenId ?? 0)
+            eosTokenId: eosTokenId,
+            stopTokenIds: stopTokenIDs
         )
         grammarTokenizers[modelID] = grammarTokenizer
         return grammarTokenizer
@@ -208,8 +220,8 @@ actor ModelCache {
     ///
     /// Grammar compilation is expensive (~5-20ms). By caching the compiled template
     /// and cloning it (~0.1ms), repeated requests with the same schema skip recompilation.
-    /// When Fork() is unavailable (xgrammar < v0.1.33), the clone attempt fails gracefully
-    /// and each request compiles a fresh constraint instead. Any other clone failure
+    /// Until the shim calls xgrammar's Fork() (upstream since v0.1.33), the clone attempt fails
+    /// gracefully and each request compiles a fresh constraint instead. Any other clone failure
     /// reaches the caller.
     func makeConstraint(
         modelID: String,

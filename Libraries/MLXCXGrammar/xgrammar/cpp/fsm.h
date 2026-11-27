@@ -30,28 +30,37 @@ namespace xgrammar {
 /*!
  * \brief The edge of a FSM.
  */
-struct alignas(8) FSMEdge {
+struct FSMEdge {
   /*!
-   * \brief The min field of the edge stores the type of the edge. When min >= 0, it represents a
-   * range of characters [min, max]. When min < 0, it represents a special edge type.
+   * \brief Edge type is encoded in the `min` field. When min >= 0, the edge is a character range
+   * [min, max]. When min < 0, it is a special edge type identified by the enum values below.
+   *
+   * For each type, `max` has a type-specific meaning (see comments on each enumerator).
    */
-  enum EdgeType : int16_t {
-    kCharRange = 0,  // When min >= kCharRange, it represents a range of characters.
+  enum EdgeType : int32_t {
+    //! Character range [min, max]. min >= 0.
+    kCharRange = 0,
+    //! Epsilon transition. max is unused.
     kEpsilon = -1,
+    //! Rule reference. max = rule_id.
     kRuleRef = -2,
+    //! Accepts the EOS token. max is unused.
     kEOS = -3,
+    //! Repeated rule reference. max = aux index into edge_aux_data
+    //! (layout: [rule_id, lower, upper]).
+    //! Invariant: a state with a kRepeatRef edge has exactly one outgoing edge.
+    kRepeatRef = -4,
+    //! Accepts a set of token IDs. max = aux index into edge_aux_data
+    //! (layout: [count, token_id_0, token_id_1, ...]).
+    kToken = -5,
+    //! Accepts any token NOT in the given set. max = aux index into edge_aux_data
+    //! (layout: [count, token_id_0, token_id_1, ...]).
+    kExcludeToken = -6,
   };
 
   inline static constexpr int kMaxChar = 255;
 
-  /*!
-   * \brief The information of the edge.
-   * \details When min >= 0, then it represents a range of characters [min, max].
-   * When min == EdgeType::kRuleRef, it represents a reference to a rule. max is the rule id.
-   * When min == EdgeType::kEpsilon, it means the edge is an epsilon transition.
-   * When min == EdgeType::kEOS, it means the edge accepts an EOS token.
-   */
-  int16_t min, max;
+  int32_t min, max;
 
   /*!
    * \brief The target state id of the edge.
@@ -61,7 +70,7 @@ struct alignas(8) FSMEdge {
   // for serialization only
   FSMEdge() = default;
 
-  FSMEdge(int16_t min, int16_t max, int32_t target) : min(min), max(max), target(target) {
+  FSMEdge(int32_t min, int32_t max, int32_t target) : min(min), max(max), target(target) {
     XGRAMMAR_DCHECK(!IsCharRange() || min <= max)
         << "Invalid FSMEdge: min > max. min=" << min << ", max=" << max;
   }
@@ -104,12 +113,67 @@ struct alignas(8) FSMEdge {
   bool IsEOS() const { return min == EdgeType::kEOS; }
 
   /*!
+   * \brief Check if the edge is a repeat reference.
+   */
+  bool IsRepeatRef() const { return min == EdgeType::kRepeatRef; }
+
+  bool IsToken() const { return min == EdgeType::kToken; }
+
+  bool IsExcludeToken() const { return min == EdgeType::kExcludeToken; }
+
+  /*!
    * \brief Get the rule id of the edge.
    * \return The rule id of the edge. -1 if the edge is not a rule reference.
    */
   int32_t GetRefRuleId() const { return IsRuleRef() ? max : -1; }
 
+  /*!
+   * \brief Get the auxiliary data index for repeat reference edges.
+   * \return The index into the owning FSM's edge_aux_data. -1 if not a repeat reference.
+   */
+  int32_t GetAuxIndex() const {
+    return (IsRepeatRef() || IsToken() || IsExcludeToken()) ? max : -1;
+  }
+
+  /*! \brief Check if the edge uses auxiliary data. */
+  bool IsAuxEdge() const { return IsRepeatRef() || IsToken() || IsExcludeToken(); }
+
   friend struct member_trait<FSMEdge>;
+};
+
+/*! \brief View into edge_aux_data for a repeat edge (layout: [rule_id, lower, upper]). */
+struct RepeatEdgeRef {
+  const int32_t* data;
+  int32_t RuleId() const { return data[0]; }
+  int32_t Lower() const { return data[1]; }
+  int32_t Upper() const { return data[2]; }
+};
+
+/*! \brief View into edge_aux_data for a token edge (layout: [count, token_id_0, ...]). */
+struct TokenEdgeRef {
+  const int32_t* data;
+  int32_t Count() const { return data[0]; }
+  const int32_t* TokenIds() const { return data + 1; }
+  bool Contains(int32_t token_id) const {
+    for (int32_t i = 0; i < Count(); ++i) {
+      if (TokenIds()[i] == token_id) return true;
+    }
+    return false;
+  }
+};
+
+/*! \brief View into edge_aux_data for an exclude-token edge (layout: [count, token_id_0, ...]). */
+struct ExcludeTokenEdgeRef {
+  const int32_t* data;
+  int32_t Count() const { return data[0]; }
+  const int32_t* TokenIds() const { return data + 1; }
+  bool Contains(int32_t token_id) const {
+    for (int32_t i = 0; i < Count(); ++i) {
+      if (TokenIds()[i] == token_id) return true;
+    }
+    return false;
+  }
+  bool Accepts(int32_t token_id) const { return !Contains(token_id); }
 };
 
 /*!
@@ -148,12 +212,12 @@ class FSM {
   /*!
    * \brief Construct an FSM with a given set of edges.
    */
-  FSM(const std::vector<std::vector<FSMEdge>>& edges);
+  FSM(const std::vector<std::vector<FSMEdge>>& edges, std::vector<int32_t> edge_aux_data = {});
 
   /*!
    * \brief Construct an FSM with a given set of edges.
    */
-  FSM(std::vector<std::vector<FSMEdge>>&& edges);
+  FSM(std::vector<std::vector<FSMEdge>>&& edges, std::vector<int32_t> edge_aux_data = {});
 
   /****************** FSM Visitors ******************/
 
@@ -262,7 +326,10 @@ class FSM {
    * \param min The min value of the range.
    * \param max The max value of the range.
    */
-  void AddEdge(int from, int to, int16_t min, int16_t max);
+  void AddEdge(int from, int to, int32_t min, int32_t max);
+
+  /*! \brief Add a raw edge with explicit type and value. */
+  void AddEdge(int from, int to, FSMEdge::EdgeType type, int32_t value);
 
   /*!
    * \brief Add an epsilon transition between two states.
@@ -277,7 +344,7 @@ class FSM {
    * \param to The target state.
    * \param rule_id The rule id to reference.
    */
-  void AddRuleEdge(int from, int to, int16_t rule_id);
+  void AddRuleEdge(int from, int to, int32_t rule_id);
 
   /*!
    * \brief Add an EOS transition between two states.
@@ -285,6 +352,35 @@ class FSM {
    * \param to The target state.
    */
   void AddEOSEdge(int from, int to);
+
+  /*!
+   * \brief Add a repeat reference edge between states, allocating auxiliary data.
+   * \param from The source state.
+   * \param to The target state.
+   * \param rule_id The rule to repeat.
+   * \param lower Minimum repeat count.
+   * \param upper Maximum repeat count (-1 for unlimited).
+   */
+  void AddRepeatEdge(int from, int to, int32_t rule_id, int32_t lower, int32_t upper);
+
+  void AddTokenEdge(int from, int to, const std::vector<int32_t>& token_ids);
+
+  void AddExcludeTokenEdge(int from, int to, const std::vector<int32_t>& token_ids);
+
+  /*! \brief Get the edge auxiliary data. */
+  const std::vector<int32_t>& GetEdgeAuxData() const;
+
+  /*! \brief Set the edge auxiliary data (used during FSM construction). */
+  void SetEdgeAuxData(std::vector<int32_t> data);
+
+  /*! \brief Get repeat edge info by aux index. */
+  RepeatEdgeRef GetRepeatEdgeInfo(int32_t idx) const;
+
+  /*! \brief Get token edge info by aux index. */
+  TokenEdgeRef GetTokenEdgeInfo(int32_t idx) const;
+
+  /*! \brief Get exclude-token edge info by aux index. */
+  ExcludeTokenEdgeRef GetExcludeTokenEdgeInfo(int32_t idx) const;
 
   /*!
    * \brief Add a whole FSM to the current FSM.
@@ -341,9 +437,11 @@ class CompactFSM {
   // for serialization only
   CompactFSM() = default;
 
-  explicit CompactFSM(const Compact2DArray<FSMEdge>& edges);
+  explicit CompactFSM(
+      const Compact2DArray<FSMEdge>& edges, std::vector<int32_t> edge_aux_data = {}
+  );
 
-  explicit CompactFSM(Compact2DArray<FSMEdge>&& edges);
+  explicit CompactFSM(Compact2DArray<FSMEdge>&& edges, std::vector<int32_t> edge_aux_data = {});
 
   /****************** CompactFSM Visitors ******************/
 
@@ -435,6 +533,29 @@ class CompactFSM {
    */
   void GetReachableStates(const std::vector<int>& from, std::unordered_set<int>* result) const;
 
+  /*!
+   * \brief Get the number of edges in the compact FSM.
+   * \return The number of edges.
+   */
+  size_t GetNumEdges() const;
+
+  /****************** CompactFSM Auxiliary Data ******************/
+
+  /*! \brief Get the edge auxiliary data. */
+  const std::vector<int32_t>& GetEdgeAuxData() const;
+
+  /*! \brief Set the edge auxiliary data (used during FSM construction). */
+  void SetEdgeAuxData(std::vector<int32_t> data);
+
+  /*! \brief Get repeat edge info by aux index. */
+  RepeatEdgeRef GetRepeatEdgeInfo(int32_t idx) const;
+
+  /*! \brief Get token edge info by aux index. */
+  TokenEdgeRef GetTokenEdgeInfo(int32_t idx) const;
+
+  /*! \brief Get exclude-token edge info by aux index. */
+  ExcludeTokenEdgeRef GetExcludeTokenEdgeInfo(int32_t idx) const;
+
   /****************** CompactFSM Construction Methods ******************/
 
   /*!
@@ -455,7 +576,11 @@ std::optional<SerializationError> DeserializeJSONValue(
     CompactFSM* result, const picojson::value& value, const std::string& type_name = ""
 );
 
+class FSMWithStartEnd;
+class FSMWithStartEndWithSize;
 class CompactFSMWithStartEnd;
+class CompactFSMWithStartEndWithSize;
+struct CompactFSMWithStartEndWithSizeSerializeHelper;
 
 /*!
  * \brief The base class for FSMWithStartEnd and CompactFSMWithStartEnd. It defines the
@@ -472,10 +597,10 @@ class FSMWithStartEndBase {
   // For serialization only
   FSMWithStartEndBase() = default;
 
-  FSMWithStartEndBase(
-      const FSMType& fsm, int start, const std::vector<bool>& ends, bool is_dfa = false
-  )
-      : fsm_(fsm), start_(start), ends_(ends), is_dfa_(is_dfa) {}
+  FSMWithStartEndBase(const FSMType& fsm, int start, std::vector<int32_t> ends, bool is_dfa = false)
+      : fsm_(fsm), start_(start), ends_(std::move(ends)), is_dfa_(is_dfa) {
+    NormalizeEnds();
+  }
 
   /****************** Member Accessors and Mutators ******************/
 
@@ -485,15 +610,20 @@ class FSMWithStartEndBase {
   /*! \brief Returns the start state of the FSM. */
   int GetStart() const { return start_; }
 
-  /*! \brief Returns the end states of the FSM. */
-  const std::vector<bool>& GetEnds() const { return ends_; }
+  /*!
+   * \brief Returns the end states of the FSM as a sorted, deduplicated list of state ids.
+   * \note End states are stored sparsely because an FSM view over a large shared FSM (e.g. the
+   * per-rule FSMs over the complete FSM of a grammar) usually has only a few end states, while
+   * the state id space can be very large.
+   */
+  const std::vector<int32_t>& GetEnds() const { return ends_; }
 
   /*!
    * \brief Checks if a given state is an end/accepting state.
    * \param state The state to check.
    * \return True if the state is an end state, false otherwise.
    */
-  bool IsEndState(int state) const { return ends_[state]; }
+  bool IsEndState(int state) const { return std::binary_search(ends_.begin(), ends_.end(), state); }
 
   /*! \brief Check if a state is scanable.
    *  \param state The state to check.
@@ -501,7 +631,7 @@ class FSMWithStartEndBase {
    */
   bool IsScanableState(int state) const {
     for (const auto& edge : fsm_.GetEdges(state)) {
-      if (edge.IsCharRange()) {
+      if (edge.IsCharRange() || edge.IsToken() || edge.IsExcludeToken()) {
         return true;
       }
     }
@@ -515,7 +645,7 @@ class FSMWithStartEndBase {
    */
   bool IsNonTerminalState(int state) const {
     for (const auto& edge : fsm_.GetEdges(state)) {
-      if (edge.IsRuleRef() || edge.IsEpsilon()) {
+      if (edge.IsRuleRef() || edge.IsEpsilon() || edge.IsRepeatRef()) {
         return true;
       }
     }
@@ -537,23 +667,26 @@ class FSMWithStartEndBase {
    */
   void AddEndState(int state) {
     XGRAMMAR_DCHECK(state < NumStates());
-    ends_[state] = true;
+    auto it = std::lower_bound(ends_.begin(), ends_.end(), state);
+    if (it == ends_.end() || *it != state) {
+      ends_.insert(it, state);
+    }
   }
 
   /*!
    * \brief Adds a new state to the FSM and marks it as non-end.
    * \return The index of the newly added state.
    */
-  int AddState() {
-    ends_.push_back(false);
-    return fsm_.AddState();
-  }
+  int AddState() { return fsm_.AddState(); }
 
   /*!
    * \brief Sets the end states of the FSM.
-   * \param ends The new end states.
+   * \param ends The new end states, as a list of state ids. Need not be sorted or deduplicated.
    */
-  void SetEndStates(const std::vector<bool>& ends) { ends_ = ends; }
+  void SetEndStates(std::vector<int32_t> ends) {
+    ends_ = std::move(ends);
+    NormalizeEnds();
+  }
 
   /*! \brief Returns the total number of states in the FSM. */
   int NumStates() const { return fsm_.NumStates(); }
@@ -585,13 +718,23 @@ class FSMWithStartEndBase {
   bool IsLeaf() const;
 
  protected:
+  /*! \brief Sort and deduplicate the end states to maintain the sorted invariant. */
+  void NormalizeEnds() {
+    std::sort(ends_.begin(), ends_.end());
+    ends_.erase(std::unique(ends_.begin(), ends_.end()), ends_.end());
+  }
+
   /*! \brief The underlying finite state machine. */
   FSMType fsm_;
   /*! \brief The start state of the FSM. */
   int start_;
 
-  /*! \brief The set of accepting/end states. */
-  std::vector<bool> ends_;
+  /*!
+   * \brief The set of accepting/end states, stored as a sorted, deduplicated list of state ids.
+   * \note Stored sparsely (rather than as a bitvector over all states) because FSM views over a
+   * large shared FSM usually have only a few end states, while the state id space can be huge.
+   */
+  std::vector<int32_t> ends_;
 
  protected:
   /*! \brief Whether this FSM is a deterministic finite automaton. */
@@ -640,7 +783,7 @@ class FSMWithStartEnd : public FSMWithStartEndBase<FSM> {
    * cleared at the beginning. Should not be nullptr.
    * \return The FSMWithStartEnd that points to the complete FSM.
    */
-  FSMWithStartEnd AddToCompleteFSM(FSM* complete_fsm, std::vector<int>* state_mapping);
+  FSMWithStartEndWithSize AddToCompleteFSM(FSM* complete_fsm, std::vector<int>* state_mapping);
 
   /*!
    * \brief Transform the FSMWithStartEnd to a CompactFSMWithStartEnd.
@@ -717,7 +860,7 @@ class FSMWithStartEnd : public FSMWithStartEndBase<FSM> {
    * 2) they are not pointed to by other edges, then we can merge them.
    * \example n0 --(c)--> n1, n0 --(c)--> n2, then we can merge n1 and n2.
    */
-  FSMWithStartEnd MergeEquivalentSuccessors(int max_num_states = 1e5) const;
+  FSMWithStartEnd MergeEquivalentStates(int max_num_states = 1e5) const;
 
   /*!
    * \brief Transform the FSM to a DFA.
@@ -735,6 +878,29 @@ class FSMWithStartEnd : public FSMWithStartEndBase<FSM> {
 };
 
 /*!
+ * \brief Wrapper that bundles an FSMWithStartEnd with explicit size metadata. It is
+ * used when we want to store the number of edges and nodes in the part of the FSM, instead
+ * of the completed FSMWithStartEnd.
+ */
+class FSMWithStartEndWithSize {
+ public:
+  // For serialization only
+  FSMWithStartEndWithSize() = default;
+
+  explicit FSMWithStartEndWithSize(FSMWithStartEnd fsm, int edge_num, int node_num)
+      : fsm_(std::move(fsm)), edge_num_(edge_num), node_num_(node_num) {}
+
+  const FSMWithStartEnd& GetFsm() const { return fsm_; }
+  int GetEdgeNum() const { return edge_num_; }
+  int GetNodeNum() const { return node_num_; }
+
+ private:
+  FSMWithStartEnd fsm_;
+  int edge_num_ = 0;
+  int node_num_ = 0;
+};
+
+/*!
  * \brief A class that represents a compact-form FSM with a start state and a set of end states.
  * \details CompactFSMWithStartEnd stores a pointer to a CompactFSM, a start state, and a set of end
  * states. Multiple CompactFSMWithStartEnd can share the same CompactFSM. It share the same set of
@@ -744,6 +910,10 @@ class CompactFSMWithStartEnd : public FSMWithStartEndBase<CompactFSM> {
  public:
   // For serialization only
   CompactFSMWithStartEnd() = default;
+
+  explicit CompactFSMWithStartEnd(const CompactFSM& fsm, int start, std::vector<int32_t> ends)
+      : FSMWithStartEndBase<CompactFSM>(fsm, start, std::move(ends)),
+        edge_num_(fsm.GetNumEdges()) {}
 
   using FSMWithStartEndBase<CompactFSM>::FSMWithStartEndBase;
 
@@ -760,14 +930,8 @@ class CompactFSMWithStartEnd : public FSMWithStartEndBase<CompactFSM> {
    */
   FSMWithStartEnd ToFSM() const;
 
-  /*!
-   * \brief Get the number of edges in the CompactFSMWithStartEnd.
-   * \return The number of edges in the CompactFSMWithStartEnd.
-   */
-  size_t GetNumEdges() const;
-
  private:
-  mutable std::optional<size_t> edge_num = std::nullopt;
+  size_t edge_num_ = 0;
 
   /*!
    * \brief Print the CompactFSMWithStartEnd.
@@ -794,13 +958,46 @@ class CompactFSMWithStartEnd : public FSMWithStartEndBase<CompactFSM> {
   );
 };
 
-XGRAMMAR_MEMBER_ARRAY(
-    CompactFSMWithStartEnd,
-    &CompactFSMWithStartEnd::fsm_,
-    &CompactFSMWithStartEnd::start_,
-    &CompactFSMWithStartEnd::ends_,
-    &CompactFSMWithStartEnd::is_dfa_,
-    &CompactFSMWithStartEnd::edge_num
+/*!
+ * \brief Wrapper that bundles a CompactFSMWithStartEnd with explicit size metadata. It is
+ * used when we want to store the number of edges and nodes in the part of the
+ * CompactFSMWithStartEnd, instead of the completed CompactFSMWithStartEnd.
+ */
+class CompactFSMWithStartEndWithSize {
+ public:
+  // For serialization only
+  CompactFSMWithStartEndWithSize() = default;
+
+  explicit CompactFSMWithStartEndWithSize(CompactFSMWithStartEnd fsm, int edge_num, int node_num)
+      : fsm_(std::move(fsm)), edge_num_(edge_num), node_num_(node_num) {}
+
+  const CompactFSMWithStartEnd& GetFsm() const { return fsm_; }
+  int GetEdgeNum() const { return edge_num_; }
+  int GetNodeNum() const { return node_num_; }
+
+  friend picojson::value SerializeJSONValue(const CompactFSMWithStartEndWithSize& value);
+  friend std::optional<SerializationError> DeserializeJSONValue(
+      CompactFSMWithStartEndWithSize* result,
+      const picojson::value& value,
+      const std::string& type_name
+  );
+
+ private:
+  CompactFSMWithStartEnd fsm_;
+  int edge_num_ = 0;
+  int node_num_ = 0;
+
+  friend std::size_t MemorySize(const CompactFSMWithStartEndWithSize& self) {
+    return MemorySize(self.fsm_) + sizeof(self.edge_num_) + sizeof(self.node_num_);
+  }
+
+  friend struct CompactFSMWithStartEndWithSizeSerializeHelper;
+};
+
+std::optional<SerializationError> DeserializeJSONValue(
+    CompactFSMWithStartEndWithSize* result,
+    const picojson::value& value,
+    const std::string& type_name = ""
 );
 
 /****************** FSMWithStartEndBase Template Implementation ******************/
@@ -825,7 +1022,7 @@ inline bool FSMWithStartEndBase<FSMType>::AcceptString(const std::string& str) c
     start_states = result_states;
   }
   return std::any_of(start_states.begin(), start_states.end(), [&](int state) {
-    return ends_[state];
+    return IsEndState(state);
   });
 }
 
@@ -841,7 +1038,7 @@ inline bool FSMWithStartEndBase<FSMType>::IsLeaf() const {
   GetReachableStates(&reachable_states);
   for (const auto& state : reachable_states) {
     for (const auto& edge : fsm_.GetEdges(state)) {
-      if (edge.IsRuleRef()) {
+      if (edge.IsRuleRef() || edge.IsRepeatRef()) {
         return false;
       }
     }

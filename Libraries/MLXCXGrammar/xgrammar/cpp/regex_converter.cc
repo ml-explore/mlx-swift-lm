@@ -24,6 +24,14 @@ class RegexConverter {
  public:
   explicit RegexConverter(const std::string& regex) : regex_(regex) {
     if (!regex.empty()) {
+      // ParseUTF8 takes a C string and stops at the first NUL, so a regex
+      // containing one would either yield an empty codepoint vector (leading
+      // NUL -- an out-of-bounds read below) or be silently truncated to the
+      // prefix. A NUL is never meaningful in a regex, so reject it here.
+      if (regex.find('\0') != std::string::npos) {
+        XGRAMMAR_LOG(FATAL) << "The regex must not contain null characters.";
+        XGRAMMAR_UNREACHABLE();
+      }
       regex_codepoints_ = ParseUTF8(regex_.c_str(), false);
       if (regex_codepoints_[0] == kInvalidUTF8) {
         XGRAMMAR_LOG(FATAL) << "The regex is not a valid UTF-8 string.";
@@ -247,7 +255,7 @@ std::string RegexConverter::HandleEscape() {
     return R"([\f\n\r\t\v\u0020\u00a0])";
   } else if (current_[1] == 'S') {
     current_ += 2;
-    return R"([^[\f\n\r\t\v\u0020\u00a0])";
+    return R"([^\f\n\r\t\v\u0020\u00a0])";
   } else if ((current_[1] >= '1' && current_[1] <= '9') || current_[1] == 'k') {
     RaiseError("Backreference is not supported yet.");
   } else if (current_[1] == 'p' || current_[1] == 'P') {
@@ -326,8 +334,8 @@ std::string RegexConverter::Convert() {
       if (parenthesis_level_ == 0) {
         RaiseError("Unmatched ')'");
       }
-      // Special case: if the previous character is '|', add an empty string to the result.
-      if (current_ != start_ && current_[-1] == '|') {
+      // Empty alternative before ')' (e.g. "(a|)" or "(a|$)"): emit "" so it isn't a bare '|'.
+      if (!result_ebnf_.empty() && result_ebnf_.back() == '|') {
         AddEBNFSegment("\"\"");
       }
       --parenthesis_level_;
@@ -359,6 +367,11 @@ std::string RegexConverter::Convert() {
       }
     } else if (*current_ == '|') {
       is_empty = false;
+      // Empty alternative before '|': emit "" so there's no bare '|' on the left.
+      // Covers leading ("^$|abc"), consecutive ("a||b") and group-start ("(|a)") cases.
+      if (result_ebnf_.empty() || result_ebnf_.back() == '|' || result_ebnf_.back() == '(') {
+        AddEBNFSegment("\"\"");
+      }
       AddEBNFSegment("|");
       ++current_;
     } else if (*current_ == '\\') {
@@ -377,6 +390,10 @@ std::string RegexConverter::Convert() {
   }
   if (parenthesis_level_ != 0) {
     RaiseError("The parenthesis is not closed.");
+  }
+  // Trailing empty alternative, e.g. "abc|": emit "" so it doesn't end with a bare '|'.
+  if (!result_ebnf_.empty() && result_ebnf_.back() == '|') {
+    AddEBNFSegment("\"\"");
   }
   if (is_empty) {
     AddEBNFSegment("\"\"");
