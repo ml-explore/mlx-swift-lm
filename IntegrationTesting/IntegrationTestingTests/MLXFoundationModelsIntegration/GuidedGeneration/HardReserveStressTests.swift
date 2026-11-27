@@ -163,7 +163,8 @@ extension ModelLoadingSuite.HardReserveStressTests {
         let raw: String = try await container.perform { context in
             let grammarTokenizer = try await MLXLanguageModel.makeGrammarTokenizer(
                 modelID: modelID,
-                tokenizer: context.tokenizer
+                tokenizer: context.tokenizer,
+                configuration: context.configuration
             )
             let constraint = try GrammarConstraint(
                 tokenizer: grammarTokenizer,

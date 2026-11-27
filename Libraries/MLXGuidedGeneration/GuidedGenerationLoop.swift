@@ -41,7 +41,9 @@ public enum GuidedGenerationLoop {
     /// - Parameters:
     ///   - input: Prepared model input (prompt already tokenized)
     ///   - context: Model context (model, tokenizer, configuration)
-    ///   - constraint: The xgrammar constraint (must have `fastForward: true`)
+    ///   - constraint: The xgrammar constraint (must have `fastForward: true`).
+    ///     Build its `GrammarTokenizer` with every id this loop stops on as
+    ///     `stopTokenIds`; the loop logs a warning when one is missing.
     ///   - maxTokens: Maximum tokens to generate
     ///   - completionReserve: Number of tokens before maxTokens at which closing
     ///     bias activates. When `tokenCount >= maxTokens - completionReserve`,
@@ -128,11 +130,20 @@ public enum GuidedGenerationLoop {
         processor?.prompt(input.text.tokens)
         defer { processor?.finalizeGeneration() }
 
-        // Build EOS token set
-        let stopTokenIDs = Self.buildStopTokenIDs(
+        let stopTokenIDs = Self.stopTokenIDs(
             tokenizer: context.tokenizer,
             configuration: context.configuration
         )
+
+        // A stop id the grammar does not know is text to it, so the output
+        // can end early on it.
+        let undeclaredStopTokenIDs = stopTokenIDs.subtracting(constraint.stopTokenIDs)
+            .filter { $0 >= 0 && $0 < vocabSize }.sorted()
+        if !undeclaredStopTokenIDs.isEmpty {
+            logger.warning(
+                "Guided generation stops on token ids \(undeclaredStopTokenIDs) that the grammar treats as text. Pass them as stopTokenIds when you create the GrammarTokenizer."
+            )
+        }
 
         // Prefill prompt and get first set of logits
         var logits: MLXArray
@@ -323,7 +334,7 @@ public enum GuidedGenerationLoop {
             // `applyMaskAndSample` set it to -inf, so the sampler could not
             // have selected it.
             if mask.needsApply {
-                if tokenId == context.tokenizer.unknownTokenId || stopTokenIDs.contains(tokenId) {
+                if stopTokenIDs.contains(tokenId) {
                     if diagnosticLog {
                         logger.info(
                             "[GuidedGen] Stop reason: EOS/unk tokenId=\(tokenId) at token \(tokenCount)"
@@ -538,6 +549,22 @@ public enum GuidedGenerationLoop {
             if let id = tokenizer.convertTokenToId(token) {
                 stopTokenIDs.insert(id)
             }
+        }
+        return stopTokenIDs
+    }
+
+    /// The token ids a guided run stops on: `buildStopTokenIDs(tokenizer:configuration:)`
+    /// plus the tokenizer's unknown token.
+    ///
+    /// Pass the same ids to the grammar as `stopTokenIds` when you create the
+    /// `GrammarTokenizer`, so the grammar allows them only where the output can end.
+    package static func stopTokenIDs(
+        tokenizer: any Tokenizer,
+        configuration: ModelConfiguration
+    ) -> Set<Int> {
+        var stopTokenIDs = buildStopTokenIDs(tokenizer: tokenizer, configuration: configuration)
+        if let unknown = tokenizer.unknownTokenId {
+            stopTokenIDs.insert(unknown)
         }
         return stopTokenIDs
     }

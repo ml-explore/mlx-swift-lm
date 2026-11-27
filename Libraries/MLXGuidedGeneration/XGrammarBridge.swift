@@ -66,6 +66,26 @@ public enum GrammarError: Error {
 public final class GrammarTokenizer: @unchecked Sendable {
     let pointer: OpaquePointer
     public let vocabSize: Int
+    /// The stop token ids xgrammar knows, sorted. Any other id is text to it.
+    package let stopTokenIDs: [Int]
+
+    /// The stop ids a tokenizer declares: `stopTokenIds` and the EOS, inside
+    /// the vocabulary, sorted and without duplicates.
+    package static func declaredStopTokenIDs(
+        eosTokenId: Int32, stopTokenIds: [Int], vocabSize: Int
+    ) -> [Int] {
+        Set(stopTokenIds + [Int(eosTokenId)]).filter { (0 ..< vocabSize).contains($0) }.sorted()
+    }
+
+    /// Construct a tokenizer from a pre-decoded vocab, with `eosTokenId` as
+    /// its only stop token.
+    ///
+    /// Other ids that ``GuidedGenerationLoop`` stops on are text to the
+    /// grammar, so the output can end early on them. Prefer
+    /// ``init(vocab:vocabType:eosTokenId:stopTokenIds:)``.
+    public convenience init(vocab: [String], vocabType: VocabType, eosTokenId: Int32) throws {
+        try self.init(vocab: vocab, vocabType: vocabType, eosTokenId: eosTokenId, stopTokenIds: [])
+    }
 
     /// Construct a tokenizer from a pre-decoded vocab.
     ///
@@ -78,13 +98,29 @@ public final class GrammarTokenizer: @unchecked Sendable {
     ///     `.byteFallback` applies SentencePiece `<0xNN>` + `▁`
     ///     decoding; `.byteLevel` applies GPT-2 `bytes_to_unicode`
     ///     decoding.
-    ///   - eosTokenId: End-of-sequence token ID, registered as a stop
-    ///     token on the xgrammar TokenizerInfo.
-    public init(vocab: [String], vocabType: VocabType, eosTokenId: Int32) throws {
+    ///   - eosTokenId: End-of-sequence token ID. It is a stop token too,
+    ///     when it is in the vocabulary.
+    ///   - stopTokenIds: Other token ids that end generation, such as a
+    ///     chat model's end-of-turn token. Pass every id that
+    ///     ``GuidedGenerationLoop`` stops on. The grammar then allows them
+    ///     only where the output can end, and never as text: the text of a
+    ///     stop token cannot be produced with that token, not even by
+    ///     fast-forward. An id the loop stops on but the grammar does not
+    ///     know is text to the grammar, so the output can end early on it,
+    ///     for example inside a JSON string. Duplicates and ids outside the
+    ///     vocabulary are ignored.
+    public init(
+        vocab: [String], vocabType: VocabType, eosTokenId: Int32, stopTokenIds: [Int]
+    ) throws {
         self.vocabSize = vocab.count
+        self.stopTokenIDs = Self.declaredStopTokenIDs(
+            eosTokenId: eosTokenId, stopTokenIds: stopTokenIds, vocabSize: vocab.count)
 
         var info: OpaquePointer?
-        let stopTokens: [Int32] = [eosTokenId]
+        // An empty list makes xgrammar guess stop tokens from their text, so
+        // keep passing the EOS as before; xgrammar ignores ids outside the vocab.
+        let stopTokens: [Int32] =
+            stopTokenIDs.isEmpty ? [eosTokenId] : stopTokenIDs.map { Int32($0) }
 
         let status: XGStatus = vocab.withCStringPointers { ptrs in
             stopTokens.withUnsafeBufferPointer { stopBuf in
@@ -686,6 +722,9 @@ public final class GrammarConstraint: @unchecked Sendable {
         defer { lock.unlock() }
         return _fastForwardDisagreementCount
     }
+
+    /// The stop token ids of the bound tokenizer, sorted.
+    var stopTokenIDs: [Int] { tokenizer.stopTokenIDs }
 
     /// Roll back the most recently accepted `n` tokens, restoring the
     /// matcher to the state it held before those commits. A subsequent
