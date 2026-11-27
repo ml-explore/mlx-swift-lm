@@ -8,7 +8,9 @@ import XCTest
 
 final class FalconH1Tests: XCTestCase {
 
-    private func tinyConfiguration(numLogitsToKeep: Int = 1) throws -> FalconH1Configuration {
+    private func tinyConfiguration(numLogitsToKeep: Int = 1, headDim: Int = 8) throws
+        -> FalconH1Configuration
+    {
         let json = """
             {
                 "model_type": "falcon_h1",
@@ -16,7 +18,7 @@ final class FalconH1Tests: XCTestCase {
                 "num_hidden_layers": 2,
                 "num_attention_heads": 4,
                 "num_key_value_heads": 2,
-                "head_dim": 8,
+                "head_dim": \(headDim),
                 "vocab_size": 100,
                 "mamba_d_ssm": 16,
                 "mamba_d_state": 8,
@@ -124,7 +126,18 @@ final class FalconH1Tests: XCTestCase {
         let model = FalconH1Model(config)
         let params = GenerateParameters(kvBits: 4, kvGroupSize: 32, quantizedKVStart: 0)
 
-        let cache = try model.newCache(parameters: params)
+        // head_dim 8 divides no supported group size: the first update of an eager
+        // QuantizedKVCache would trap, so the attention cache stays simple and converts
+        // dynamically (which skips it as unsupported).
+        XCTAssertEqual(model.kvHeadDim, 8)
+        for entry in try model.newCache(parameters: params) {
+            let list = try XCTUnwrap(entry as? CacheList)
+            XCTAssertTrue(list[1] is KVCacheSimple, "unsupported head dim should stay simple")
+            XCTAssertTrue(list[0] is MambaCache, "mamba cache should never be quantized")
+        }
+
+        let quantizable = try tinyConfiguration(headDim: 32)
+        let cache = try FalconH1Model(quantizable).newCache(parameters: params)
         XCTAssertEqual(cache.count, 2)
 
         for entry in cache {
