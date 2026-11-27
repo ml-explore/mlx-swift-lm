@@ -238,10 +238,13 @@ private struct OnyxProtocolDecoder {
                 return text.map(TokenStreamEvent.response)
             case .tool(let recipient):
                 let text = tokenizer.decode(tokenIds: payload, skipSpecialTokens: false)
+                guard offers(recipient) else {
+                    return .rejectedToolCall(rejection(.undeclaredTool, recipient, text))
+                }
                 guard var call = toolParser.parse(content: text, tools: tools),
                     call.function.name == recipient
                 else {
-                    return .protocolError("Rejected Onyx tool frame for recipient \(recipient)")
+                    return .rejectedToolCall(rejection(.malformedSyntax, recipient, text))
                 }
                 // The ATEM parser already enforces required parameters and
                 // typed values; check the full schema before the call leaves.
@@ -253,11 +256,8 @@ private struct OnyxProtocolDecoder {
                         in: tools)
                 {
                     return .rejectedToolCall(
-                        RejectedToolCall(
-                            reason: .invalidArguments,
-                            format: .atem,
-                            toolName: call.function.name,
-                            rawText: text,
+                        rejection(
+                            .invalidArguments, recipient, text,
                             detail: ToolSchemaValidator.describe(violations)))
                 }
                 return .toolCall(
@@ -274,6 +274,24 @@ private struct OnyxProtocolDecoder {
             return .protocolError(message)
         }
         return nil
+    }
+
+    /// Whether the caller supplied a function with this name. Accepts the same
+    /// wrapped and bare schema shapes as the ATEM parser.
+    private func offers(_ name: String) -> Bool {
+        tools?.contains { tool in
+            let function = (tool["function"] as? [String: any Sendable]) ?? tool
+            return function["name"] as? String == name
+        } ?? false
+    }
+
+    private func rejection(
+        _ reason: RejectedToolCall.Reason, _ recipient: String, _ text: String,
+        detail: String? = nil
+    ) -> RejectedToolCall {
+        RejectedToolCall(
+            reason: reason, format: .atem, toolName: recipient, rawText: text,
+            detail: detail ?? reason.diagnosticDetail)
     }
 }
 
