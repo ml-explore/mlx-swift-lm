@@ -4,7 +4,7 @@ import Foundation
 import MLX
 import MLXNN
 
-/// Default-on rollback switch for the Qwen 3.5/3.6 four-projection GDN fusion.
+/// Default-on rollback switch for Qwen 3.5/3.6 fused quantized projections.
 package let qwen35FourGDNEnabled: Bool = {
     let raw = ProcessInfo.processInfo.environment["MLX_QWEN_FOUR_GDN"]?
         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -43,10 +43,9 @@ package struct FusedQuantizedLinearPreparationError: Error, CustomStringConverti
 /// Lifecycle state for a physical projection derived from several registered
 /// quantized linears.
 ///
-/// The cache is intentionally not synchronized. Its only mutating operations
-/// run during model loading or an explicit model update, both of which require
-/// exclusive access. Inference only reads ``fused`` after the model has been
-/// published, avoiding a lock in the token-generation hot path.
+/// Inference reads ``fused`` without locking after ``prepare(enabled:linears:installSourceModules:)``
+/// finishes during model setup. Trace registration is synchronized because segment
+/// and per-layer traces compile lazily under separate locks.
 package final class FusedQuantizedLinearProjectionCache {
     private enum State {
         case unprepared
@@ -55,8 +54,14 @@ package final class FusedQuantizedLinearProjectionCache {
         case ineligible
     }
 
+    private struct TraceEntry {
+        weak var value: (any CompiledTraceInvalidating)?
+    }
+
     private var state = State.unprepared
     package private(set) var fused: QuantizedLinear?
+    private let tracesLock = NSLock()
+    private var traces: [ObjectIdentifier: TraceEntry] = [:]
 
     package init() {}
 
@@ -64,14 +69,60 @@ package final class FusedQuantizedLinearProjectionCache {
         state == .ready && fused != nil
     }
 
-    /// Drop derived state after any source-module or source-parameter update.
-    /// Invalidations caused by installing the cache's own storage-sharing views
-    /// are ignored; the preparation transaction publishes `fused` only after
-    /// every view has been installed successfully.
+    /// The fused projection as compile state for traces that read it.
+    package var traceState: [Module] {
+        fused.map { [$0] } ?? []
+    }
+
+    package func registerTrace(_ trace: any CompiledTraceInvalidating) {
+        tracesLock.withLock {
+            traces[ObjectIdentifier(trace)] = TraceEntry(value: trace)
+        }
+    }
+
+    package func traceState(registering trace: any CompiledTraceInvalidating) -> [Module] {
+        registerTrace(trace)
+        return traceState
+    }
+
+    /// Drop derived state and dependent traces after any source update.
+    /// Invalidations triggered while installing storage-sharing views in ``prepare``
+    /// are ignored.
     package func invalidate() {
         guard state != .preparing else { return }
         fused = nil
         state = .unprepared
+        let registered = tracesLock.withLock {
+            let current = traces.values.compactMap(\.value)
+            traces.removeAll()
+            return current
+        }
+        // Trace setup acquires its own lock first, so invalidate after unlocking.
+        for trace in registered {
+            trace.invalidate()
+        }
+    }
+
+    package func invalidateIfReplacing(parameters: ModuleParameters, keys: Set<String>) {
+        let replacesSource = parameters.flattened().contains { key, _ in
+            guard
+                let root = key.split(
+                    separator: ".", maxSplits: 1, omittingEmptySubsequences: false
+                ).first
+            else {
+                return false
+            }
+            return keys.contains(String(root))
+        }
+        if replacesSource {
+            invalidate()
+        }
+    }
+
+    package func invalidateIfReplacing(moduleKey: String, keys: Set<String>) {
+        if keys.contains(moduleKey) {
+            invalidate()
+        }
     }
 
     /// Build and publish the fused projection once for the current source
