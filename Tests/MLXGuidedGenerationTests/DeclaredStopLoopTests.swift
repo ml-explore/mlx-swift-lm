@@ -66,3 +66,58 @@ struct DeclaredStopLoopTests {
         }
     }
 }
+
+/// An output that the last allowed token completes is complete.
+@Suite(.serialized)
+struct CompleteAtCapTests {
+
+    private static let grammar = #"root ::= "{\"a\":\"" [a-z]* "\"}""#
+    private static let script = #"{"a":"bc"}"#
+
+    /// The script is 10 bytes and ends the grammar at token 10 of 10.
+    @Test func completeAtCapReturns() throws {
+        try Stream.withNewDefaultStream(device: .cpu) {
+            let run = try runLoop(
+                source: .grammar(Self.grammar), policy: .script(Self.script),
+                maxTokens: 10, fastForward: false)
+            #expect(run.error == nil)
+            #expect(run.returnedCount == 10)
+            #expect(run.text == Self.script)
+        }
+    }
+
+    /// The same, with a secondary stop declared to the grammar.
+    @Test func completeAtCapReturnsWithASecondaryStop() throws {
+        try Stream.withNewDefaultStream(device: .cpu) {
+            let run = try runLoop(
+                source: .grammar(Self.grammar), policy: .script(Self.script),
+                maxTokens: 10, eosTokenIds: [0x78], fastForward: false)
+            #expect(run.error == nil)
+            #expect(run.returnedCount == 10)
+            #expect(run.text == Self.script)
+        }
+    }
+
+    /// Fast-forward leaves the last forced token to the sampler, so tokens it
+    /// accepted but did not emit at the cap never complete the output.
+    @Test func fastForwardCutAtCapStillIncomplete() throws {
+        try Stream.withNewDefaultStream(device: .cpu) {
+            let run = try runLoop(
+                source: .grammar(Self.grammar), policy: .script(Self.script),
+                maxTokens: 3, fastForward: true)
+            #expect((run.error as? GuidedGenerationError) == .incompleteOutput)
+        }
+    }
+
+    /// After `a` the grammar can stop; `b` is the cap token and its forced `c`
+    /// is cut. The check must use the state after `ab`, not the mask after `a`.
+    @Test func fastForwardCutAfterStoppableStateStillIncomplete() throws {
+        try Stream.withNewDefaultStream(device: .cpu) {
+            let run = try runLoop(
+                source: .grammar(#"root ::= "a" ("bcd")?"#), policy: .script("abcd"),
+                maxTokens: 2, fastForward: true)
+            #expect((run.error as? GuidedGenerationError) == .incompleteOutput)
+            #expect(run.text == "ab")
+        }
+    }
+}

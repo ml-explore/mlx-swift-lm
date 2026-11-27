@@ -89,7 +89,7 @@ public enum GuidedGenerationLoop {
     ///   - emit: Callback for each text delta. Return `false` to stop.
     /// - Returns: Total number of tokens generated (including FF tokens).
     /// - Throws: `GuidedGenerationError.incompleteOutput` if maxTokens is
-    ///   exhausted before the grammar reaches a stop state.
+    ///   exhausted and the grammar cannot stop after the emitted tokens.
     ///   `GuidedGenerationError.prematureEOS` if the model emits EOS
     ///   before the grammar accepts.
     ///   `GuidedGenerationError.noAllowedToken` if the grammar allows no
@@ -177,6 +177,8 @@ public enum GuidedGenerationLoop {
         var tokenCount = 0
         var grammarStopped = false
         var consumerStopped = false
+        // Fast-forward tokens the grammar accepted but the cap kept out of the output.
+        var unemittedFastForwardCount = 0
         var whitespaceTracker = WhitespaceRunTracker(whitespaceTokenIDs: whitespaceTokenIDs)
 
         // Pre-compute bias arrays used in the zone policy.
@@ -409,8 +411,9 @@ public enum GuidedGenerationLoop {
                 // through `shouldStopAfterFF` and break the outer
                 // `while` after the FF block.
                 var shouldStopAfterFF = false
-                for ffToken in ffTokens {
+                for (index, ffToken) in ffTokens.enumerated() {
                     if tokenCount >= maxTokens {
+                        unemittedFastForwardCount = ffTokens.count - index
                         shouldStopAfterFF = true
                         break
                     }
@@ -519,10 +522,21 @@ public enum GuidedGenerationLoop {
         diagnosticSink?.recordTermination(
             grammarTerminated: grammarStopped, generatedTokenCount: tokenCount)
 
-        // If we exhausted maxTokens without the grammar reaching a stop state,
-        // the output is structurally incomplete (e.g., truncated JSON).
+        // At the cap the output is incomplete (e.g., truncated JSON) unless
+        // the emitted tokens already let the grammar stop.
         if !grammarStopped && tokenCount >= maxTokens {
-            throw GuidedGenerationError.incompleteOutput
+            var completeAtCap = false
+            if !consumerStopped {
+                // Ask the matcher, not the last mask, after dropping the
+                // fast-forward tokens the cap kept out of the output.
+                if unemittedFastForwardCount > 0 {
+                    try constraint.rollback(Int32(unemittedFastForwardCount))
+                }
+                completeAtCap = try constraint.canStop()
+            }
+            if !completeAtCap {
+                throw GuidedGenerationError.incompleteOutput
+            }
         }
 
         return tokenCount
