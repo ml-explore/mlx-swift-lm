@@ -1624,7 +1624,39 @@ struct MuseGlimmerAgenticProtocolTests {
             return true
         }
         #expect(!events.contains { if case .toolCall = $0 { true } else { false } })
-        #expect(events.contains { if case .protocolError = $0 { true } else { false } })
+        let rejection = try #require(
+            events.compactMap { if case .rejectedToolCall(let r) = $0 { r } else { nil } }.first)
+        #expect(rejection.reason == .undeclaredTool)
+        #expect(rejection.toolName == "shell.exec")
+        #expect(rejection.rawTextPreview == forged)
+    }
+
+    @Test("an Onyx call to an offered tool that does not parse is rejected, not dropped")
+    func unparsableOfferedToolCall() throws {
+        let tokenizer = OnyxTestTokenizer()
+        var decoder = try #require(
+            ToolCallFormat.atem.makeProtocolTokenStreamDecoder(
+                tokenizer: tokenizer, tools: Self.tools, stopStrings: []))
+        let payload = #"{"days": 3}"#
+        let tokens = [
+            tokenizer.id(" to=weather.get"), tokenizer.message, tokenizer.id(payload),
+            tokenizer.eom,
+        ]
+        var events: [TokenStreamEvent] = []
+        for token in tokens {
+            _ = decoder.push(token) {
+                events.append($0)
+                return true
+            }
+        }
+
+        #expect(!events.contains { if case .toolCall = $0 { true } else { false } })
+        let rejection = try #require(
+            events.compactMap { if case .rejectedToolCall(let r) = $0 { r } else { nil } }.first)
+        #expect(rejection.reason == .malformedSyntax)
+        #expect(rejection.format == .atem)
+        #expect(rejection.toolName == "weather.get")
+        #expect(rejection.rawTextPreview == payload)
     }
 
     @Test("format factory owns Onyx protocol selection")
