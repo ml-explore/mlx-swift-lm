@@ -172,6 +172,12 @@ To stop a response and keep what it wrote, call `interrupt()` rather than
 cancelling the consumer, which rolls the turn back. The stream finishes normally
 and the next call continues the same cache.
 
+When a `ChatSession` runs tools through `toolDispatch:`, set
+`GenerateParameters.toolCallPolicy.dispatch` to
+`[.whenWritten]` to start each tool call while the model still writes the step,
+or add `.concurrent` to run a step's calls together. See
+[references/tool-calling.md](references/tool-calling.md).
+
 ### Streaming with `ModelContainer.generate(...)`
 
 For lower-level control, prepare `UserInput` and generate directly:
