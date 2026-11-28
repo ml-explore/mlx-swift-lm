@@ -834,6 +834,7 @@ private let groupedDecodeSplitSource = """
         constexpr int G = HQ / HKV;
         const int bk = threadgroup_position_in_grid.x;
         const int split = threadgroup_position_in_grid.y;
+        const int splits = threadgroups_per_grid.y;
         const int b = bk / HKV;
         const int kv_head = bk % HKV;
         const uint tid = thread_position_in_threadgroup.x;
@@ -933,7 +934,7 @@ private let groupedDecodeSplitSource = """
                     total += tl[n] * w;
                     o += tacc[n * D + tid] * w;
                 }
-                const size_t row = (size_t(b) * HQ + kv_head * G + g) * SPLITS + split;
+                const size_t row = (size_t(b) * HQ + kv_head * G + g) * splits + split;
                 partial[row * D + tid] = o;
                 if (tid == 0) {
                     stats[row * 2] = big;
@@ -948,15 +949,16 @@ private let relativeDecodeReduceSource = """
         const int b = bh / HQ;
         const int h = bh % HQ;
         const uint t = thread_position_in_threadgroup.x;
+        const int count = splits[0];
         const float sink = float(sinks[b * sinks_strides[0] + h]);
         float big = sink;
-        for (int s = 0; s < SPLITS; s++) {
-            big = max(big, stats[(size_t(bh) * SPLITS + s) * 2]);
+        for (int s = 0; s < count; s++) {
+            big = max(big, stats[(size_t(bh) * count + s) * 2]);
         }
         float total = fast::exp(sink - big);
         float o = 0.0f;
-        for (int s = 0; s < SPLITS; s++) {
-            const size_t row = size_t(bh) * SPLITS + s;
+        for (int s = 0; s < count; s++) {
+            const size_t row = size_t(bh) * count + s;
             const float w = fast::exp(stats[row * 2] - big);
             total += stats[row * 2 + 1] * w;
             o += partial[row * D + t] * w;
@@ -996,7 +998,8 @@ func inkling2DecodeAttention(
         ("T", q.dtype), ("D", d), ("HQ", hq), ("HKV", hkv), ("R", table.dim(1)),
         ("DR", table.dim(0)), ("WINDOW", window),
     ]
-    // Up to a sliding window, one threadgroup per head is fastest; longer caches are split.
+    // Up to a sliding window, one threadgroup per head is fastest; longer caches are split. The
+    // split count is a runtime value, so a growing cache does not compile new kernels.
     if s <= 1024 {
         let simdgroups = 32
         return kernels.single(
@@ -1007,15 +1010,15 @@ func inkling2DecodeAttention(
     }
     let (simdgroups, keysPerSplit) = (8, 256)
     let splits = (s + keysPerSplit - 1) / keysPerSplit
-    template += [("NSG", simdgroups), ("PER", keysPerSplit), ("SPLITS", splits)]
+    template += [("NSG", simdgroups), ("PER", keysPerSplit)]
     let partial = kernels.split(
         inputs, template: template, grid: (b * hkv * simdgroups * 32, splits, 1),
         threadGroup: (simdgroups * 32, 1, 1),
         outputShapes: [[b * hq * splits, d], [b * hq * splits, 2]],
         outputDTypes: [.float32, .float32])
     return kernels.reduce(
-        [partial[0], partial[1], sinks, gate],
-        template: [("T", q.dtype), ("D", d), ("HQ", hq), ("SPLITS", splits)],
+        [partial[0], partial[1], sinks, gate, MLXArray([Int32(splits)])],
+        template: [("T", q.dtype), ("D", d), ("HQ", hq)],
         grid: (b * hq * d, 1, 1), threadGroup: (d, 1, 1), outputShapes: [[b, hq * d]],
         outputDTypes: [q.dtype]
     )[0]
@@ -1842,7 +1845,7 @@ private final class Inkling2DecodeKernels: @unchecked Sendable {
             header: keyDistanceHeader, ensureRowContiguous: false)
         reduce = MLXFast.metalKernel(
             name: "inkling2_decode_attention_reduce",
-            inputNames: ["partial", "stats", "sinks", "gate"], outputNames: ["out"],
+            inputNames: ["partial", "stats", "sinks", "gate", "splits"], outputNames: ["out"],
             source: relativeDecodeReduceSource, ensureRowContiguous: false)
         attentionPrologue = MLXFast.metalKernel(
             name: "inkling2_attention_prologue",
