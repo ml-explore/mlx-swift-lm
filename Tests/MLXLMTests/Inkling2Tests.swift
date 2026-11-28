@@ -316,6 +316,53 @@ struct Inkling2KernelTests {
     }
 
     @Test(
+        "The shared expert kernels match the gathered quantized matmuls",
+        arguments: [
+            (QuantizationMode.nvfp4, 4, 16), (.mxfp8, 8, 32), (.affine, 4, 64), (.affine, 8, 32),
+        ])
+    func sharedExperts(mode: QuantizationMode, bits: Int, groupSize: Int) {
+        MLXRandom.seed(9)
+        let (rows, d, inner, experts, k) = (5, 128, 64, 6, 3)
+        func quantize(_ shape: [Int]) -> Inkling2ExpertTensors {
+            let dense = (MLXRandom.normal(shape) * 0.1).asType(.bfloat16)
+            let (weight, scales, biases) = MLX.quantized(
+                dense, groupSize: groupSize, bits: bits, mode: mode)
+            let global = mode == .nvfp4 ? MLXRandom.uniform(2000 ..< 3000, [experts]) : nil
+            return .init(
+                weight: weight, scales: scales, biases: biases, globalScale: global,
+                format: .init(
+                    mode: mode, bits: bits, groupSize: groupSize, hasGlobalScale: global != nil))
+        }
+        let gateUp = quantize([experts, 2 * inner, d])
+        let down = quantize([experts, d, inner])
+        let x = MLXRandom.normal([rows, d]).asType(.bfloat16)
+        // Expert 4 serves every row, expert 0 three of them.
+        let indices = MLXArray(
+            [0, 4, 2, 4, 5, 1, 3, 0, 4, 4, 1, 0, 2, 5, 4] as [UInt32]
+        ).reshaped(rows, k)
+        func gathered(_ x: MLXArray, _ experts: Inkling2ExpertTensors) -> MLXArray {
+            gatherQuantizedMM(
+                x, experts.weight, scales: experts.scales, biases: experts.biases,
+                rhsIndices: indices, transpose: true, groupSize: groupSize, bits: bits,
+                mode: mode, globalScale: experts.globalScale
+            ).squeezed(axis: -2)
+        }
+
+        let out = inkling2SharedExperts(
+            x, gateUp: gateUp, down: down, indices: indices,
+            softcaps: MLXArray([Float(4), 25]))
+        let g = gathered(x.reshaped(rows, 1, 1, d), gateUp).asType(.float32)
+        let (gate, up) = (
+            g[.ellipsis, .stride(from: 0, by: 2)], g[.ellipsis, .stride(from: 1, by: 2)]
+        )
+        let activations = (tanh(gate / 4) * 4 * sigmoid(gate) * tanh(up / 25) * 25)
+            .asType(.bfloat16)
+        let expected = gathered(activations.reshaped(rows, k, 1, inner), down)
+        #expect(out.shape == [rows * k, d])
+        #expect(maxDifference(out, expected.reshaped(rows * k, d)) < 5e-2)
+    }
+
+    @Test(
         "The prefill convolution matches the causal convolution of its inputs",
         arguments: [(37, true, false), (2, true, true), (19, false, true), (37, true, true)])
     func rowConvolution(length l: Int, hasState: Bool, experts: Bool) {

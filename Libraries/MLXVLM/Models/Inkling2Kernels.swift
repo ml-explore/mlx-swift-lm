@@ -1741,6 +1741,91 @@ private let expertDownSource =
         }
     """ + expertEpilogueTail
 
+/// For each slot, the slots routed to its expert when it is the expert's first slot, else none:
+/// `plan[slot] = [count, slots...]`.
+private let expertSharePlanSource = """
+        const int j = thread_position_in_grid.x;
+        const int count = threads_per_grid.x;
+        const uint e = indices[j];
+        bool first = true;
+        for (int p = 0; p < j; p++) {
+            first = first && indices[p] != e;
+        }
+        int n = 0;
+        for (int m = j; m < count && first && n < MR; m++) {
+            if (indices[m] == e) {
+                plan[j * (MR + 1) + 1 + n] = m;
+                n++;
+            }
+        }
+        plan[j * (MR + 1)] = n;
+    """
+
+/// ``expertGateUpSource`` for a few rows. The threadgroup of an expert's first slot computes
+/// `CH` channels of every slot routed to that expert, one simdgroup per slot, so the rows those
+/// simdgroups share are read from memory once.
+private let expertGateUpSharedSource = """
+        const uint lane = thread_index_in_simdgroup;
+        const int j = threadgroup_position_in_grid.y;
+        const int n = plan[j * (MR + 1)];
+        const int c0 = threadgroup_position_in_grid.x * CH;
+        const uint e = indices[j];
+        const size_t row = size_t(e) * 2 * I + 2 * c0;
+        const float s = HAS_GS ? global_scale[e] / (448.0f * 6.0f) : 1.0f;
+        for (int m = simdgroup_index_in_threadgroup; m < n; m += NSG) {
+            const int slot = plan[j * (MR + 1) + 1 + m];
+            float acc[2 * CH];
+            for (int r = 0; r < 2 * CH; r++) {
+                acc[r] = 0.0f;
+            }
+            inkling2_rows_dot<BITS, GS, AFFINE, DIN, 2 * CH>(
+                (const device uint8_t*)w + row * (DIN * BITS / 8), scales + row * (DIN / GS),
+                biases + (AFFINE ? row * (DIN / GS) : 0), x + size_t(slot / KE) * DIN, lane,
+                acc);
+            for (int c = 0; c < CH; c++) {
+                const float g = simd_sum(acc[2 * c]);
+                const float u = simd_sum(acc[2 * c + 1]);
+                if (lane == 0) {
+                    const float gate = float(T(g * s));
+                    const float up = float(T(u * s));
+                    const float y = 1.0f / (1.0f + metal::precise::exp(metal::abs(gate)));
+                    const float sig = gate < 0 ? y : 1.0f - y;
+                    const float gc = metal::precise::tanh(gate / caps[0]) * caps[0];
+                    const float uc = metal::precise::tanh(up / caps[1]) * caps[1];
+                    act[size_t(slot) * I + c0 + c] = T(gc * sig * uc);
+                }
+            }
+        }
+    """
+
+/// The down projections of ``expertGateUpSharedSource``'s activations, `ROWS` output channels
+/// per threadgroup, shared the same way. Each expert output rounds to `T`.
+private let expertDownSharedSource = """
+        const uint lane = thread_index_in_simdgroup;
+        const int j = threadgroup_position_in_grid.y;
+        const int n = plan[j * (MR + 1)];
+        const int d0 = threadgroup_position_in_grid.x * ROWS;
+        const uint e = indices[j];
+        const size_t row = size_t(e) * D + d0;
+        const float s = HAS_GS ? global_scale[e] / (448.0f * 6.0f) : 1.0f;
+        for (int m = simdgroup_index_in_threadgroup; m < n; m += NSG) {
+            const int slot = plan[j * (MR + 1) + 1 + m];
+            float acc[ROWS];
+            for (int r = 0; r < ROWS; r++) {
+                acc[r] = 0.0f;
+            }
+            inkling2_rows_dot<BITS, GS, AFFINE, K, ROWS>(
+                (const device uint8_t*)w + row * (K * BITS / 8), scales + row * (K / GS),
+                biases + (AFFINE ? row * (K / GS) : 0), act + size_t(slot) * K, lane, acc);
+            for (int r = 0; r < ROWS; r++) {
+                const float o = simd_sum(acc[r]);
+                if (lane == 0) {
+                    out[size_t(slot) * D + d0 + r] = T(o * s);
+                }
+            }
+        }
+    """
+
 /// A quantized projection of all experts, `[E, N, K * bits / 32]`.
 struct Inkling2ExpertTensors {
     let weight: MLXArray
@@ -1819,6 +1904,52 @@ func inkling2ExpertDown(
     return (out[0], out[1])
 }
 
+/// The routed expert outputs of a few rows, each routed expert's weights read once for all of
+/// them.
+///
+/// - Parameters:
+///   - x: `[N, D]`, at most ``inkling2SharedExpertRows`` rows.
+///   - indices: uint32 `[N, K]`, distinct within a row.
+///   - softcaps: float32 `[2]`, the gate and up softcaps.
+/// - Returns: `[N * K, D]` of `x`'s dtype, in the order of the flattened `indices`.
+func inkling2SharedExperts(
+    _ x: MLXArray, gateUp: Inkling2ExpertTensors, down: Inkling2ExpertTensors,
+    indices: MLXArray, softcaps: MLXArray
+) -> MLXArray {
+    let (rows, k) = (indices.dim(0), indices.dim(1))
+    let slots = rows * k
+    let (din, channels, d) = (x.dim(-1), gateUp.weight.dim(1) / 2, down.weight.dim(1))
+    precondition(rows <= inkling2SharedExpertRows, "at most \(inkling2SharedExpertRows) rows")
+    let kernels = Inkling2DecodeKernels.shared
+    let flat = indices.flattened()
+    let plan = kernels.expertSharePlan(
+        [flat], template: [("MR", inkling2SharedExpertRows)], grid: (slots, 1, 1),
+        threadGroup: (slots, 1, 1), outputShapes: [[slots, inkling2SharedExpertRows + 1]],
+        outputDTypes: [.int32])[0]
+    let (simdgroups, channelTile, outputTile) = (4, 2, 4)
+    let shared: [(String, any KernelTemplateArg)] = [
+        ("NSG", simdgroups), ("MR", inkling2SharedExpertRows),
+    ]
+    let act = kernels.expertGateUpShared(
+        [x] + gateUp.inputs() + [flat, plan, softcaps],
+        template: gateUp.template(x.dtype) + shared + [
+            ("DIN", din), ("I", channels), ("KE", k), ("CH", channelTile),
+        ],
+        grid: (channels / channelTile * simdgroups * 32, slots, 1),
+        threadGroup: (simdgroups * 32, 1, 1),
+        outputShapes: [[slots, channels]], outputDTypes: [x.dtype])[0]
+    return kernels.expertDownShared(
+        [act] + down.inputs() + [flat, plan],
+        template: down.template(x.dtype) + shared + [
+            ("K", channels), ("D", d), ("ROWS", outputTile),
+        ],
+        grid: (d / outputTile * simdgroups * 32, slots, 1), threadGroup: (simdgroups * 32, 1, 1),
+        outputShapes: [[slots, d]], outputDTypes: [x.dtype])[0]
+}
+
+/// The most rows ``inkling2SharedExperts(_:gateUp:down:indices:softcaps:)`` takes.
+let inkling2SharedExpertRows = 8
+
 private final class Inkling2DecodeKernels: @unchecked Sendable {
     static let shared = Inkling2DecodeKernels()
 
@@ -1829,6 +1960,9 @@ private final class Inkling2DecodeKernels: @unchecked Sendable {
     let expertEpilogue: MLXFast.MLXFastKernel
     let expertGateUp: MLXFast.MLXFastKernel
     let expertDown: MLXFast.MLXFastKernel
+    let expertGateUpShared: MLXFast.MLXFastKernel
+    let expertDownShared: MLXFast.MLXFastKernel
+    let expertSharePlan: MLXFast.MLXFastKernel
     let depthMix: MLXFast.MLXFastKernel
     let messageDown: MLXFast.MLXFastKernel
     let messageBlend: MLXFast.MLXFastKernel
@@ -1869,6 +2003,16 @@ private final class Inkling2DecodeKernels: @unchecked Sendable {
                 "weights", "residual", "state", "conv_weight", "divisor",
             ],
             outputNames: ["hidden", "state_out"], source: expertDownSource, header: expertHeader)
+        expertGateUpShared = MLXFast.metalKernel(
+            name: "inkling2_expert_gate_up_shared",
+            inputNames: ["x"] + experts + ["plan", "caps"],
+            outputNames: ["act"], source: expertGateUpSharedSource, header: expertHeader)
+        expertSharePlan = MLXFast.metalKernel(
+            name: "inkling2_expert_share_plan", inputNames: ["indices"], outputNames: ["plan"],
+            source: expertSharePlanSource)
+        expertDownShared = MLXFast.metalKernel(
+            name: "inkling2_expert_down_shared", inputNames: ["act"] + experts + ["plan"],
+            outputNames: ["out"], source: expertDownSharedSource, header: expertHeader)
         depthMix = MLXFast.metalKernel(
             name: "inkling2_depth_mix",
             inputNames: [

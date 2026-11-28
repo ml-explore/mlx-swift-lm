@@ -1201,6 +1201,20 @@ private final class Inkling2Experts: Module {
     /// The expert outputs `[N * K, D]` of the rows of `x` and, when they are sorted by expert,
     /// the row of each output: output `i` of the flattened `indices` is at row `order[i]`.
     func outputs(_ x: MLXArray, _ indices: MLXArray) -> (MLXArray, order: MLXArray?) {
+        // A verify pass routes a few rows to overlapping experts; each is read once for all.
+        let rows = indices.size / indices.dim(-1)
+        let (gateUp, down) = (gateUpProj.tensors, downProj.tensors)
+        let (dims, hidden) = (down.weight.dim(1), gateUp.weight.dim(1) / 2)
+        if (2 ... inkling2SharedExpertRows).contains(rows), hidden % 2 == 0, dims % 4 == 0,
+            Device.defaultDevice().deviceType == .gpu,
+            gateUp.supportsFusedDecode(inputDims: dims),
+            down.supportsFusedDecode(inputDims: hidden)
+        {
+            let out = inkling2SharedExperts(
+                x.reshaped(rows, dims), gateUp: gateUp, down: down,
+                indices: indices.reshaped(rows, -1), softcaps: softcaps.value)
+            return (out, nil)
+        }
         var x = MLX.expandedDimensions(x, axes: [-2, -3])
         let sort = indices.size >= 64
         var idx = indices
@@ -1209,9 +1223,10 @@ private final class Inkling2Experts: Module {
             let sorted = gatherSort(x: x, indices: indices)
             (x, idx, inverseOrder) = (sorted.0, sorted.1, sorted.2)
         }
-        let gateUp = gateUpProj(x, idx, sorted: sort)
+        let gateUpOutput = gateUpProj(x, idx, sorted: sort)
         let activated = activation(
-            gateUp[.ellipsis, .stride(from: 0, by: 2)], gateUp[.ellipsis, .stride(from: 1, by: 2)])
+            gateUpOutput[.ellipsis, .stride(from: 0, by: 2)],
+            gateUpOutput[.ellipsis, .stride(from: 1, by: 2)])
         let out = downProj(activated, idx, sorted: sort)
         return (out.reshaped(-1, out.dim(-1)), inverseOrder)
     }
