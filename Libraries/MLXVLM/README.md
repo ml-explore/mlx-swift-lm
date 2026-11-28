@@ -72,6 +72,7 @@ The following models have been tried:
 - mlx-community/gemma-3-27b-it-qat-4bit
 - HuggingFaceTB/SmolVLM2-500M-Video-Instruct-mlx
 - mlx-community/Muse-Glimmer-30B-4bit
+- mlx-community/Inkling-2-Mini-4bit
 
 Currently supported model types are:
 
@@ -83,6 +84,7 @@ Currently supported model types are:
 - gemma3
 - smolvlm
 - muse_glimmer
+- inkling2, inkling2_loop
 - diffusion_gemma
 
 ## DiffusionGemma
@@ -105,6 +107,35 @@ Checkpoint preparation maps text and vision tensors together with their file
 metadata and per-layer quantization settings. Conflicting aliases fail loading,
 and unknown tensors remain visible to strict parameter validation. Untied output
 projections require their own checkpoint weights.
+
+## Inkling 2
+
+Inkling 2 Mini (`inkling2_loop`) runs its middle 12 layers three times per token, and
+Inkling 2 Small (`inkling2`) runs each layer once. Both load through `VLMModelFactory`,
+from mlx-lm conversions or from Thinking Machines' own repositories, such as
+`thinkingmachines/Inkling-2-Mini`, whose experts stay in NVFP4 and MXFP8.
+The vision tower loads on the first image, so text-only use does not pay for it.
+
+The chat template sets the thinking effort, 0.9 by default. Pass another one in
+`additionalContext`, for example `["reasoning_effort": "low"]`: a name (`none`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max`) or a number from 0 to 0.99.
+Thinking, answers and tool calls stream as reasoning, text and `ToolCall` events
+through the `.inkling` tool-call format. A thinking budget closes the thinking frame
+with `<|end_message|>`, and the model answers in its next frame.
+
+Thinking Machines ship a DSpark draft in `mtp.safetensors`. With that file beside the
+weights, call `Inkling2DSparkRegistration.register()` and load the drafter from the
+model's directory with `MTPDrafterModelFactory.visionLanguage`. It drafts up to 7 tokens
+per round, greedy or sampled. Every verify pass reads the experts of all its tokens, so
+measure on your machine: on an M6 Mac mini, 4-bit Mini decodes about 40 tokens per second
+without the draft and 35 with 2 drafts per round (`blockSize: 3`). The draft is faster only
+on repetitive text, such as counting.
+
+Images keep their native resolution, padded to 40-pixel blocks, and each block is
+one image token. Set `UserInput.Processing.maxPixels` to bound the image tokens.
+KV caches can be full precision or affine quantized (`kvBits`); TurboQuant and the
+variance-normalized caches are not supported. Rotating capacity can retain a tail,
+but not a pinned prefix.
 
 See [llm-tool](../../Tools/llm-tool)
 

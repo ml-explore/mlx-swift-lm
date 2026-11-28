@@ -1836,7 +1836,9 @@ public func maybeTurboQuantizeKVCache(
 
     var awaitsCompressionStart = false
     KVCacheTree.rewrite(&cache) { leaf in
-        guard case .simple(let simple) = leaf.kind else { return leaf.cache }
+        guard case .simple(let simple) = leaf.kind, !(simple is DirectAttentionKVCache) else {
+            return leaf.cache
+        }
         guard simple.offset > quantizedKVStart else {
             awaitsCompressionStart = true
             return simple

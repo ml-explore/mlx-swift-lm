@@ -634,6 +634,37 @@ public class KVCacheSimple: BaseKVCache, CustomDebugStringConvertible {
     }
 }
 
+/// A full-precision KV cache that the model's own attention kernels read directly.
+///
+/// It can become an affine ``QuantizedKVCache``. TurboQuant and variance-normalized strategies
+/// leave it in full precision, because those caches compute attention themselves.
+public final class DirectAttentionKVCache: KVCacheSimple {
+    public override class var serializedClassName: String? { "DirectAttentionKVCache" }
+
+    public override class func restore(
+        state: [MLXArray], metaState: [String]
+    ) throws -> any KVCache {
+        try validatePromptCache(
+            className: "DirectAttentionKVCache", state: state, stateCounts: [0, 2],
+            metadata: metaState, metadataCounts: [1])
+        let cache = DirectAttentionKVCache()
+        if !state.isEmpty {
+            cache.state = state
+        }
+        return cache
+    }
+
+    public override func copy() -> any KVCache {
+        let new = DirectAttentionKVCache()
+        new.step = step
+        let s = state
+        if !s.isEmpty {
+            new.state = s.map { $0[.ellipsis] }
+        }
+        return new
+    }
+}
+
 /// Rotating KV cache for sliding window attention
 public class RotatingKVCache: BaseKVCache, KVCacheAttentionProtocol, CustomDebugStringConvertible {
     public override class var serializedClassName: String? { "RotatingKVCache" }
@@ -843,6 +874,18 @@ public class RotatingKVCache: BaseKVCache, KVCacheAttentionProtocol, CustomDebug
 
     public override func currentKeyValues() -> (keys: MLXArray, values: MLXArray)? {
         logicalView(tail: .max)
+    }
+
+    /// The slot after the newest key when the last ``update(keys:values:)`` returned the
+    /// whole ring out of temporal order, or `nil` when it returned the keys oldest first.
+    /// The ring holds the slots after the pinned `keep` prefix.
+    ///
+    /// Models with relative position biases use it to find the distance of each key.
+    package var ringWriteIndex: Int? {
+        guard rewindCapacity == 0, wrapped, let keys, idx < keys.dim(2) else {
+            return nil
+        }
+        return idx
     }
 
     private func updateConcat(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
@@ -2101,6 +2144,89 @@ public final class RewindableConvolutionCache: MambaCache {
     }
 }
 
+/// The states of several short convolutions, rewindable inside their last write.
+///
+/// Each slot holds the last `stateLength` inputs of one convolution. A write of at most
+/// ``maximumRewind`` positions passes the windows it convolved, so a rejected speculative suffix
+/// rewinds exactly. Decode and prefill writes pass only the next states and keep nothing else.
+///
+/// The windows are transient: a copy keeps them, a saved prompt cache restores as an
+/// ``ArraysCache``.
+public final class ConvolutionStatesCache: ArraysCache {
+    public let stateLength: Int
+    public let maximumRewind: Int
+
+    /// Per slot, the previous state followed by the inputs of the last write.
+    private var windows: [MLXArray]?
+    /// Positions of the last write that are still kept.
+    private var rewindable = 0
+
+    public init(slots: Int, stateLength: Int, maximumRewind: Int = 16) {
+        precondition(stateLength > 0 && maximumRewind > 0)
+        self.stateLength = stateLength
+        self.maximumRewind = maximumRewind
+        super.init(size: slots)
+    }
+
+    /// Whether a write of `count` positions keeps its windows. Ragged batches never do.
+    public func keepsWindows(count: Int) -> Bool {
+        count <= maximumRewind && leftPadding == nil && lengths == nil
+    }
+
+    /// Commits a write of `count` positions.
+    ///
+    /// - Parameters:
+    ///   - states: the next state of each slot, `[B, stateLength, C]`.
+    ///   - windows: when ``keepsWindows(count:)``, each slot's previous state followed by the
+    ///     write's inputs, `[B, stateLength + count, C]`.
+    ///   - count: the positions the write adds.
+    public func commit(states: [MLXArray], windows: [MLXArray]?, count: Int) {
+        precondition(states.count == slotCount, "one state per convolution")
+        if let windows, keepsWindows(count: count) {
+            precondition(
+                windows.count == slotCount
+                    && windows.allSatisfy { $0.dim(1) == stateLength + count },
+                "each window holds the previous state and the write")
+            self.windows = windows
+            rewindable = count
+        } else {
+            self.windows = nil
+            rewindable = 0
+        }
+        for (slot, state) in states.enumerated() { self[slot] = state }
+        offset += count
+        advance(count)
+    }
+
+    public override var isTrimmable: Bool { true }
+
+    public override func isTrimmable(after positions: Int) -> Bool {
+        positions >= 0 && positions <= maximumRewind
+    }
+
+    public override var maxTrimCount: Int { rewindable }
+
+    @discardableResult
+    public override func trim(_ n: Int) -> Int {
+        guard n > 0, n <= rewindable, let windows else { return 0 }
+        rewindable -= n
+        for (slot, window) in windows.enumerated() {
+            self[slot] = contiguous(window[0..., rewindable ..< (rewindable + stateLength), 0...])
+        }
+        offset -= n
+        return n
+    }
+
+    public override func copy() -> any KVCache {
+        let copy = ConvolutionStatesCache(
+            slots: slotCount, stateLength: stateLength, maximumRewind: maximumRewind)
+        copyContents(to: copy)
+        copy.windows = windows
+        copy.rewindable = rewindable
+        return copy
+    }
+}
+
 /// Composite cache that manages multiple sub-caches
 public class CacheList: BaseKVCache {
     public override class var serializedClassName: String? { "CacheList" }
@@ -2790,6 +2916,9 @@ private func canRewindConvolutionCache(_ cache: KVCache, positions: Int) -> Bool
     if let cache = cache as? RewindableConvolutionCache {
         return cache.canRewind(positions)
     }
+    if let cache = cache as? ConvolutionStatesCache {
+        return positions <= cache.maxTrimCount
+    }
     if let cache = cache as? CacheList {
         return cache.children.allSatisfy { canRewindConvolutionCache($0, positions: positions) }
     }
@@ -3029,7 +3158,9 @@ func maybeVarianceNormalizeKVCache(
 ) -> Bool {
     var awaitsCompressionStart = false
     KVCacheTree.rewrite(&cache) { leaf in
-        guard case .simple(let simple) = leaf.kind else { return leaf.cache }
+        guard case .simple(let simple) = leaf.kind, !(simple is DirectAttentionKVCache) else {
+            return leaf.cache
+        }
         guard simple.offset > compressionStart else {
             awaitsCompressionStart = true
             return simple

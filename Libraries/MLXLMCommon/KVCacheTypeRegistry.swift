@@ -35,6 +35,7 @@ final class KVCacheTypeRegistry: @unchecked Sendable {
         try! register(QuantizedKVCache.self)
         try! register(VarianceNormalizedKVCache.self)
         try! register(ChunkedKVCache.self)
+        try! register(DirectAttentionKVCache.self)
         try! register(ArraysCache.self)
         try! register(MambaCache.self)
         try! register(RewindableConvolutionCache.self)

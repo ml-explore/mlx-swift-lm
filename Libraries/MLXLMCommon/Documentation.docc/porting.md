@@ -19,7 +19,9 @@ do development _in_ mlx-swift-lm.
 Checkpoint namespaces can differ from runtime module paths. Implement
 ``BaseLanguageModel/prepareCheckpoint(_:)`` with ``CheckpointNameMapping`` for
 renames and exclusions, or ``CheckpointComponent`` to select a component from a
-larger checkpoint. These operations preserve source metadata and per-layer
+larger checkpoint. A Python `sanitize` that renames with a table of `re.sub`
+calls ports row by row to `.replaceMatches(pattern, with: template)` rules.
+These operations preserve source metadata and per-layer
 precision. Keep architecture-specific numeric conversions in the model's hook.
 See <doc:model-compatibility> for the loading contract and validation rules.
 

@@ -46,6 +46,35 @@ struct ModelCheckpointTests {
     }
 
     @Test
+    func patternRulesRunInOrderOnTensorsAndLayerSettings() throws {
+        let mapping = CheckpointNameMapping([
+            .replaceMatches(#"^model\.llm\."#, with: "model.language_model."),
+            .replaceMatches(
+                #"\.attn_res\.mlp_queries\.(\d+)$"#, with: ".layers.$1.mlp_input.query"),
+            .replaceMatches(#"\.(q|k)_norm\."#, with: ".$1_layernorm."),
+        ])
+        let checkpoint = ModelCheckpoint(
+            weights: [
+                "model.llm.attn_res.mlp_queries.12": MLXArray(1),
+                "model.llm.layers.3.k_norm.weight": MLXArray(2),
+                "lm_head.weight": MLXArray(3),
+            ],
+            perLayerQuantization: .init(perLayerQuantization: [
+                "model.llm.layers.3.k_norm": .skip
+            ]))
+        let mapped = try checkpoint.mapNames(using: mapping)
+        #expect(
+            Set(mapped.weights.keys) == [
+                "model.language_model.layers.12.mlp_input.query",
+                "model.language_model.layers.3.k_layernorm.weight", "lm_head.weight",
+            ])
+        // A layer setting names a module, so the parameter-name rule leaves it.
+        #expect(
+            mapped.perLayerQuantization?.perLayerQuantization.keys.first
+                == "model.language_model.layers.3.k_norm")
+    }
+
+    @Test
     func tensorAliasesCannotOverwriteEachOther() {
         let checkpoint = ModelCheckpoint(weights: [
             "a.weight": MLXArray(1), "b.weight": MLXArray(2),

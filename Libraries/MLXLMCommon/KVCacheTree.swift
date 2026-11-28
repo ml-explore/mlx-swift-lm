@@ -63,7 +63,8 @@ struct KVCacheLeaf {
     /// mixed cache topologies.
     var participatesInTurboQuantBoundaryProtection: Bool {
         switch kind {
-        case .simple, .affine, .turboQuant: true
+        case .simple(let simple): !(simple is DirectAttentionKVCache)
+        case .affine, .turboQuant: true
         case .recurrent, .rotating, .varianceNormalized, .unsupported: false
         }
     }
@@ -91,6 +92,9 @@ struct KVCacheLeaf {
                     requested: affine.groupSize,
                     keyHeadDim: state[0].dim(3),
                     valueHeadDim: state[1].dim(3)) != nil
+            case .turboQuant where simple is DirectAttentionKVCache,
+                .varianceNormalized where simple is DirectAttentionKVCache:
+                return false
             case .turboQuant(let turbo):
                 guard protectedPaths.contains(path) || turbo.keyPrecision == .affineEightBit
                 else { return true }
