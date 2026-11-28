@@ -25,24 +25,32 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
 
         private let requiresUserQuery: Bool
         private let toolCallPrefix: String
+        private let toolCallSuffix: String
         private let rejectUserAfterTool: Bool
         private let toolCallPasses: Int
+        private let onToolCallsWritten: (@Sendable () -> Void)?
         private let plainScript = "It is sunny in Paris today."
         private var pass = 0
+        private var reportedToolCallsWritten = false
 
         init(
             requiresUserQuery: Bool = true, toolCallPrefix: String = "",
-            rejectUserAfterTool: Bool = false, toolCallPasses: Int = 1
+            toolCallSuffix: String = "",
+            rejectUserAfterTool: Bool = false, toolCallPasses: Int = 1,
+            onToolCallsWritten: (@Sendable () -> Void)? = nil
         ) {
             self.requiresUserQuery = requiresUserQuery
             self.toolCallPrefix = toolCallPrefix
+            self.toolCallSuffix = toolCallSuffix
             self.rejectUserAfterTool = rejectUserAfterTool
             self.toolCallPasses = toolCallPasses
+            self.onToolCallsWritten = onToolCallsWritten
         }
 
         private var toolCallScript: String {
             toolCallPrefix
                 + #"<tool_call>{"name": "get_weather", "arguments": {"city": "Paris"}}</tool_call>"#
+                + toolCallSuffix
         }
 
         let vocabularySize = 100
@@ -85,7 +93,13 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
 
         func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
             let script = pass <= toolCallPasses ? toolCallScript : plainScript
-            return String(script.prefix(min(tokenIds.count * 4, script.count)))
+            let text = String(script.prefix(min(tokenIds.count * 4, script.count)))
+            // Runs on the generation thread, before the parser sees the last call.
+            if script == toolCallScript, text == script, !reportedToolCallsWritten {
+                reportedToolCallsWritten = true
+                onToolCallsWritten?()
+            }
+            return text
         }
 
         func convertTokenToId(_ token: String) -> Int? { 1 }
@@ -148,6 +162,14 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
             defer { lock.unlock() }
             return calls
         }
+    }
+
+    private final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+
+        func set() { lock.withLock { value = true } }
+        var isSet: Bool { lock.withLock { value } }
     }
 
     private static func makeContext(
@@ -239,6 +261,239 @@ public class ChatSessionToolRoundTripTests: XCTestCase {
         XCTAssertEqual(toolCalls.count, 1)
         let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: any Sendable])
         XCTAssertEqual(function["name"] as? String, "get_weather")
+    }
+
+    func testWhenWrittenConcurrentDispatchOverlapsGenerationAndKeepsCallOrder() async throws {
+        let log = MessageLog()
+        let romeStarted = DispatchSemaphore(value: 0)
+        let parisStarted = DispatchGate()
+        let overlappedGeneration = Flag()
+        let romeCall =
+            #"<tool_call>{"name": "get_weather", "arguments": {"city": "Rome"}}</tool_call>"#
+        // Holds the step open once both calls are written. Only a call that
+        // started while the model generated can release it.
+        let tokenizer = ScriptedToolCallTokenizer(
+            toolCallPrefix: romeCall,
+            onToolCallsWritten: {
+                if romeStarted.wait(timeout: .now() + 10) == .success {
+                    overlappedGeneration.set()
+                }
+            })
+        let context = Self.makeContext(
+            tokenizer: tokenizer,
+            messageGenerator: RecordingMessageGenerator(log: log))
+
+        let session = ChatSession(
+            context,
+            generateParameters: GenerateParameters(
+                maxTokens: 48, toolCallPolicy: .init(dispatch: [.whenWritten, .concurrent])),
+            tools: [Self.weatherTool],
+            toolDispatch: { call in
+                guard case .string(let city) = call.function.arguments["city"] else {
+                    return "unknown"
+                }
+                if city == "Rome" {
+                    romeStarted.signal()
+                    // Rome ends only after Paris starts, so the calls must overlap.
+                    await parisStarted.wait()
+                } else {
+                    await parisStarted.release()
+                }
+                return "\(city) is sunny"
+            })
+
+        _ = try await session.respond(to: "What's the weather in Rome and Paris?")
+
+        XCTAssertTrue(overlappedGeneration.isSet, "Rome must start while the step generates")
+        let restart = try XCTUnwrap(log.all.last)
+        XCTAssertEqual(
+            restart.filter { $0.role == .tool }.map(\.content),
+            ["Rome is sunny", "Paris is sunny"])
+    }
+
+    func testRejectedCallCancelsCallsStartedWhenWritten() async throws {
+        let romeStarted = DispatchSemaphore(value: 0)
+        let romeCancelled = expectation(description: "Rome is cancelled")
+        let parisStarted = expectation(description: "Paris never starts")
+        parisStarted.isInverted = true
+        // The undeclared call is parsed last, after Rome has started.
+        let tokenizer = ScriptedToolCallTokenizer(
+            toolCallPrefix:
+                #"<tool_call>{"name": "get_weather", "arguments": {"city": "Rome"}}</tool_call>"#,
+            toolCallSuffix: #"<tool_call>{"name": "get_time", "arguments": {}}</tool_call>"#,
+            onToolCallsWritten: { _ = romeStarted.wait(timeout: .now() + 10) })
+        let context = Self.makeContext(
+            tokenizer: tokenizer, messageGenerator: DefaultMessageGenerator())
+
+        let session = ChatSession(
+            context,
+            generateParameters: GenerateParameters(maxTokens: 64),
+            tools: [Self.weatherTool],
+            toolDispatch: { call in
+                guard call.function.arguments["city"] == .string("Rome") else {
+                    parisStarted.fulfill()
+                    return "Paris is sunny"
+                }
+                romeStarted.signal()
+                do {
+                    try await Task.sleep(for: .seconds(60))
+                } catch {
+                    romeCancelled.fulfill()
+                    throw error
+                }
+                return "Rome is sunny"
+            })
+        session.generateParameters.toolCallPolicy.dispatch = [.whenWritten]
+
+        do {
+            _ = try await session.respond(to: "What's the weather in Rome and Paris?")
+            XCTFail("expected the undeclared call to end the response")
+        } catch let error as RejectedToolCallError {
+            XCTAssertEqual(error.rejection.toolName, "get_time")
+        }
+        await fulfillment(of: [romeCancelled, parisStarted], timeout: 1)
+    }
+
+    /// Renders each message to fixed tokens, so a longer transcript extends a
+    /// shorter one exactly. Steps without a tool result write two calls.
+    private final class FixedTemplateTokenizer: MLXLMCommon.Tokenizer, @unchecked Sendable {
+        private let lock = NSLock()
+        private var answersTools = false
+        private var rendered: [[Int]] = []
+        private let calls =
+            #"<tool_call>{"name": "get_weather", "arguments": {"city": "Rome"}}</tool_call>"#
+            + #"<tool_call>{"name": "get_weather", "arguments": {"city": "Paris"}}</tool_call>"#
+        private let answer = "Both are sunny."
+
+        var renders: [[Int]] { lock.withLock { rendered } }
+        var bosToken: String? = nil
+        var eosToken: String? = nil
+        var unknownToken: String? = nil
+
+        func applyChatTemplate(
+            messages: [[String: any Sendable]],
+            tools: [[String: any Sendable]]?,
+            additionalContext: [String: any Sendable]?
+        ) throws -> [Int] {
+            let roles = ["system": 1, "user": 2, "assistant": 3, "tool": 4]
+            var tokens: [Int] = []
+            for message in messages {
+                let text =
+                    (message["content"] as? String ?? "")
+                    + String(repeating: "#", count: (message["tool_calls"] as? [Any])?.count ?? 0)
+                tokens.append(roles[message["role"] as? String ?? ""] ?? 5)
+                tokens += text.unicodeScalars.map { Int($0.value % 80) + 10 }
+                tokens.append(95)
+            }
+            tokens.append(3)
+            lock.withLock {
+                answersTools = messages.contains { $0["role"] as? String == "tool" }
+                rendered.append(tokens)
+            }
+            return tokens
+        }
+
+        func encode(text: String, addSpecialTokens: Bool) -> [Int] { [1] }
+
+        func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+            let script = lock.withLock { answersTools } ? answer : calls
+            return String(script.prefix(min(tokenIds.count * 4, script.count)))
+        }
+
+        func convertTokenToId(_ token: String) -> Int? { 1 }
+        func convertIdToToken(_ id: Int) -> String? { "x" }
+    }
+
+    /// Runs one response with two calls and returns the last step's report.
+    private func respondWithTwoCalls(
+        _ options: ToolDispatchOptions, tokenizer: FixedTemplateTokenizer
+    ) async throws -> (info: GenerateCompletionInfo, results: [String]) {
+        let log = MessageLog()
+        let romeReturned = DispatchGate()
+        let session = ChatSession(
+            Self.makeContext(
+                tokenizer: tokenizer, messageGenerator: RecordingMessageGenerator(log: log)),
+            generateParameters: GenerateParameters(
+                maxTokens: 48, toolCallPolicy: .init(dispatch: options)),
+            tools: [Self.weatherTool],
+            toolDispatch: { call in
+                guard call.function.arguments["city"] == .string("Paris") else {
+                    await romeReturned.release()
+                    return "Rome is sunny"
+                }
+                // Paris still runs while the session handles Rome's result.
+                await romeReturned.wait()
+                try await Task.sleep(for: .milliseconds(50))
+                return "Paris is sunny"
+            })
+
+        var info: GenerateCompletionInfo?
+        for try await generation in session.streamDetails(
+            to: "Weather in Rome and Paris?", images: [], videos: [])
+        {
+            if case .info(let completion) = generation { info = completion }
+        }
+        let results = try XCTUnwrap(log.all.last).filter { $0.role == .tool }.map(\.content)
+        return (try XCTUnwrap(info), results)
+    }
+
+    func testPrefillResultLeavesOnlyTheLastResultToTheNextStep() async throws {
+        let tokenizer = FixedTemplateTokenizer()
+        let (info, results) = try await respondWithTwoCalls(
+            [.concurrent, .prefillResult], tokenizer: tokenizer)
+        XCTAssertEqual(results, ["Rome is sunny", "Paris is sunny"])
+
+        // Renders: the first step, Rome's result with and without the next call,
+        // then the step that answers both results.
+        let renders = tokenizer.renders
+        guard renders.count == 4 else {
+            return XCTFail("expected 4 renders, got \(renders.count)")
+        }
+        let throughRome = renders[1].dropLast()
+        XCTAssertEqual(Array(renders[2].prefix(throughRome.count)), Array(throughRome))
+        // The step that answers prefills only Paris's result.
+        XCTAssertEqual(info.cachedPromptTokenCount, throughRome.count)
+        XCTAssertEqual(info.promptTokenCount, renders[3].count - throughRome.count)
+
+        // Without the option the next step prefills both results.
+        let baseline = try await respondWithTwoCalls(
+            [.concurrent], tokenizer: FixedTemplateTokenizer())
+        XCTAssertEqual(baseline.results, results)
+        XCTAssertLessThan(baseline.info.cachedPromptTokenCount, throughRome.count)
+    }
+
+    func testApplicationPrefillsResultsWhileItsLaterToolsRun() async throws {
+        let tokenizer = FixedTemplateTokenizer()
+        let session = ChatSession(
+            Self.makeContext(tokenizer: tokenizer, messageGenerator: DefaultMessageGenerator()),
+            generateParameters: GenerateParameters(maxTokens: 48),
+            tools: [Self.weatherTool])
+
+        var calls: [ToolCall] = []
+        for try await generation in session.streamDetails(
+            to: "Weather in Rome and Paris?", images: [], videos: [])
+        {
+            if case .toolCall(let call) = generation { calls.append(call) }
+        }
+        guard calls.count == 2 else { return XCTFail("expected 2 calls, got \(calls.count)") }
+        let rome = Chat.Message.tool("Rome is sunny", id: calls[0].id, name: "get_weather")
+        let paris = Chat.Message.tool("Paris is sunny", id: calls[1].id, name: "get_weather")
+
+        // The application runs Paris itself; Rome has returned.
+        let prefilled = try await session.prefill(toolResults: [rome], before: calls[1])
+
+        var info: GenerateCompletionInfo?
+        for try await generation in session.streamDetails(to: [rome, paris]) {
+            if case .info(let completion) = generation { info = completion }
+        }
+        let renders = tokenizer.renders
+        guard renders.count == 4 else {
+            return XCTFail("expected 4 renders, got \(renders.count)")
+        }
+        let throughRome = renders[1].count - 1
+        XCTAssertGreaterThan(prefilled, 0)
+        XCTAssertEqual(info?.cachedPromptTokenCount, throughRome)
+        XCTAssertEqual(info?.promptTokenCount, renders[3].count - throughRome)
     }
 
     func testImmediateSteeringAfterToolWaitsForAssistant() async throws {

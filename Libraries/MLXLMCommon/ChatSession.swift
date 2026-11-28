@@ -307,6 +307,100 @@ public final class ChatSession {
             messages.append(message)
             return true
         }
+
+        /// Prefills the tokens of a tool-result prompt that the next result cannot change.
+        ///
+        /// It renders the transcript with `results`, and again with a placeholder for
+        /// `next`, and prefills the tokens both renders share. It decides as a response
+        /// does, so the response that follows only appends. Media and model state skip it.
+        ///
+        /// - Parameter render: renders messages that follow the leading messages.
+        /// - Returns: the number of tokens prefilled.
+        @discardableResult
+        mutating func prefill(
+            _ results: [Chat.Message], before next: ToolCall,
+            into cache: KVCacheStorage, state: inout LMOutput.State?,
+            model: any LanguageModel, parameters: PrefillParameters,
+            policy: PromptCacheReusePolicy, format: ToolCallFormat?,
+            render: ([Chat.Message]) async throws -> LMInput
+        ) async throws -> Int {
+            let messages = self.messages + results
+            guard state == nil, self.messages.last?.tool?.calls?.isEmpty == false,
+                !messages.contains(where: {
+                    !$0.images.isEmpty || !$0.videos.isEmpty || !$0.audios.isEmpty
+                })
+            else { return 0 }
+
+            let withResults = try await render(messages)
+            let withNext = try await render(
+                messages + [.tool("", id: next.id, name: next.function.name)])
+            guard withResults.text.mask == nil, withNext.text.mask == nil else { return 0 }
+            let stable = zip(
+                withResults.text.tokens.asArray(Int.self), withNext.text.tokens.asArray(Int.self)
+            ).prefix { $0 == $1 }.map(\.0)
+
+            let checkpoint = checkpoints.longest(prefixing: stable)
+            let decision = policy.decide(
+                turn: PromptCacheTurn(
+                    promptTokens: stable,
+                    isToolResultContinuation: transcriptBuiltCache,
+                    previousGenerationUncommittedTokens: uncommittedTokens,
+                    structuredToolCallCount: format?.promptCacheStructuredToolCallCount(
+                        in: messages)),
+                cache: PromptCacheState(
+                    cachedTokens: cachedTokens,
+                    processedTokenCount: cache.processedTokenCount,
+                    mainCacheIsAligned: cache.processedTokenCount == cachedTokens.count,
+                    maxTrimCount: cache.cache.map(\.maxTrimCount).min() ?? 0,
+                    checkpointLength: checkpoint?.tokens.count))
+
+            let start: Int
+            switch decision {
+            // A protocol rule keeps tokens the render cannot reproduce. The response
+            // could not extend a cache prefilled past them.
+            case .appendSuffix(let suffixStart, let represented) where represented == stable:
+                start = suffixStart
+            case .trimToCommonPrefix(let length, let trimCount):
+                guard cache.trim(trimCount) == trimCount, cache.processedTokenCount == length
+                else {
+                    // A partial trim leaves no ledger; the response rebuilds.
+                    cachedTokens.removeAll()
+                    return 0
+                }
+                start = length
+            case .restoreCheckpoint(let length):
+                guard let checkpoint, cachedTokens.starts(with: checkpoint.tokens) else {
+                    return 0
+                }
+                guard cache.restore(checkpoint.prefill.cache) else {
+                    cachedTokens.removeAll()
+                    return 0
+                }
+                state = checkpoint.prefill.state
+                start = length
+            default:
+                return 0
+            }
+            cachedTokens = Array(stable.prefix(start))
+            uncommittedTokens.removeAll()
+            checkpoints.keep(prefixing: cachedTokens)
+
+            // If the next result changes these tokens after all, the response must be
+            // able to trim them.
+            let suffix = Array(stable[start...])
+            guard !suffix.isEmpty, cache.cache.allSatisfy({ $0.isTrimmable(after: suffix.count) })
+            else { return 0 }
+
+            var parameters = parameters
+            parameters.progress = nil
+            cachedTokens.removeAll()
+            state = try model.prefill(
+                LMInput(tokens: MLXArray(suffix)), into: cache, state: state,
+                parameters: parameters)
+            eval(cache.cache)
+            cachedTokens = stable
+            return suffix.count
+        }
     }
 
     private struct AssistantGeneration {
@@ -496,6 +590,9 @@ public final class ChatSession {
     /// Automatic dispatch is fail-closed: only calls naming a function declared
     /// in ``tools`` can reach this callback. If `tools` is `nil` or empty, every
     /// tool-call-shaped model output is rejected without invoking the callback.
+    ///
+    /// ``ToolCallPolicy/dispatch`` in ``generateParameters`` sets when and how
+    /// the calls run. See <doc:tool-dispatch>.
     public var toolDispatch: (@Sendable (ToolCall) async throws -> String)?
 
     /// Speculative decoding configuration, nil if disabled.
@@ -2003,7 +2100,10 @@ public final class ChatSession {
                             generation = try defaultGeneration()
                         }
 
-                        var pendingToolCalls: [ToolCall] = []
+                        var toolCalls = toolDispatch.map {
+                            ToolCallBatch(
+                                options: generateParameters.toolCallPolicy.dispatch, dispatch: $0)
+                        }
                         var assistant = AssistantGeneration(
                             prefilledReasoningStartDelimiter: prefilledReasoningStartDelimiter)
 
@@ -2026,10 +2126,12 @@ public final class ChatSession {
                             if let item = event.generation {
                                 assistant.consume(item)
 
-                                if let toolCall = item.toolCall, toolDispatch != nil {
-                                    pendingToolCalls.append(toolCall)
+                                if let toolCall = item.toolCall, toolCalls != nil {
+                                    toolCalls?.append(toolCall)
                                     continue
                                 }
+                                // The step will throw, so stop the calls it already started.
+                                if item.rejectedToolCall != nil { toolCalls?.cancel() }
                             }
                             if let value = transform(event), !emit(value) { break }
                         }
@@ -2102,20 +2204,34 @@ public final class ChatSession {
                         }
 
                         // dispatch all tool calls from this generation pass
-                        if let toolDispatch, !pendingToolCalls.isEmpty,
-                            !Task.isCancelled
-                        {
+                        if let batch = toolCalls.take(), !batch.isEmpty, !Task.isCancelled {
+                            let calls = batch.calls
                             if conversation == nil {
-                                pendingMessages.append(
-                                    .assistant("", toolCalls: pendingToolCalls))
+                                pendingMessages.append(.assistant("", toolCalls: calls))
                             }
-                            for toolCall in pendingToolCalls {
-                                try Task.checkCancellation()
-                                let toolResult = try await toolDispatch(toolCall)
-                                let result = Chat.Message.tool(
-                                    toolResult, id: toolCall.id, name: toolCall.function.name)
+                            try await batch.results { result in
                                 pendingMessages.append(result)
                                 dispatchedResults.append(result)
+                                if generateParameters.toolCallPolicy.dispatch.contains(
+                                    .prefillResult),
+                                    dispatchedResults.count < calls.count,
+                                    speculativeDecoding == nil, draftKVCache == nil
+                                {
+                                    needsExecutionFence = true
+                                    try await conversation?.prefill(
+                                        dispatchedResults, before: calls[dispatchedResults.count],
+                                        into: kvCache, state: &lmState, model: model,
+                                        parameters: generateParameters.prefill,
+                                        policy: promptCachePolicy,
+                                        format: modelConfiguration.toolCallFormat
+                                    ) { messages in
+                                        try await processor.prepare(
+                                            input: UserInput(
+                                                chat: leadingMessages + messages,
+                                                processing: processing, tools: tools,
+                                                additionalContext: additionalContext))
+                                    }
+                                }
                             }
                         }
 
@@ -2213,6 +2329,55 @@ public final class ChatSession {
     public func clear() async {
         await cache.update { cache in
             cache = .empty
+        }
+    }
+
+    /// Prefill tool results while the calls after them still run.
+    ///
+    /// Use this when the application runs tools itself. After a response ends with
+    /// tool calls, pass the results that have returned, in call order, and the next
+    /// call still running. The session prefills the tokens a later result cannot
+    /// change, so the response that delivers every result prefills only the rest.
+    /// Send that response the same result messages.
+    ///
+    /// It prefills nothing when that is not safe: the conversation carries media, the
+    /// session uses speculative decoding, the response format keeps tokens the chat
+    /// template does not render, or the cache could not rewind the tokens. A response
+    /// in progress finishes first. See <doc:tool-dispatch>.
+    ///
+    /// - Returns: the number of tokens prefilled.
+    @discardableResult
+    public nonisolated(nonsending) func prefill(
+        toolResults results: [Chat.Message], before next: ToolCall
+    ) async throws -> Int {
+        guard speculativeDecoding == nil else { return 0 }
+        let results = SendableBox(results)
+        return try await cache.update {
+            [model, instructions, processing, tools, additionalContext, generateParameters]
+            cache in
+            guard case .kvcache(var stored) = cache, stored.draft == nil,
+                stored.main.plan == (try generateParameters.kvCachePlan())
+            else { return 0 }
+
+            let configuration = await model.configuration
+            let tokenizer = await model.tokenizer
+            let processor = await model.processor
+            let languageModel = await model.perform { SendableBox($0.model) }.consume()
+            let leadingMessages: [Chat.Message] = instructions.map { [.system($0)] } ?? []
+            defer { cache = .kvcache(stored) }
+            return try await stored.conversation?.prefill(
+                results.consume(), before: next, into: stored.main, state: &stored.state,
+                model: languageModel, parameters: generateParameters.prefill,
+                policy: PromptCacheReusePolicy(
+                    protocolRules: configuration.toolCallFormat?
+                        .promptCacheReuseRules(tokenizer: tokenizer) ?? []),
+                format: configuration.toolCallFormat
+            ) { messages in
+                try await processor.prepare(
+                    input: UserInput(
+                        chat: leadingMessages + messages, processing: processing, tools: tools,
+                        additionalContext: additionalContext))
+            } ?? 0
         }
     }
 

@@ -10,6 +10,7 @@ Common language model code.
 - <doc:kv-cache-quantization>
 - <doc:generation-observability>
 - <doc:steering>
+- <doc:tool-dispatch>
 
 ## Reranking
 

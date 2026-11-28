@@ -313,6 +313,38 @@ if let toolCall = detectedToolCall {
 }
 ```
 
+## Automatic Dispatch with ChatSession
+
+Pass `toolDispatch` and `ChatSession` runs each accepted call, adds the result,
+and lets the model answer it within the same response:
+
+```swift
+let session = ChatSession(
+    modelContainer,
+    generateParameters: .init(toolCallPolicy: .init(dispatch: [.whenWritten, .concurrent])),
+    tools: [weatherTool.schema],
+    toolDispatch: { call in try await runTool(call) })
+```
+
+With no `dispatch` options, calls run one at a time after the model step ends.
+
+- `.whenWritten` starts each call as soon as it is written, overlapping tools
+  with generation. A rejected call later in the step cancels the calls already
+  running, and the response throws `RejectedToolCallError`.
+- `.concurrent` runs a step's calls together and waits for the slowest, not the
+  sum. Use it only when no call depends on another's side effects.
+- `.prefillResult` prefills each result as soon as it returns, while later
+  calls still run, so the next step prefills only the last result. It is skipped
+  for media, speculative decoding, Harmony/Onyx, and caches that cannot rewind.
+- Results always enter the transcript in call order, after the model step that
+  wrote the calls. The KV cache only grows at its end, also with
+  `.prefillResult`.
+
+An app that runs tools itself (no `toolDispatch`) calls
+`try await session.prefill(toolResults: resultsSoFar, before: nextRunningCall)`
+after each result but the last, then sends all results with
+`streamDetails(to: results)` as usual. Send the same messages in the same order.
+
 ## Parser Protocol
 
 Custom formats can implement `ToolCallParser`:
