@@ -297,7 +297,7 @@ enum Raon1RDAKernels {
         let (batch, length, width) = (q.dim(0), q.dim(1), q.dim(2))
         return convolutionKernel(
             [q, k, v, state, weight],
-            template: [("P", width), ("KS", weight.dim(1)), ("L", length)],
+            template: [("P", width), ("KS", weight.dim(1))],
             grid: (3 * width, length, batch),
             threadGroup: (256, 1, 1),
             outputShapes: [q.shape, q.shape, q.shape],
@@ -312,6 +312,7 @@ enum Raon1RDAKernels {
                 const uint c = thread_position_in_grid.x;
                 const uint l = thread_position_in_grid.y;
                 const uint b = thread_position_in_grid.z;
+                const uint L = threads_per_grid.y;
                 constexpr int KEEP = KS - 1;
                 const uint part = c / P;
                 const uint cc = c - part * P;
