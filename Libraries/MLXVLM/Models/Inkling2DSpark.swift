@@ -270,7 +270,7 @@ public final class Inkling2DSparkDraftModel: Module, StatefulMTPDrafterModel,
     public var maximumBlockSize: Int? { configuration.blockSize }
     public let requiresSharedTargetKV = false
     public let requiresPromptPrefill = true
-    public let requiresGreedySampling = true
+    public let requiresGreedySampling = false
     public var targetLayerIds: [Int]? { configuration.targetLayerIDs }
 
     /// The draft ships beside the target's weights, which it reads only to fold its head.

@@ -126,9 +126,10 @@ with `<|end_message|>`, and the model answers in its next frame.
 Thinking Machines ship a DSpark draft in `mtp.safetensors`. With that file beside the
 weights, call `Inkling2DSparkRegistration.register()` and load the drafter from the
 model's directory with `MTPDrafterModelFactory.visionLanguage`. It drafts up to 7 tokens
-per round for greedy decoding. Every verify pass reads the experts of all its tokens, so
-measure on your machine: on an M6 Mac mini, 4-bit Mini decodes slower with it than
-without.
+per round, greedy or sampled. Every verify pass reads the experts of all its tokens, so
+measure on your machine: on an M6 Mac mini, 4-bit Mini decodes about 40 tokens per second
+without the draft and 35 with 2 drafts per round (`blockSize: 3`). The draft is faster only
+on repetitive text, such as counting.
 
 Images keep their native resolution, padded to 40-pixel blocks, and each block is
 one image token. Set `UserInput.Processing.maxPixels` to bound the image tokens.

@@ -14,6 +14,15 @@ public protocol LogitSampler {
     func sample(logits: MLXArray) -> MLXArray
 }
 
+/// A ``LogitSampler`` that can report the distribution it samples from.
+///
+/// Speculative sampling needs the target and draft distributions, not only their samples, to
+/// accept a draft with probability `min(1, p / q)`.
+public protocol LogitDistributionSampler: LogitSampler {
+    /// The float32 log probabilities that ``LogitSampler/sample(logits:)`` draws from.
+    func logProbabilities(logits: MLXArray) -> MLXArray
+}
+
 /// A `LogitProcessor` is an optional visitor of `logits`.
 ///
 /// The ``LogitProcessor`` is called with the input (prompt) before generating tokens:
@@ -502,7 +511,7 @@ public struct ArgMaxSampler: LogitSampler {
 /// Each filter operates on the full vocabulary in original token order, masking
 /// rejected tokens with `-inf`. This matches the composable filter chain in
 /// `mlx_lm.sample_utils.make_sampler`.
-public struct TopPSampler: LogitSampler {
+public struct TopPSampler: LogitDistributionSampler {
     let temp: MLXArray
     let topP: MLXArray?
     let topK: Int?
@@ -556,6 +565,20 @@ public struct TopPSampler: LogitSampler {
         }
     }
 
+    public func logProbabilities(logits: MLXArray) -> MLXArray {
+        var logprobs = logSoftmax(logits.asType(.float32))
+        if let topP {
+            logprobs = applyTopP(logprobs, topP: topP)
+        }
+        if let minP {
+            logprobs = applyMinP(logprobs, minP: minP)
+        }
+        if let topK {
+            logprobs = applyTopK(logprobs, topK: topK)
+        }
+        return logSoftmax(logprobs * (1 / temp))
+    }
+
     /// Keep tokens whose cumulative probability exceeds `1 - topP` (nucleus sampling).
     /// Matches `apply_top_p` from `mlx_lm/sample_utils.py`.
     private func applyTopP(_ logprobs: MLXArray, topP: MLXArray) -> MLXArray {
@@ -591,7 +614,7 @@ public struct TopPSampler: LogitSampler {
 }
 
 /// Sampler that uses `temperature` to sample the logits.
-public struct CategoricalSampler: LogitSampler {
+public struct CategoricalSampler: LogitDistributionSampler {
     let temp: MLXArray
     let randomState: MLXRandom.RandomState
 
@@ -606,6 +629,10 @@ public struct CategoricalSampler: LogitSampler {
         return withRandomState(randomState) {
             categorical(logits * (1 / temp))
         }
+    }
+
+    public func logProbabilities(logits: MLXArray) -> MLXArray {
+        logSoftmax(logits.asType(.float32) * (1 / temp))
     }
 }
 

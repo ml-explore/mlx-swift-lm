@@ -844,6 +844,30 @@ struct Inkling2SpeculativeDecodingTests {
         #expect(iterator.proposedCount > 0)
     }
 
+    @Test("The DSpark draft speculates at temperature 1")
+    func draftSamples() throws {
+        let model = try Inkling2ModelTests.makeModel()
+        let configuration = try JSONDecoder().decode(
+            Inkling2DSparkConfiguration.self, from: Data(Self.draftJSON.utf8))
+        let drafter = Inkling2DSparkDraftModel(configuration)
+        MLXRandom.seed(12)
+        var parameters = [String: MLXArray]()
+        for (key, value) in drafter.parameters().flattened() {
+            parameters[key] = MLXRandom.normal(value.shape) * 0.3
+        }
+        try drafter.update(
+            parameters: ModuleParameters.unflattened(parameters), verify: .noUnusedKeys)
+
+        var iterator = try MTPSpeculativeTokenIterator(
+            input: Self.prompt, mainModel: model, drafter: drafter,
+            parameters: .init(maxTokens: 20, temperature: 1, seed: 5), blockSize: 4)
+        let output = Array(AnyIterator { iterator.next() })
+
+        #expect(output.count == 20)
+        #expect(iterator.passthroughReason == nil)
+        #expect(iterator.proposedCount > 0)
+    }
+
     @Test("Folding hidden_out into the quantized head keeps the logit correction")
     func foldedHead() throws {
         let configuration = try JSONDecoder().decode(
