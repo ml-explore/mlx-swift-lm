@@ -446,9 +446,29 @@ public class DeepseekV3Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
     }
 
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        var newWeights = weights
+        // compressed-tensors int4: packed int32 words are MLX affine words, zero point 8.
+        var remapped = [String: MLXArray]()
+        for (key, value) in weights {
+            if key.hasSuffix("weight_shape") {
+                let base = String(key.dropLast("weight_shape".count))
+                guard let packed = weights[base + "weight_packed"],
+                    let scales = weights[base + "weight_scale"]
+                else { continue }
+                remapped[base + "weight"] = packed.view(dtype: .uint32)
+                remapped[base + "scales"] = scales
+                remapped[base + "biases"] = -8 * scales
+            } else if !(key.hasSuffix("weight_scale") || key.hasSuffix("weight_packed")) {
+                remapped[key] = value
+            }
+        }
+        let weights = remapped
+
+        var newWeights = [String: MLXArray]()
 
         func dequant(weight: MLXArray, scaleInv: MLXArray) -> MLXArray {
+            // Safetensors fp8 loads as raw uint8 bytes.
+            let isFP8 = weight.dtype == .uint8
+            let weight = isFP8 ? fromFP8(weight, dtype: .bfloat16) : weight
             let bs = 128
             let (m, n) = (weight.dim(0), weight.dim(1))
             let padBottom = (bs - m % bs) % bs
@@ -457,7 +477,8 @@ public class DeepseekV3Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
             var padded = padded(weight, widths: [.init((0, padBottom)), .init((0, padSide))])
             padded = padded.reshaped([(m + padBottom) / bs, bs, (n + padSide) / bs, bs])
             let scaled = padded * scaleInv[0..., .newAxis, 0..., .newAxis]
-            return scaled.reshaped([m + padBottom, n + padSide])[0 ..< m, 0 ..< n]
+            let result = scaled.reshaped([m + padBottom, n + padSide])[0 ..< m, 0 ..< n]
+            return isFP8 ? result.asType(.bfloat16) : result
         }
 
         for (key, value) in weights {
@@ -472,14 +493,16 @@ public class DeepseekV3Model: Module, LLMModel, KVCacheDimensionProvider, LoRAMo
             }
         }
 
+        // Stack the dequantized experts and drop the per-expert keys, as mlx-lm does.
         for l in 0 ..< args.numHiddenLayers {
             let prefix = "model.layers.\(l)"
             for (_, projName) in [("w1", "gate_proj"), ("w2", "down_proj"), ("w3", "up_proj")] {
                 for key in ["weight", "scales", "biases"] {
                     let firstKey = "\(prefix).mlp.experts.0.\(projName).\(key)"
-                    if weights[firstKey] != nil {
+                    if newWeights[firstKey] != nil {
                         let joined = (0 ..< (args.nRoutedExperts ?? 1)).map {
-                            weights["\(prefix).mlp.experts.\($0).\(projName).\(key)"]!
+                            newWeights.removeValue(
+                                forKey: "\(prefix).mlp.experts.\($0).\(projName).\(key)")!
                         }
                         newWeights["\(prefix).mlp.switch_mlp.\(projName).\(key)"] = stacked(joined)
                     }

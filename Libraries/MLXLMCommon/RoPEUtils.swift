@@ -295,6 +295,7 @@ public class YarnRoPE: Module, OffsetLayer, ArrayOffsetLayer {
 
     private let _mscale: Float
     private let _freqs: MLXArray
+    private let _inverseFreqs: MLXArray
 
     public init(
         dimensions: Int,
@@ -361,17 +362,30 @@ public class YarnRoPE: Module, OffsetLayer, ArrayOffsetLayer {
         let freqMask =
             1.0 - yarnLinearRampMask(minVal: Float(low), maxVal: Float(high), dim: dimensions / 2)
 
-        self._freqs = (freqInter * freqExtra) / (freqInter * freqMask + freqExtra * (1 - freqMask))
+        let freqs = (freqInter * freqExtra) / (freqInter * freqMask + freqExtra * (1 - freqMask))
+        self._freqs = freqs
+        self._inverseFreqs = -freqs
     }
 
     public func callAsFunction(_ x: MLXArray, offset: Int = 0) -> MLXArray {
+        self(x, offset: offset, scale: 1.0)
+    }
+
+    /// Rotate `x` with its positions multiplied by `scale`, or undo that rotation.
+    ///
+    /// With `inverse` the frequencies are negated and the input is divided by the YaRN
+    /// magnitude scale instead of multiplied, so a call with `inverse: true` undoes one with
+    /// the same `offset` and `scale`. Ported from `YarnRoPE.__call__` in mlx-lm `rope_utils.py`.
+    public func callAsFunction(
+        _ x: MLXArray, offset: Int, scale: Float, inverse: Bool = false
+    ) -> MLXArray {
         // "copy" of x as we are going to write through it and don't want to update
         // through the reference
         // https://github.com/ml-explore/mlx-swift/issues/364
         var x = x
         if _mscale != 1.0 {
             x = x[0..., .ellipsis]
-            x[.ellipsis, 0 ..< dimensions] *= _mscale
+            x[.ellipsis, 0 ..< dimensions] *= inverse ? 1 / _mscale : _mscale
         }
 
         return MLXFast.RoPE(
@@ -379,9 +393,9 @@ public class YarnRoPE: Module, OffsetLayer, ArrayOffsetLayer {
             dimensions: dimensions,
             traditional: traditional,
             base: nil,
-            scale: 1.0,
+            scale: scale,
             offset: offset,
-            freqs: self._freqs
+            freqs: inverse ? self._inverseFreqs : self._freqs
         )
     }
 
