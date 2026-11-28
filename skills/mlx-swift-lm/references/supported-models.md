@@ -76,6 +76,29 @@ LLMRegistry.glm4_9b_4bit          // mlx-community/GLM-4-9B-0414-4bit
 // Note: GLM4 uses special tool call format
 ```
 
+### Raon
+
+```swift
+// model_type: "raon1_mini"
+// KRAFTON/Raon-1-mini-mlx: 28.8B MoE, 4.3B active, NVFP4 experts
+// Note: Raon uses Qwen-style <think> reasoning and .xmlFunction tool calls
+```
+
+Set `GenerateParameters.reasoningEffort` to use a native steering level reported by
+`ModelContainer.supportedReasoningEfforts`. Leave it unset to use the checkpoint default.
+To turn thinking off, set `enable_thinking: false` in the template context and use `.off`
+for native steering. Changing the effort does not recompute the cached prefix.
+
+The optional `dflash2/` checkpoint supports greedy speculative decoding. Register it with
+`Raon1DFlash2Registration.register()` and load it through `MTPDrafterModelFactory`.
+Measure against plain decoding: the speed gain depends on draft acceptance.
+
+Generation uses the full output head by default. Set
+`GenerateParameters.logitsAccuracy = .allowApproximate` to use the 2-bit shortlist
+when the checkpoint ships `head_stage1_a2g64gm.safetensors`. It rescores 256 candidates
+with the full head. Other scores remain approximate, and the shortlist can miss
+tokens that the full head would rank higher.
+
 ### Mellum
 
 ```swift

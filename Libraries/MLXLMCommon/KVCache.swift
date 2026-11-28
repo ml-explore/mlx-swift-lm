@@ -2101,6 +2101,136 @@ public final class RewindableConvolutionCache: MambaCache {
     }
 }
 
+/// Cache of a gated delta layer that can take back its last short call.
+///
+/// Slot 0 holds the convolution state `[B, K - 1, C]` and slot 1 the recurrent state, as in
+/// ``MambaCache``. A call of at most ``rollbackCapacity`` positions also keeps the states before
+/// it and its inputs, without copies: arrays are immutable. `trim(_:)` replays the recurrence
+/// over the positions it keeps, so a speculative round can reject the tail of its verify block.
+/// Positions of earlier calls cannot be taken back. A saved prompt cache restores as a
+/// ``MambaCache``.
+public final class RewindableGatedDeltaCache: MambaCache {
+    /// What `trim(_:)` needs to take back the last call.
+    private struct Replay {
+        let convolutionState: MLXArray?
+        let recurrentState: MLXArray?
+        /// Channel parts in the order of the convolution state, `[B, L, Cᵢ]` each.
+        let convolutionInputs: [MLXArray]
+        let q: MLXArray
+        let k: MLXArray
+        let v: MLXArray
+        let g: MLXArray
+        let beta: MLXArray
+
+        var length: Int { q.dim(1) }
+
+        func prefix(_ length: Int) -> Replay {
+            Replay(
+                convolutionState: convolutionState, recurrentState: recurrentState,
+                convolutionInputs: convolutionInputs.map { $0[0..., ..<length] },
+                q: q[0..., ..<length], k: k[0..., ..<length], v: v[0..., ..<length],
+                g: g[0..., ..<length], beta: beta[0..., ..<length])
+        }
+    }
+
+    public let rollbackCapacity: Int
+    private var replay: Replay?
+
+    public init(rollbackCapacity: Int = 16) {
+        precondition(rollbackCapacity > 0)
+        self.rollbackCapacity = rollbackCapacity
+        super.init()
+    }
+
+    /// Stores the states after a call and, for a call of at most ``rollbackCapacity`` positions,
+    /// what `trim(_:)` needs to take it back.
+    ///
+    /// `q`, `k`, `v`, `g`, and `beta` are inputs to
+    /// ``gatedDeltaRecurrence(q:k:v:g:beta:state:mask:useKernel:)``.
+    ///
+    /// - Parameters:
+    ///   - convolutionState: the convolution state after the call.
+    ///   - recurrentState: the recurrent state after the call.
+    ///   - convolutionInputs: the call's convolution inputs, channel parts in the order of the
+    ///     convolution state.
+    ///   - q: the query tensor.
+    ///   - k: the key tensor.
+    ///   - v: the value tensor.
+    ///   - g: the decay gate.
+    ///   - beta: the update gate.
+    public func update(
+        convolutionState: MLXArray, recurrentState: MLXArray, convolutionInputs: [MLXArray],
+        q: MLXArray, k: MLXArray, v: MLXArray, g: MLXArray, beta: MLXArray
+    ) {
+        let length = q.dim(1)
+        replay =
+            length <= rollbackCapacity
+            ? Replay(
+                convolutionState: self[0], recurrentState: self[1],
+                convolutionInputs: convolutionInputs, q: q, k: k, v: v, g: g, beta: beta)
+            : nil
+        self[0] = convolutionState
+        self[1] = recurrentState
+        offset += length
+        advance(length)
+    }
+
+    public override var isTrimmable: Bool { true }
+
+    public override func isTrimmable(after positions: Int) -> Bool {
+        positions >= 0 && positions <= rollbackCapacity
+    }
+
+    public override func innerState() -> [MLXArray] {
+        let state = super.innerState()
+        guard let replay else { return state }
+        return state + [replay.convolutionState, replay.recurrentState].compactMap { $0 }
+            + replay.convolutionInputs + [replay.q, replay.k, replay.v, replay.g, replay.beta]
+    }
+
+    public override var maxTrimCount: Int { min(offset, replay?.length ?? 0) }
+
+    fileprivate func canRewind(_ positions: Int) -> Bool {
+        positions >= 0 && positions <= maxTrimCount
+    }
+
+    @discardableResult
+    public override func trim(_ n: Int) -> Int {
+        guard n > 0, canRewind(n), let replay, let convolutionState = self[0] else { return 0 }
+        let kept = replay.length - n
+        let width = convolutionState.dim(1)
+        let inputs = concatenated(replay.convolutionInputs, axis: -1)
+        let signal = concatenated(
+            [
+                replay.convolutionState
+                    ?? MLXArray.zeros(
+                        [inputs.dim(0), width, inputs.dim(2)], dtype: convolutionState.dtype),
+                inputs,
+            ], axis: 1)
+        self[0] = contiguous(signal[0..., kept ..< (kept + width)])
+        if kept == 0 {
+            self[1] = replay.recurrentState
+        } else {
+            let kept = replay.prefix(kept)
+            self[1] =
+                gatedDeltaRecurrence(
+                    q: kept.q, k: kept.k, v: kept.v, g: kept.g, beta: kept.beta,
+                    state: kept.recurrentState
+                ).1
+        }
+        self.replay = kept == 0 ? nil : replay.prefix(kept)
+        offset -= n
+        return n
+    }
+
+    public override func copy() -> any KVCache {
+        let copy = RewindableGatedDeltaCache(rollbackCapacity: rollbackCapacity)
+        copyContents(to: copy)
+        copy.replay = replay
+        return copy
+    }
+}
+
 /// Composite cache that manages multiple sub-caches
 public class CacheList: BaseKVCache {
     public override class var serializedClassName: String? { "CacheList" }
@@ -2788,6 +2918,9 @@ public func trimPromptCache(_ cache: [KVCache], numTokens: Int) -> Int {
 
 private func canRewindConvolutionCache(_ cache: KVCache, positions: Int) -> Bool {
     if let cache = cache as? RewindableConvolutionCache {
+        return cache.canRewind(positions)
+    }
+    if let cache = cache as? RewindableGatedDeltaCache {
         return cache.canRewind(positions)
     }
     if let cache = cache as? CacheList {

@@ -98,6 +98,30 @@ func testNativeHybridRewindChecksTheWrittenWindow(length: Int, convolutionFirst:
     }
 }
 
+@Test func testGatedDeltaCacheStatusIncludesReplayBuffers() throws {
+    let cache = RewindableGatedDeltaCache(rollbackCapacity: 1)
+    let convolution = MLXArray.zeros([1, 2, 3])
+    let recurrent = MLXArray.zeros([1, 1, 1, 1])
+    cache[0] = convolution
+    cache[1] = recurrent
+
+    let input = MLXArray.ones([1, 1, 1])
+    let newConvolution = MLXArray.ones(like: convolution)
+    let newRecurrent = MLXArray.ones(like: recurrent)
+    cache.update(
+        convolutionState: newConvolution, recurrentState: newRecurrent,
+        convolutionInputs: [input, input, input],
+        q: input, k: input, v: input, g: input, beta: input)
+
+    let status = try #require(kvCacheLayerStatuses(cache: [cache], configuration: nil).first)
+    let stateBytes = convolution.nbytes + recurrent.nbytes
+    #expect(status.memoryBytes == 2 * stateBytes + 8 * input.nbytes)
+
+    #expect(cache.trim(1) == 1)
+    let trimmed = try #require(kvCacheLayerStatuses(cache: [cache], configuration: nil).first)
+    #expect(trimmed.memoryBytes == stateBytes)
+}
+
 // MARK: - Helper
 
 private func tempURL() -> URL {
@@ -321,6 +345,35 @@ private final class ProtocolDefaultTrimmabilityCache: KVCache {
             #expect(lhs.metaState == rhs.metaState)
             assertArraysClose(lhs.state, rhs.state)
         }
+    }
+
+    @Test func testPromptCacheStateDropsRequestOptions() throws {
+        let cache = KVCacheSimple()
+        _ = cache.update(
+            keys: MLXArray.ones([1, 1, 1, 4]),
+            values: MLXArray.zeros([1, 1, 1, 4]))
+        let anchorKey = LMOutput.Key<MLXArray>("test.anchor")
+        let effortOnly = LMOutput.State?.none.applying(.off, logitsAccuracy: .allowApproximate)
+        var withAnchor = try #require(effortOnly)
+        withAnchor[anchorKey] = MLXArray([Int32(4)])
+        let effortURL = tempURL()
+        let anchorURL = tempURL()
+        defer {
+            try? FileManager.default.removeItem(at: effortURL)
+            try? FileManager.default.removeItem(at: anchorURL)
+        }
+
+        try savePromptCache(url: effortURL, cache: [cache], state: effortOnly)
+        try savePromptCache(url: anchorURL, cache: [cache], state: withAnchor)
+        let effortSnapshot = try loadPromptCacheSnapshot(url: effortURL)
+        let anchorSnapshot = try loadPromptCacheSnapshot(url: anchorURL)
+
+        #expect(effortOnly?[reasoningEffortKey] == .off)
+        #expect(effortSnapshot.state == nil)
+        #expect(anchorSnapshot.state?[anchorKey] != nil)
+        #expect(anchorSnapshot.state?[reasoningEffortKey] == nil)
+        #expect(anchorSnapshot.state?[logitsAccuracyKey] == nil)
+        #expect(effortOnly.applying(nil) == nil)
     }
 
     @Test func testPromptCacheStateRoundTrip() throws {

@@ -56,6 +56,9 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     /// its first proposal. Qwen's private decoder cache requires this.
     var requiresPromptPrefill: Bool { get }
 
+    /// Whether the compatible target can collect prompt features in chunks.
+    var supportsChunkedPromptPrefill: Bool { get }
+
     /// Whether this drafter is currently supported only for greedy decoding.
     /// This keeps stochastic generation on the ordinary target path until a
     /// probability-ratio acceptance sampler is available.
@@ -77,9 +80,16 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     /// taps recorded in their checkpoint configuration.
     var targetLayerIds: [Int]? { get }
 
+    /// The most recent target positions the drafter attends, or `nil` for all of them.
+    ///
+    /// A prompt prefill or a warm continuation then needs the hidden states of only the last
+    /// this-many prompt positions, and a target may emit just those.
+    var targetContextLength: Int? { get }
+
     /// K-step drafting from a constant position.
     ///
-    /// Returns the proposed tokens as a `[B, blockSize - 1]` MLXArray. The
+    /// Returns the proposed tokens as a `[B, n]` MLXArray, `1 <= n <= blockSize - 1`: a
+    /// drafter may stop early when its later tokens are unlikely to be accepted. The
     /// drafter holds no transient round-state on the model instance — every
     /// per-round input is threaded as a method argument.
     ///
@@ -101,10 +111,9 @@ public protocol MTPDrafterModel: BaseLanguageModel {
     ///     Passed as a Swift `Int` rather than an `MLXArray` to avoid the
     ///     `.item()` round-trip that would otherwise stall the GPU per
     ///     speculation round.
-    ///   - blockSize: Total tokens in the round (the drafter returns
-    ///     `blockSize - 1`; the bonus token is implicit).
+    ///   - blockSize: Maximum tokens in the round, including the implicit bonus token.
     ///   - sampler: `LogitSampler` to apply to each step's logits.
-    /// - Returns: `[B, blockSize - 1]` token array.
+    /// - Returns: `[B, n]` token array, `1 <= n <= blockSize - 1`.
     func draftBlock(
         target: any LanguageModel,
         lastToken: MLXArray,
@@ -125,8 +134,10 @@ extension MTPDrafterModel {
     public var maximumBlockSize: Int? { nil }
     public var requiresSharedTargetKV: Bool { true }
     public var requiresPromptPrefill: Bool { false }
+    public var supportsChunkedPromptPrefill: Bool { false }
     public var requiresGreedySampling: Bool { false }
     public var targetLayerIds: [Int]? { nil }
+    public var targetContextLength: Int? { nil }
 }
 
 /// Target-side capability for rewinding an in-place speculative verify pass.
@@ -432,6 +443,11 @@ public let mtpEmitFlagKey = LMOutput.Key<Bool>("mtp.emitDrafterState")
 /// This is used by DFlash/DSpark-style drafters. An absent value preserves
 /// the target's ordinary MTP hidden-state behavior.
 public let mtpTargetLayerIdsKey = LMOutput.Key<[Int]>("mtp.targetLayerIds")
+
+/// The drafter's ``MTPDrafterModel/targetContextLength``, set with ``mtpTargetLayerIdsKey``.
+///
+/// A target that emits prompt hidden states may emit only the last this-many positions.
+public let mtpTargetContextLengthKey = LMOutput.Key<Int>("mtp.targetContextLength")
 
 /// Requests a recurrent-cache checkpoint after this many verification input
 /// tokens. Hybrid Qwen models use `1` for MTP-1 so a rejected draft restores

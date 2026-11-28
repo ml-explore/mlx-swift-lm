@@ -116,6 +116,14 @@ DSpark currently requires greedy decoding (`temperature: 0`) so verification
 remains exact. Pair each draft with the target named in its model card; loading
 or running incompatible architecture dimensions fails closed.
 
+### Raon-1 mini DFlash2 speculative decoding
+
+Use the same MTP generation path with `await Raon1DFlash2Registration.register()`
+and load the drafter from the Raon checkpoint's `dflash2/` directory. DFlash2
+uses greedy decoding (`temperature: 0`). Start with `blockSize: 4` and measure
+against plain decoding on your workload. The drafter can shorten a proposal
+when confidence drops. Speed depends on how many draft tokens the target accepts.
+
 ## Evaluation Flow
 
 - Load the Model

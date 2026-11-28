@@ -16,6 +16,7 @@ private let preservedStateKey = LMOutput.Key<Int>("tests.mtp.preservedState")
 /// real drafter.
 private final class MockDrafter: Module, StatefulMTPDrafterModel {
     private(set) var draftBlockCallCount = 0
+    var proposalLimit: Int?
     var draftedTokenValue: Int32
     let requiresGreedySampling: Bool
     let compatibilityError: MTPDrafterCompatibilityError?
@@ -89,10 +90,11 @@ private final class MockDrafter: Module, StatefulMTPDrafterModel {
         receivedPositionDeltaValues.append(positionDeltas?.item(Int.self))
         let mutableCache = state.cache.first as? MutableOffsetKVCache
         receivedCacheOffsets.append(mutableCache?.offset)
-        mutableCache?.offset += blockSize - 1
+        let count = min(proposalLimit ?? blockSize - 1, blockSize - 1)
+        mutableCache?.offset += count
         let batch = lastToken.dim(0)
-        let vals = Array(repeating: draftedTokenValue, count: (blockSize - 1) * batch)
-        return MLXArray(vals, [batch, blockSize - 1])
+        let vals = Array(repeating: draftedTokenValue, count: count * batch)
+        return MLXArray(vals, [batch, count])
     }
 }
 
@@ -499,6 +501,27 @@ func testMTPIteratorRejectsBlockDiffusionTarget() {
     } catch {
         Issue.record("Unexpected error: \(error)")
     }
+}
+
+@Test
+func testMTPVerifiesOnlyTheProposedPrefix() throws {
+    let main = MockMainModel(nextLogitTokens: [7, 7, 9])
+    let drafter = MockDrafter()
+    drafter.proposalLimit = 1
+
+    var iterator = try MTPSpeculativeTokenIterator(
+        input: LMInput(tokens: MLXArray([Int32(1)])),
+        mainModel: main,
+        drafter: drafter,
+        parameters: GenerateParameters(maxTokens: 8, temperature: 0),
+        blockSize: 4)
+
+    #expect(iterator.next() == 7)
+    #expect(iterator.next() == 7)
+    #expect(iterator.next() == 9)
+    #expect(iterator.proposedCount == 1)
+    #expect(iterator.acceptedCount == 1)
+    #expect(iterator.speculativeDecodingTelemetry?.targetVerifiedTokenCount == 2)
 }
 
 @Test

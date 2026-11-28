@@ -250,6 +250,17 @@ public struct GenerateParameters: Sendable {
     /// block diffusion still uses it to initialize denoising canvases.
     public var seed: UInt64?
 
+    /// The reasoning effort of a model that steers its own reasoning, or `nil` for the model's
+    /// default. Models without native steering ignore it. See
+    /// ``LanguageModel/supportedReasoningEfforts`` for supported names.
+    ///
+    /// Only newly evaluated tokens use this value. Rebuild the prompt cache to apply a new
+    /// effort to an already cached prefix.
+    public var reasoningEffort: ReasoningEffort?
+
+    /// Whether a model may use approximate output logits for generation.
+    public var logitsAccuracy: LogitsAccuracy = .exact
+
     /// Penalty factor for repeating tokens
     public var repetitionPenalty: Float?
 
@@ -1212,7 +1223,8 @@ public struct TokenIterator: TokenIteratorProtocol {
         let cacheStorage = try kvCachePlan.validated(cacheStorage)
 
         self.model = model
-        self.state = state
+        self.state = state.applying(
+            parameters.reasoningEffort, logitsAccuracy: parameters.logitsAccuracy)
         self.y = input.text
         self.cacheStorage = cacheStorage
 
@@ -1659,7 +1671,8 @@ public struct SpeculativeTokenIterator: TokenIteratorProtocol {
 
         self.mainCacheStorage = mainCacheStorage
         self.draftCacheStorage = draftCacheStorage
-        self.state = mainState
+        self.state = mainState.applying(
+            parameters.reasoningEffort, logitsAccuracy: parameters.logitsAccuracy)
 
         self.sampler = parameters.sampler()
         self.logProbabilityTopK = parameters.logProbabilities.map { Swift.max($0, 0) }

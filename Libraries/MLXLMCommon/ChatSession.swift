@@ -480,6 +480,8 @@ public final class ChatSession {
     private let cache: SerialAccessContainer<Cache>
     private let loadedDraftModel: SerialAccessContainer<ModelContainer?>
     public var processing: UserInput.Processing
+    /// Parameters for the next response. Changing native reasoning effort does not recompute
+    /// the cached prefix. Start a session from history to evaluate the full prefix at a new effort.
     public var generateParameters: GenerateParameters
 
     /// Optional behavioral components (e.g. a custom ``LogitProcessor``) applied
