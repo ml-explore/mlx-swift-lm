@@ -464,7 +464,40 @@ public final class Inkling2DSparkDraftModel: Module, StatefulMTPDrafterModel,
         }
         weights["markov_head.fold.weight"] = concatenated(foldWeights)
         weights["markov_head.fold.bias"] = concatenated(foldBiases)
+
+        quantizeDraftLayers(&weights, &checkpoint)
         checkpoint.weights = weights
         return checkpoint
     }
+
+    /// The draft's dense layers and folded head in ``draftQuantization``. Only drafting reads
+    /// them and the target verifies every draft, so this changes acceptance, never the output.
+    private func quantizeDraftLayers(
+        _ weights: inout [String: MLXArray], _ checkpoint: inout ModelCheckpoint
+    ) {
+        let quantization = Self.draftQuantization
+        var perLayer = checkpoint.perLayerQuantization?.perLayerQuantization ?? [:]
+        let paths = weights.compactMap { key, value -> String? in
+            guard key.hasSuffix(".weight"), value.ndim == 2,
+                key.hasPrefix("layers.") || key == "markov_head.fold.weight",
+                value.dim(1) % quantization.groupSize == 0
+            else { return nil }
+            return String(key.dropLast(".weight".count))
+        }
+        for path in paths {
+            let (weight, scales, biases) = MLX.quantized(
+                weights["\(path).weight"]!, groupSize: quantization.groupSize,
+                bits: quantization.bits)
+            weights["\(path).weight"] = weight
+            weights["\(path).scales"] = scales
+            weights["\(path).biases"] = biases
+            perLayer[path] = .quantize(quantization)
+        }
+        checkpoint.perLayerQuantization = .init(
+            quantization: checkpoint.perLayerQuantization?.quantization,
+            perLayerQuantization: perLayer)
+    }
+
+    /// 8 bits keep the acceptance of the bfloat16 draft; 4 bits lower it.
+    static let draftQuantization = BaseConfiguration.Quantization(groupSize: 64, bits: 8)
 }

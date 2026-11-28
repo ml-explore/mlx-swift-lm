@@ -873,6 +873,36 @@ struct Inkling2SpeculativeDecodingTests {
         #expect(maxDifference(actual, expected) < 5e-2)
         #expect(checkpoint.weights["lm_head.weight"] == nil, "the head stays the target's")
     }
+
+    @Test("The draft layers load in 8 bits and the norms stay as they are")
+    func quantizedDraftLayers() throws {
+        let configuration = try JSONDecoder().decode(
+            Inkling2DSparkConfiguration.self, from: Data(Self.draftJSON.utf8))
+        let drafter = Inkling2DSparkDraftModel(configuration)
+        MLXRandom.seed(14)
+        let projection = MLXRandom.normal([64, 64]) * 0.3
+        let norm = MLXRandom.normal([64])
+        let checkpoint = try drafter.prepareCheckpoint(
+            ModelCheckpoint(weights: [
+                "lm_head.weight": MLXRandom.normal([50, 64]),
+                "markov_head.hidden_out.weight": MLXRandom.normal([64, 8]),
+                "markov_head.hidden_out.bias": MLXRandom.normal([64]),
+                "layers.0.self_attn.q_proj.weight": projection,
+                "layers.0.input_layernorm.weight": norm,
+            ]))
+
+        let weights = checkpoint.weights
+        let scales = try #require(weights["layers.0.self_attn.q_proj.scales"])
+        let restored = dequantized(
+            weights["layers.0.self_attn.q_proj.weight"]!, scales: scales,
+            biases: weights["layers.0.self_attn.q_proj.biases"], groupSize: 64, bits: 8)
+        #expect(maxDifference(restored, projection) < 1e-2)
+        #expect(
+            checkpoint.perLayerQuantization?.quantization(layer: "layers.0.self_attn.q_proj")?
+                .bits == 8)
+        #expect(weights["layers.0.input_layernorm.weight"].map { maxDifference($0, norm) } == 0)
+        #expect(weights["layers.0.input_layernorm.scales"] == nil)
+    }
 }
 
 // MARK: - Stream protocol
